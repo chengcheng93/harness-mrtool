@@ -1,13 +1,24 @@
 import { isSea } from "node:sea";
 
+import packageMetadata from "../package.json" with { type: "json" };
+
 import {
+  createFailureOutput,
   createSuccessOutput,
   serializeOutput,
 } from "./contracts/output.ts";
+import { type FailureCode, isToolError, ToolError } from "./contracts/errors.ts";
+import { exitCodeFor } from "./contracts/exit-codes.ts";
+import { canonicalizeJson, sha256Utf8 } from "./contracts/jcs.ts";
+import { loadTemplateBundle } from "./bundle/load.ts";
 import { normalizeAndValidateRequest } from "./input/normalize.ts";
 import { normalizeRuntimeArguments } from "./runtime-arguments.ts";
 
 declare const __HARNESS_MRTOOL_VERSION__: string;
+
+const cliVersion = typeof __HARNESS_MRTOOL_VERSION__ === "string"
+  ? __HARNESS_MRTOOL_VERSION__
+  : packageMetadata.version;
 
 interface JsonResult {
   readonly ok: boolean;
@@ -34,6 +45,17 @@ function fail(message: string, output: string | undefined): void {
   process.exitCode = 2;
 }
 
+function writeFailure(error: ToolError<FailureCode>): void {
+  process.stdout.write(serializeOutput(createFailureOutput(
+    { cliVersion },
+    error,
+  )));
+  process.exitCode = exitCodeFor({
+    code: error.code,
+    remoteWriteState: "not-attempted",
+  });
+}
+
 function runContractProbe(): void {
   let validOutputAccepted = false;
   let invalidOutputRejected = false;
@@ -43,7 +65,7 @@ function runContractProbe(): void {
   try {
     const serialized = serializeOutput(
       createSuccessOutput(
-        { cliVersion: __HARNESS_MRTOOL_VERSION__ },
+        { cliVersion },
         { data: { contractProbe: true } },
       ),
     );
@@ -60,7 +82,7 @@ function runContractProbe(): void {
 
     try {
       createSuccessOutput({
-        cliVersion: __HARNESS_MRTOOL_VERSION__,
+        cliVersion,
         update: { checked: "yes" },
       } as never);
     } catch (error) {
@@ -119,7 +141,7 @@ function runContractProbe(): void {
     ok: true,
     code: "CONTRACT_PROBE_OK",
     sea: isSea(),
-    version: __HARNESS_MRTOOL_VERSION__,
+    version: cliVersion,
     validOutputAccepted,
     invalidOutputRejected,
     requestValidAccepted,
@@ -127,10 +149,69 @@ function runContractProbe(): void {
   });
 }
 
-function main(arguments_: readonly string[]): void {
+async function runBundleValidation(bundleDirectory: string): Promise<void> {
+  try {
+    const bundle = await loadTemplateBundle(bundleDirectory);
+    const bundleHash = sha256Utf8(`${canonicalizeJson(bundle.manifest)}\n`);
+    process.stdout.write(serializeOutput(createSuccessOutput(
+      {
+        cliVersion,
+        versions: {
+          templateVersion: bundle.manifest.version,
+          bundleHash,
+          inputSchema: bundle.manifest.inputSchema,
+          policySchema: bundle.manifest.policySchema,
+        },
+      },
+      {
+        message: "Template bundle validation passed",
+        data: {
+          bundleId: bundle.manifest.bundleId,
+          payloadCount: bundle.manifest.files.length,
+        },
+      },
+    )));
+  } catch (error) {
+    const failure = isToolError(error, "TEMPLATE_ERROR")
+      ? error
+      : new ToolError("INTERNAL_ERROR", "Template bundle validation failed safely", {
+          field: null,
+          expected: "a verifiable template bundle",
+          actual: "an unexpected internal validation failure",
+          safeNextStep: "Retry with a complete verified Bundle or report the internal failure.",
+        });
+    writeFailure(failure);
+  }
+}
+
+async function main(arguments_: readonly string[]): Promise<void> {
   const outputIndex = arguments_.indexOf("--output");
   const output = outputIndex >= 0 ? arguments_[outputIndex + 1] : undefined;
   const command = arguments_.find((argument) => !argument.startsWith("-"));
+
+  if (command === "internal") {
+    if (
+      arguments_.length === 3 &&
+      arguments_[0] === "internal" &&
+      arguments_[1] === "validate-bundle" &&
+      typeof arguments_[2] === "string" &&
+      arguments_[2] !== ""
+    ) {
+      await runBundleValidation(arguments_[2]);
+      return;
+    }
+    writeFailure(new ToolError(
+      "INPUT_ERROR",
+      "Invalid internal validate-bundle arguments",
+      {
+        field: "arguments",
+        expected: ["internal", "validate-bundle", "<directory>"],
+        actual: "invalid command shape",
+        safeNextStep: "Use: harness-mrtool internal validate-bundle <directory>",
+      },
+    ));
+    return;
+  }
 
   if (command !== "self-test") {
     fail("Usage: harness-mrtool self-test --output json", output);
@@ -149,8 +230,8 @@ function main(arguments_: readonly string[]): void {
     ok: true,
     code: "OK",
     sea: isSea(),
-    version: __HARNESS_MRTOOL_VERSION__,
+    version: cliVersion,
   });
 }
 
-main(normalizeRuntimeArguments(process.argv));
+void main(normalizeRuntimeArguments(process.argv));

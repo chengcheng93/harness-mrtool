@@ -1,0 +1,42 @@
+id: code
+requiredBaseFields:
+  - changes.technicalChanges
+  - risk.compatibilityImpact
+requiredFieldIds: []
+requiredCheckboxIds:
+  - local-build
+  - unit-tests
+  - integration-tests
+  - core-behavior
+constraints:
+  - verification-evidence-state-required
+matchRules:
+  paths:
+    - src/**
+    - test/**
+    - tests/**
+  extensions:
+    - .c
+    - .cc
+    - .cpp
+    - .cxx
+    - .h
+    - .hh
+    - .hpp
+    - .hxx
+    - .java
+    - .js
+    - .jsx
+    - .mjs
+    - .mts
+    - .py
+    - .qml
+    - .rs
+    - .ts
+    - .tsx
+suggestedTitleTypes:
+  - feat
+  - fix
+  - test
+  - refactor
+  - perf

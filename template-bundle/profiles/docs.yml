@@ -1,0 +1,20 @@
+id: docs
+requiredBaseFields: []
+requiredFieldIds:
+  - docs.target-audience
+  - docs.content-impact
+requiredCheckboxIds:
+  - docs-links-format
+constraints:
+  - documentation-change-required
+matchRules:
+  paths:
+    - docs/**
+    - README*
+    - CHANGELOG*
+    - .gitlab/*_templates/**
+  extensions:
+    - .md
+    - .mdx
+suggestedTitleTypes:
+  - docs

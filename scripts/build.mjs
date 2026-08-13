@@ -33,6 +33,7 @@ export function createApplicationBuildOptions(version) {
     outfile: outputPath,
     bundle: true,
     packages: "bundle",
+    mainFields: ["module", "main"],
     platform: "node",
     format: "cjs",
     target: "node24.16",

@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "titleTypes": [
+    "feat",
+    "fix",
+    "docs",
+    "test",
+    "refactor",
+    "perf",
+    "build",
+    "ci",
+    "chore"
+  ],
+  "fields": [
+    {
+      "id": "docs.target-audience",
+      "profile": "docs",
+      "h3": "Target Audience",
+      "sectionSlot": "motivation",
+      "type": "non-empty-string-list",
+      "cardinality": { "min": 1 },
+      "defaultRequired": true,
+      "order": 1
+    },
+    {
+      "id": "docs.content-impact",
+      "profile": "docs",
+      "h3": "Content Impact",
+      "sectionSlot": "changes",
+      "type": "non-empty-string-list",
+      "cardinality": { "min": 1 },
+      "defaultRequired": true,
+      "order": 2
+    },
+    {
+      "id": "ops.affected-environments",
+      "profile": "ops",
+      "h3": "Affected Environments",
+      "sectionSlot": "impact",
+      "type": "non-empty-enum-or-string-list",
+      "cardinality": { "min": 1 },
+      "defaultRequired": true,
+      "order": 3
+    },
+    {
+      "id": "ops.deployment-plan",
+      "profile": "ops",
+      "h3": "Deployment Plan",
+      "sectionSlot": "changes",
+      "type": "non-empty-step-list",
+      "cardinality": { "min": 1 },
+      "defaultRequired": true,
+      "order": 4
+    },
+    {
+      "id": "ops.configuration-compatibility",
+      "profile": "ops",
+      "h3": "Configuration Compatibility",
+      "sectionSlot": "risk",
+      "type": "non-empty-string-list",
+      "cardinality": { "min": 1 },
+      "defaultRequired": true,
+      "order": 5
+    }
+  ]
+}

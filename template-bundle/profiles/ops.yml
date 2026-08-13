@@ -1,0 +1,27 @@
+id: ops
+requiredBaseFields:
+  - risk.rollbackPlan
+requiredFieldIds:
+  - ops.affected-environments
+  - ops.deployment-plan
+  - ops.configuration-compatibility
+requiredCheckboxIds:
+  - deployment-pipeline
+constraints:
+  - deployment-evidence-state-required
+matchRules:
+  paths:
+    - .github/**
+    - .gitlab-ci.yml
+    - .gitlab/ci/**
+    - Dockerfile*
+    - docker-compose*.yml
+    - deploy/**
+    - helm/**
+    - k8s/**
+  extensions:
+    - .dockerfile
+suggestedTitleTypes:
+  - build
+  - ci
+  - chore
