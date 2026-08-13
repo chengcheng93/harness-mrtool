@@ -8,12 +8,21 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import test from "node:test";
 
 // The receipt helper is JavaScript so it can run before TypeScript is compiled.
 // @ts-expect-error The receipt helper intentionally has no declaration file.
-import { createSeaBuildReceipt, verifySeaBuildReceipt, writeSeaBuildReceipt } from "../../scripts/sea-build-receipt.mjs";
+import { collectSeaBuildInputs, createSeaBuildReceipt, verifySeaBuildReceipt, writeSeaBuildReceipt } from "../../scripts/sea-build-receipt.mjs";
+
+test("tracks embedded schemas as SEA build inputs", () => {
+  const repositoryRoot = join(import.meta.dirname, "../..");
+  const inputs = collectSeaBuildInputs(repositoryRoot).map((path: string) =>
+    relative(repositoryRoot, path).replaceAll("\\", "/"),
+  );
+
+  assert.equal(inputs.includes("schemas/output-v1.schema.json"), true);
+});
 
 function createFixture(context: test.TestContext) {
   const fixtureDirectory = mkdtempSync(join(tmpdir(), "harness-sea-receipt-"));

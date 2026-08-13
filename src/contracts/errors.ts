@@ -27,6 +27,8 @@ export type ErrorCode = (typeof ERROR_CODES)[number];
 export type ResultCode = "OK" | ErrorCode;
 export type FailureCode = Exclude<ErrorCode, "UPDATE_CHECK_WARNING">;
 
+const toolErrorInstances = new WeakSet<object>();
+
 export interface ErrorDetails {
   readonly field: string | null;
   readonly expected: JsonValue;
@@ -74,6 +76,7 @@ export class ToolError<Code extends ErrorCode = ErrorCode> extends Error {
     this.name = "ToolError";
     this.code = code;
     this.details = normalizeDetails(details);
+    toolErrorInstances.add(this);
   }
 }
 
@@ -82,15 +85,20 @@ export function isToolError<Code extends ErrorCode = ErrorCode>(
   code?: Code,
   messagePattern?: RegExp,
 ): error is ToolError<Code> {
-  if (!(error instanceof ToolError)) {
+  if (
+    (typeof error !== "object" && typeof error !== "function") ||
+    error === null ||
+    !toolErrorInstances.has(error)
+  ) {
     return false;
   }
-  if (code !== undefined && error.code !== code) {
+  const brandedError = error as ToolError;
+  if (code !== undefined && brandedError.code !== code) {
     return false;
   }
   if (messagePattern !== undefined) {
     messagePattern.lastIndex = 0;
-    return messagePattern.test(error.message);
+    return messagePattern.test(brandedError.message);
   }
   return true;
 }

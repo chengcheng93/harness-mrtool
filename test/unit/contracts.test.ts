@@ -195,7 +195,7 @@ test("ToolError and failure factory reject forged unknown codes", () => {
         message: "Unknown",
         details,
       } as never),
-    /failure code/i,
+    /ToolError instance/,
   );
 });
 
@@ -242,6 +242,57 @@ test("success output fills every stable field with deterministic defaults", () =
     error: null,
     data: { iid: 51 },
   });
+});
+
+for (const [description, context] of [
+  [
+    "a non-boolean update flag",
+    { ...DEFAULT_CONTEXT, update: { checked: "yes" } },
+  ],
+  [
+    "an unknown remote-write state",
+    {
+      ...DEFAULT_CONTEXT,
+      remoteWrite: { state: "bogus", operations: [] },
+    },
+  ],
+  [
+    "a non-string warning message",
+    {
+      ...DEFAULT_CONTEXT,
+      warnings: [{ code: "UPDATE_CHECK_WARNING", message: 42 }],
+    },
+  ],
+  [
+    "an extra version field",
+    {
+      ...DEFAULT_CONTEXT,
+      versions: { templateVersion: "1.0.0", unexpected: true },
+    },
+  ],
+] as const) {
+  test(`success factory rejects ${description}`, () => {
+    assert.throws(
+      () => createSuccessOutput(context as never),
+      /output contract violation/i,
+    );
+  });
+}
+
+test("output factories reject unknown input fields without echoing values", () => {
+  const sensitiveValue = "glpat-secret-value-that-must-not-leak";
+
+  assert.throws(
+    () =>
+      createSuccessOutput({
+        ...DEFAULT_CONTEXT,
+        unexpected: sensitiveValue,
+      } as never),
+    (error: unknown) =>
+      error instanceof TypeError &&
+      /unsupported field/i.test(error.message) &&
+      !error.message.includes(sensitiveValue),
+  );
 });
 
 test("success can carry a non-blocking update warning while code remains OK", () => {
@@ -377,6 +428,83 @@ test("failure output exposes ToolError details and top-level remote writes", () 
   assert.equal("remoteWrite" in output.error!, false);
 });
 
+test("failure factory requires a genuine ToolError instance", () => {
+  assert.throws(
+    () =>
+      createFailureOutput(DEFAULT_CONTEXT, {
+        code: "INPUT_ERROR",
+        message: "Forged error",
+        details: {
+          field: "title",
+          expected: "non-empty string",
+          actual: null,
+          safeNextStep: "Provide a title",
+        },
+      } as never),
+    /ToolError instance/,
+  );
+});
+
+test("failure factory rejects an object with a forged ToolError prototype", () => {
+  const forged = Object.setPrototypeOf(
+    {
+      code: "INPUT_ERROR",
+      message: "Forged error",
+      details: {
+        field: "title",
+        expected: "non-empty string",
+        actual: null,
+        safeNextStep: "Provide a title",
+      },
+    },
+    ToolError.prototype,
+  );
+  assert.equal(forged instanceof ToolError, true);
+
+  assert.throws(
+    () => createFailureOutput(DEFAULT_CONTEXT, forged as never),
+    /genuine ToolError instance/,
+  );
+});
+
+test("failure factory rejects a ToolError mutated after construction", () => {
+  const error = new ToolError("INPUT_ERROR", "Invalid title", {
+    field: "title",
+    expected: "non-empty string",
+    actual: null,
+    safeNextStep: "Provide a title",
+  });
+  (error.details as { safeNextStep: string }).safeNextStep = "";
+
+  assert.throws(
+    () => createFailureOutput(DEFAULT_CONTEXT, error),
+    /output contract violation/i,
+  );
+});
+
+test("failure factory rejects mutated ToolError accessors without invoking them", () => {
+  const error = new ToolError("INPUT_ERROR", "Invalid title", {
+    field: "title",
+    expected: "non-empty string",
+    actual: null,
+    safeNextStep: "Provide a title",
+  });
+  let invoked = false;
+  Object.defineProperty(error.details, "unexpected", {
+    enumerable: true,
+    get() {
+      invoked = true;
+      return "sensitive";
+    },
+  });
+
+  assert.throws(
+    () => createFailureOutput(DEFAULT_CONTEXT, error),
+    /valid JSON|output contract violation/i,
+  );
+  assert.equal(invoked, false);
+});
+
 test("failure rejects OK and warning pseudo-errors", () => {
   const details = {
     field: null,
@@ -391,18 +519,15 @@ test("failure rejects OK and warning pseudo-errors", () => {
         DEFAULT_CONTEXT,
         { code: "OK", message: "not a failure", details } as never,
       ),
-    /failure code/i,
+    /ToolError instance/,
+  );
+  const warning = new ToolError(
+    "UPDATE_CHECK_WARNING",
+    "not a failure",
+    details,
   );
   assert.throws(
-    () =>
-      createFailureOutput(
-        DEFAULT_CONTEXT,
-        {
-          code: "UPDATE_CHECK_WARNING",
-          message: "not a failure",
-          details,
-        } as never,
-      ),
+    () => createFailureOutput(DEFAULT_CONTEXT, warning as never),
     /failure code/i,
   );
 });

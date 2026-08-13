@@ -1,8 +1,12 @@
+import { Ajv, type ErrorObject } from "ajv";
+
+import outputSchema from "../../schemas/output-v1.schema.json" with { type: "json" };
 import {
   type ErrorDetails,
   type FailureCode,
+  isToolError,
   type ResultCode,
-  type ToolError,
+  ToolError,
 } from "./errors.ts";
 import {
   type RemoteWrite,
@@ -109,6 +113,100 @@ export interface SuccessOptions {
   readonly data?: JsonObject | null;
 }
 
+const outputValidator = new Ajv({ allErrors: true, strict: true }).compile(
+  outputSchema,
+);
+
+function contractViolation(errors: ErrorObject[] | null | undefined): TypeError {
+  const locations = [
+    ...new Set(
+      (errors ?? []).map((error) =>
+        error.instancePath === "" ? "/" : error.instancePath,
+      ),
+    ),
+  ].slice(0, 3);
+  const locationSummary = locations.length === 0
+    ? "output envelope"
+    : locations.join(", ");
+  return new TypeError(`Output contract violation at ${locationSummary}`);
+}
+
+function assertOutputContract(value: unknown): asserts value is OutputEnvelope {
+  if (!outputValidator(value)) {
+    throw contractViolation(outputValidator.errors);
+  }
+}
+
+function assertOnlyFields(
+  value: unknown,
+  allowedFields: ReadonlySet<string>,
+  location: string,
+): void {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError(`Output contract violation at ${location}`);
+  }
+  if (Object.keys(value).some((field) => !allowedFields.has(field))) {
+    throw new TypeError(
+      `Output contract violation: unsupported field in ${location}`,
+    );
+  }
+}
+
+const CONTEXT_FIELDS = new Set([
+  "cliVersion",
+  "versions",
+  "update",
+  "validation",
+  "remoteWrite",
+  "warnings",
+]);
+const VERSION_FIELDS = new Set([
+  "templateVersion",
+  "bundleHash",
+  "releaseSetId",
+  "inputSchema",
+  "policySchema",
+  "loadedSkillVersion",
+  "loadedSkillProtocol",
+  "installedSkillVersion",
+  "stagedSkillVersion",
+  "manifestSequence",
+]);
+const UPDATE_FIELDS = new Set([
+  "checked",
+  "reachable",
+  "usingLastKnownGood",
+  "latestVersionConfirmed",
+  "warning",
+  "securityAnomaly",
+  "activationRequired",
+  "hostRefreshMayBeRequired",
+  "persistencePending",
+  "executedVersion",
+  "installedVersion",
+]);
+const VALIDATION_FIELDS = new Set(["valid", "issues"]);
+const REMOTE_WRITE_FIELDS = new Set(["state", "operations"]);
+const SUCCESS_OPTION_FIELDS = new Set(["message", "data"]);
+const ERROR_DETAIL_FIELDS = new Set([
+  "field",
+  "expected",
+  "actual",
+  "safeNextStep",
+]);
+
+function ownDataProperty(
+  value: object,
+  field: string,
+  location: string,
+): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(value, field);
+  if (descriptor === undefined || !("value" in descriptor)) {
+    throw new TypeError(`Output contract violation at ${location}/${field}`);
+  }
+  return descriptor.value;
+}
+
 function validateFactoryInput(value: unknown): void {
   try {
     canonicalizeJson(value);
@@ -153,6 +251,19 @@ function assertVersionCounters(versions: VersionInfo): void {
 
 function commonOutput(context: OutputContext): Omit<OutputBase, "schemaVersion" | "ok" | "code" | "message" | "error" | "data"> {
   validateFactoryInput(context);
+  assertOnlyFields(context, CONTEXT_FIELDS, "output context");
+  if (context.versions !== undefined) {
+    assertOnlyFields(context.versions, VERSION_FIELDS, "versions");
+  }
+  if (context.update !== undefined) {
+    assertOnlyFields(context.update, UPDATE_FIELDS, "update");
+  }
+  if (context.validation !== undefined) {
+    assertOnlyFields(context.validation, VALIDATION_FIELDS, "validation");
+  }
+  if (context.remoteWrite !== undefined) {
+    assertOnlyFields(context.remoteWrite, REMOTE_WRITE_FIELDS, "remoteWrite");
+  }
   if (typeof context.cliVersion !== "string" || context.cliVersion === "") {
     throw new TypeError("Output context cliVersion must be a non-empty string");
   }
@@ -214,6 +325,7 @@ export function createSuccessOutput(
   options: SuccessOptions = {},
 ): SuccessOutput {
   validateFactoryInput(options);
+  assertOnlyFields(options, SUCCESS_OPTION_FIELDS, "success options");
   const output: SuccessOutput = {
     schemaVersion: OUTPUT_SCHEMA_VERSION,
     ok: true,
@@ -225,7 +337,7 @@ export function createSuccessOutput(
       ? null
       : snapshotJson(options.data),
   };
-  validateFactoryInput(output);
+  assertOutputContract(output);
   return output;
 }
 
@@ -234,7 +346,14 @@ export function createFailureOutput(
   error: ToolError<FailureCode>,
   data: JsonObject | null = null,
 ): FailureOutput {
-  const candidateCode = error.code as string;
+  if (!isToolError(error)) {
+    throw new TypeError("Failure output requires a genuine ToolError instance");
+  }
+  const candidateCode = ownDataProperty(error, "code", "error") as string;
+  const candidateMessage = ownDataProperty(error, "message", "error") as string;
+  const candidateDetails = ownDataProperty(error, "details", "error");
+  assertOnlyFields(candidateDetails, ERROR_DETAIL_FIELDS, "error details");
+  const detailsSnapshot = snapshotJson(candidateDetails as JsonObject);
   const failureCodes = [
     "UPDATE_SECURITY_ERROR",
     "UPDATE_REQUIRED",
@@ -263,21 +382,18 @@ export function createFailureOutput(
   const output: FailureOutput = {
     schemaVersion: OUTPUT_SCHEMA_VERSION,
     ok: false,
-    code: error.code,
-    message: error.message,
+    code: candidateCode as FailureCode,
+    message: candidateMessage,
     ...commonOutput(context),
-    error: {
-      ...error.details,
-      expected: snapshotJson(error.details.expected),
-      actual: snapshotJson(error.details.actual),
-    },
+    error: detailsSnapshot as unknown as ErrorDetails,
     data: data === null ? null : snapshotJson(data),
   };
-  validateFactoryInput(output);
+  assertOutputContract(output);
   return output;
 }
 
 export function serializeOutput(output: OutputEnvelope): string {
   validateFactoryInput(output);
+  assertOutputContract(output);
   return `${JSON.stringify(output)}\n`;
 }

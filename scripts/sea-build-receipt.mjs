@@ -36,6 +36,7 @@ function filesUnder(directory) {
 export function collectSeaBuildInputs(repositoryRoot) {
   return [
     ...filesUnder(resolve(repositoryRoot, "src")),
+    ...filesUnder(resolve(repositoryRoot, "schemas")),
     resolve(repositoryRoot, "scripts/build.mjs"),
     resolve(repositoryRoot, "scripts/build-sea.mjs"),
     resolve(repositoryRoot, "scripts/sea-build-orchestrator.mjs"),
