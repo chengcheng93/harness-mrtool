@@ -1,0 +1,246 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://harness-mrtool.invalid/schemas/output-v1.schema.json",
+  "title": "Harness MR Tool output envelope V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "ok",
+    "code",
+    "message",
+    "versions",
+    "update",
+    "validation",
+    "remoteWrite",
+    "warnings",
+    "error",
+    "data"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "ok": { "type": "boolean" },
+    "code": {
+      "enum": [
+        "OK",
+        "UPDATE_SECURITY_ERROR",
+        "UPDATE_REQUIRED",
+        "REPOSITORY_ERROR",
+        "AUTH_ERROR",
+        "PROFILE_REQUIRED",
+        "TEMPLATE_ERROR",
+        "POLICY_ERROR",
+        "LABEL_ERROR",
+        "INPUT_ERROR",
+        "INPUT_TOO_LARGE",
+        "RENDER_ERROR",
+        "GITLAB_ERROR",
+        "CONCURRENT_UPDATE",
+        "MANUAL_DESCRIPTION_CHANGE",
+        "UNMANAGED_MR",
+        "POSTCONDITION_ERROR",
+        "PARTIAL_DRAFT",
+        "PARTIAL_REMOTE_STATE",
+        "INTERNAL_ERROR"
+      ]
+    },
+    "message": { "type": "string" },
+    "versions": { "$ref": "#/definitions/versions" },
+    "update": { "$ref": "#/definitions/update" },
+    "validation": { "$ref": "#/definitions/validation" },
+    "remoteWrite": { "$ref": "#/definitions/remoteWrite" },
+    "warnings": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/warning" }
+    },
+    "error": {
+      "anyOf": [
+        { "type": "null" },
+        { "$ref": "#/definitions/errorDetails" }
+      ]
+    },
+    "data": {
+      "anyOf": [
+        { "type": "null" },
+        { "type": "object", "additionalProperties": true }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "ok": { "const": true } } },
+      "then": {
+        "properties": {
+          "code": { "const": "OK" },
+          "error": { "type": "null" }
+        }
+      },
+      "else": {
+        "properties": {
+          "code": { "not": { "const": "OK" } },
+          "error": { "$ref": "#/definitions/errorDetails" }
+        }
+      }
+    }
+  ],
+  "definitions": {
+    "nullableString": { "type": ["string", "null"] },
+    "nullableInteger": { "type": ["integer", "null"] },
+    "nullablePositiveInteger": {
+      "type": ["integer", "null"],
+      "minimum": 1
+    },
+    "nullableNonNegativeInteger": {
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
+    "jsonValue": {
+      "anyOf": [
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "number" },
+        { "type": "string" },
+        {
+          "type": "array",
+          "items": { "$ref": "#/definitions/jsonValue" }
+        },
+        {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/definitions/jsonValue" }
+        }
+      ]
+    },
+    "versions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cliVersion",
+        "templateVersion",
+        "bundleHash",
+        "releaseSetId",
+        "inputSchema",
+        "policySchema",
+        "loadedSkillVersion",
+        "loadedSkillProtocol",
+        "installedSkillVersion",
+        "stagedSkillVersion",
+        "manifestSequence"
+      ],
+      "properties": {
+        "cliVersion": { "type": "string" },
+        "templateVersion": { "$ref": "#/definitions/nullableString" },
+        "bundleHash": { "$ref": "#/definitions/nullableString" },
+        "releaseSetId": { "$ref": "#/definitions/nullableString" },
+        "inputSchema": { "$ref": "#/definitions/nullablePositiveInteger" },
+        "policySchema": { "$ref": "#/definitions/nullablePositiveInteger" },
+        "loadedSkillVersion": { "$ref": "#/definitions/nullableString" },
+        "loadedSkillProtocol": { "$ref": "#/definitions/nullableNonNegativeInteger" },
+        "installedSkillVersion": { "$ref": "#/definitions/nullableString" },
+        "stagedSkillVersion": { "$ref": "#/definitions/nullableString" },
+        "manifestSequence": { "$ref": "#/definitions/nullablePositiveInteger" }
+      }
+    },
+    "update": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "checked",
+        "reachable",
+        "usingLastKnownGood",
+        "latestVersionConfirmed",
+        "warning",
+        "securityAnomaly",
+        "activationRequired",
+        "hostRefreshMayBeRequired",
+        "persistencePending",
+        "executedVersion",
+        "installedVersion"
+      ],
+      "properties": {
+        "checked": { "type": "boolean" },
+        "reachable": { "type": ["boolean", "null"] },
+        "usingLastKnownGood": { "type": "boolean" },
+        "latestVersionConfirmed": { "type": "boolean" },
+        "warning": { "$ref": "#/definitions/nullableString" },
+        "securityAnomaly": { "type": "boolean" },
+        "activationRequired": { "type": "boolean" },
+        "hostRefreshMayBeRequired": { "type": "boolean" },
+        "persistencePending": { "type": "boolean" },
+        "executedVersion": { "type": "string" },
+        "installedVersion": { "type": "string" }
+      }
+    },
+    "validation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["valid", "issues"],
+      "properties": {
+        "valid": { "type": "boolean" },
+        "issues": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/validationIssue" }
+        }
+      }
+    },
+    "validationIssue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "field",
+        "message",
+        "expected",
+        "actual",
+        "safeNextStep"
+      ],
+      "properties": {
+        "code": { "type": "string", "minLength": 1 },
+        "field": { "$ref": "#/definitions/nullableString" },
+        "message": { "type": "string" },
+        "expected": { "$ref": "#/definitions/jsonValue" },
+        "actual": { "$ref": "#/definitions/jsonValue" },
+        "safeNextStep": { "type": "string", "minLength": 1 }
+      }
+    },
+    "remoteWrite": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "operations"],
+      "properties": {
+        "state": {
+          "enum": [
+            "not-attempted",
+            "not-written",
+            "written",
+            "compensated",
+            "unknown"
+          ]
+        },
+        "operations": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "warning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "const": "UPDATE_CHECK_WARNING" },
+        "message": { "type": "string" }
+      }
+    },
+    "errorDetails": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["field", "expected", "actual", "safeNextStep"],
+      "properties": {
+        "field": { "$ref": "#/definitions/nullableString" },
+        "expected": { "$ref": "#/definitions/jsonValue" },
+        "actual": { "$ref": "#/definitions/jsonValue" },
+        "safeNextStep": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}
