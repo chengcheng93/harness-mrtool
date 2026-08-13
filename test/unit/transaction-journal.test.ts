@@ -14,6 +14,13 @@ import {
   safeRequestId,
   valueReceipt,
 } from "../../src/app/remote-receipt.ts";
+import {
+  RemoteMutationError,
+  RemoteReadError,
+  isRemoteMutationError,
+  isRemoteReadError,
+  remoteFailureToolError,
+} from "../../src/app/remote-outcome.ts";
 import { canonicalizeJson } from "../../src/contracts/jcs.ts";
 import type { Request } from "../../src/contracts/request.ts";
 import type { Candidate } from "../../src/context/types.ts";
@@ -504,6 +511,48 @@ test("request IDs retain safe opaque identifiers and discard reflected secrets",
   });
   assert.equal(Object.isFrozen(mutationReceipt()), true);
   assert.equal(Object.isFrozen(valueReceipt(88)), true);
+});
+
+test("remote mutation failures expose only closed outcomes and safe audit fields", () => {
+  const rejected = new RemoteMutationError("rejected", "validation", "safe-request");
+  const unknown = new RemoteMutationError("unknown", "timeout", `hmrc1_${"A".repeat(43)}`);
+
+  assert.equal(isRemoteMutationError(rejected, "rejected"), true);
+  assert.equal(isRemoteMutationError(unknown, "unknown"), true);
+  assert.deepEqual(
+    { outcome: rejected.outcome, reason: rejected.reason, requestId: rejected.requestId },
+    { outcome: "rejected", reason: "validation", requestId: "safe-request" },
+  );
+  assert.equal(unknown.requestId, null);
+  assert.equal(JSON.stringify(rejected).includes("response"), false);
+  assert.throws(
+    () => new RemoteMutationError("maybe" as never, "network", null),
+    /outcome/i,
+  );
+  assert.throws(
+    () => new RemoteMutationError("rejected", "maybe" as never, null),
+    /reason/i,
+  );
+  assert.throws(
+    () => new RemoteMutationError("unknown", "auth", null),
+    /outcome.*reason|reason.*outcome/i,
+  );
+});
+
+test("remote read failures retain only a safe request ID and map to stable ToolErrors", () => {
+  const authentication = new RemoteReadError("auth", "auth-request");
+  const timeout = new RemoteReadError("timeout", `glpat-${"x".repeat(24)}`);
+
+  assert.equal(isRemoteReadError(authentication), true);
+  assert.equal(isRemoteReadError({ reason: "auth" }), false);
+  assert.equal(authentication.requestId, "auth-request");
+  assert.equal(timeout.requestId, null);
+  assert.equal(remoteFailureToolError(authentication).code, "AUTH_ERROR");
+  assert.equal(remoteFailureToolError(timeout).code, "GITLAB_ERROR");
+  assert.equal(
+    remoteFailureToolError(new RemoteMutationError("rejected", "conflict", "conflict-request")).code,
+    "CONCURRENT_UPDATE",
+  );
 });
 
 function selectionRequest(
