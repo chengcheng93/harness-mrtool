@@ -9,6 +9,17 @@ export function expectedSeaSelfTestStdout(version) {
   return JSON.stringify({ ok: true, code: "OK", sea: true, version });
 }
 
+export function expectedSeaContractProbeStdout(version) {
+  return JSON.stringify({
+    ok: true,
+    code: "CONTRACT_PROBE_OK",
+    sea: true,
+    version,
+    validOutputAccepted: true,
+    invalidOutputRejected: true,
+  });
+}
+
 function defaultRunProcess(executable, arguments_, options) {
   const result = spawnSync(executable, arguments_, {
     ...options,
@@ -61,6 +72,9 @@ export async function verifySeaExecutable(
   const systemRoot = dependencies.systemRoot ?? process.env.SystemRoot ?? "C:\\Windows";
   const expectedStdout =
     dependencies.expectedStdout ?? expectedSeaSelfTestStdout(readPackageVersion());
+  const expectedProbeStdout =
+    dependencies.expectedProbeStdout ??
+    expectedSeaContractProbeStdout(readPackageVersion());
   const workingDirectory = await createEmptyWorkingDirectory();
 
   try {
@@ -80,6 +94,26 @@ export async function verifySeaExecutable(
       !stdoutMatchesContract(result.stdout, expectedStdout)
     ) {
       throw new Error(`SEA self-test failed:\n${diagnosticFor(result)}`);
+    }
+
+    const probeResult = runProcess(
+      executablePath,
+      ["self-test", "--contract-probe", "--output", "json"],
+      {
+        cwd: workingDirectory,
+        env: { NO_COLOR: "1", SystemRoot: systemRoot },
+      },
+    );
+
+    if (
+      probeResult.error !== undefined ||
+      probeResult.status !== 0 ||
+      probeResult.stderr !== "" ||
+      !stdoutMatchesContract(probeResult.stdout, expectedProbeStdout)
+    ) {
+      throw new Error(
+        `SEA output contract probe failed:\n${diagnosticFor(probeResult)}`,
+      );
     }
   } finally {
     await removeWorkingDirectory(workingDirectory);

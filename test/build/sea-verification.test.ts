@@ -6,6 +6,14 @@ import test from "node:test";
 import { expectedSeaSelfTestStdout, finalizeSeaExecutable, verifySeaExecutable } from "../../scripts/sea-verification.mjs";
 
 const expectedStdout = expectedSeaSelfTestStdout("0.1.0-dev");
+const expectedProbeStdout = JSON.stringify({
+  ok: true,
+  code: "CONTRACT_PROBE_OK",
+  sea: true,
+  version: "0.1.0-dev",
+  validOutputAccepted: true,
+  invalidOutputRejected: true,
+});
 
 test("rejects an injected executable whose self-test violates the contract", async () => {
   const invocations: unknown[] = [];
@@ -64,17 +72,82 @@ test("accepts only the exact self-test JSON with an optional trailing newline", 
       verifySeaExecutable("C:\\release\\harness-mrtool.exe", {
         createEmptyWorkingDirectory: async () => "C:\\empty-self-test-cwd",
         removeWorkingDirectory: async () => undefined,
-        runProcess: () => ({
-          error: undefined,
-          status: 0,
-          stderr: "",
-          stdout,
-        }),
+        runProcess: (_executable: string, arguments_: readonly string[]) =>
+          arguments_.includes("--contract-probe")
+            ? {
+                error: undefined,
+                status: 0,
+                stderr: "",
+                stdout: expectedProbeStdout,
+              }
+            : {
+                error: undefined,
+                status: 0,
+                stderr: "",
+                stdout,
+              },
         systemRoot: "C:\\Windows",
         expectedStdout,
       }),
     );
   }
+});
+
+test("runs the embedded output contract probe after self-test", async () => {
+  const invocations: readonly string[][] = [];
+
+  await assert.doesNotReject(
+    verifySeaExecutable("C:\\release\\harness-mrtool.exe", {
+      createEmptyWorkingDirectory: async () => "C:\\empty-self-test-cwd",
+      removeWorkingDirectory: async () => undefined,
+      runProcess: (
+        _executable: string,
+        arguments_: readonly string[],
+      ) => {
+        (invocations as string[][]).push([...arguments_]);
+        return {
+          error: undefined,
+          status: 0,
+          stderr: "",
+          stdout: arguments_.includes("--contract-probe")
+            ? expectedProbeStdout
+            : expectedStdout,
+        };
+      },
+      systemRoot: "C:\\Windows",
+      expectedStdout,
+      expectedProbeStdout,
+    }),
+  );
+
+  assert.deepEqual(invocations, [
+    ["self-test", "--output", "json"],
+    ["self-test", "--contract-probe", "--output", "json"],
+  ]);
+});
+
+test("rejects an executable whose embedded output contract probe fails", async () => {
+  await assert.rejects(
+    verifySeaExecutable("C:\\release\\harness-mrtool.exe", {
+      createEmptyWorkingDirectory: async () => "C:\\empty-self-test-cwd",
+      removeWorkingDirectory: async () => undefined,
+      runProcess: (
+        _executable: string,
+        arguments_: readonly string[],
+      ) => ({
+        error: undefined,
+        status: arguments_.includes("--contract-probe") ? 7 : 0,
+        stderr: "",
+        stdout: arguments_.includes("--contract-probe")
+          ? '{"ok":false,"code":"INTERNAL_ERROR"}'
+          : expectedStdout,
+      }),
+      systemRoot: "C:\\Windows",
+      expectedStdout,
+      expectedProbeStdout,
+    }),
+    /SEA output contract probe failed/,
+  );
 });
 
 test("rejects otherwise successful self-test output with extra text", async () => {
