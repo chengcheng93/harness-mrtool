@@ -3,8 +3,11 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-export const EXPECTED_SEA_SELF_TEST_STDOUT =
-  '{"ok":true,"code":"OK","sea":true,"version":"0.1.0-dev"}';
+import { readPackageVersion } from "./build.mjs";
+
+export function expectedSeaSelfTestStdout(version) {
+  return JSON.stringify({ ok: true, code: "OK", sea: true, version });
+}
 
 function defaultRunProcess(executable, arguments_, options) {
   const result = spawnSync(executable, arguments_, {
@@ -36,11 +39,11 @@ function diagnosticFor(result) {
   );
 }
 
-function stdoutMatchesContract(stdout) {
+function stdoutMatchesContract(stdout, expectedStdout) {
   return (
-    stdout === EXPECTED_SEA_SELF_TEST_STDOUT ||
-    stdout === `${EXPECTED_SEA_SELF_TEST_STDOUT}\n` ||
-    stdout === `${EXPECTED_SEA_SELF_TEST_STDOUT}\r\n`
+    stdout === expectedStdout ||
+    stdout === `${expectedStdout}\n` ||
+    stdout === `${expectedStdout}\r\n`
   );
 }
 
@@ -56,6 +59,8 @@ export async function verifySeaExecutable(
     ((path) => rm(path, { recursive: true, force: true }));
   const runProcess = dependencies.runProcess ?? defaultRunProcess;
   const systemRoot = dependencies.systemRoot ?? process.env.SystemRoot ?? "C:\\Windows";
+  const expectedStdout =
+    dependencies.expectedStdout ?? expectedSeaSelfTestStdout(readPackageVersion());
   const workingDirectory = await createEmptyWorkingDirectory();
 
   try {
@@ -72,7 +77,7 @@ export async function verifySeaExecutable(
       result.error !== undefined ||
       result.status !== 0 ||
       result.stderr !== "" ||
-      !stdoutMatchesContract(result.stdout)
+      !stdoutMatchesContract(result.stdout, expectedStdout)
     ) {
       throw new Error(`SEA self-test failed:\n${diagnosticFor(result)}`);
     }

@@ -1,9 +1,12 @@
 import { spawnSync } from "node:child_process";
-import { readdirSync } from "node:fs";
-import { relative, resolve } from "node:path";
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, relative, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const repositoryRoot = resolve(import.meta.dirname, "..");
 const testRoot = resolve(repositoryRoot, "test");
+const matchReporterPath = resolve(import.meta.dirname, "test-match-reporter.mjs");
 
 function discoverTests(directory) {
   return readdirSync(directory, { withFileTypes: true })
@@ -20,6 +23,7 @@ function discoverTests(directory) {
 const forwardedArguments = process.argv.slice(2);
 const pathFilters = [];
 const runnerArguments = [];
+let hasNamePattern = false;
 
 for (let index = 0; index < forwardedArguments.length; index += 1) {
   const argument = forwardedArguments[index];
@@ -27,6 +31,12 @@ for (let index = 0; index < forwardedArguments.length; index += 1) {
     continue;
   }
   if (argument.startsWith("-")) {
+    if (
+      argument === "--test-name-pattern" ||
+      argument.startsWith("--test-name-pattern=")
+    ) {
+      hasNamePattern = true;
+    }
     runnerArguments.push(argument);
     if (
       ["--test-name-pattern", "--test-reporter", "--test-reporter-destination"].includes(
@@ -61,19 +71,59 @@ if (selectedTests.length === 0) {
   );
   process.exitCode = 1;
 } else {
-  const result = spawnSync(
-    process.execPath,
-    ["--import", "tsx", "--test", ...runnerArguments, ...selectedTests],
-    {
-      cwd: repositoryRoot,
-      encoding: "utf8",
-      stdio: "inherit",
-      windowsHide: true,
-    },
-  );
+  const matchReportDirectory = hasNamePattern
+    ? mkdtempSync(join(tmpdir(), "harness-mrtool-test-match-"))
+    : undefined;
+  const matchReportPath =
+    matchReportDirectory === undefined
+      ? undefined
+      : resolve(matchReportDirectory, "report.json");
 
-  if (result.error !== undefined) {
-    throw result.error;
+  try {
+    const result = spawnSync(
+      process.execPath,
+      [
+        "--import",
+        "tsx",
+        "--test",
+        ...(hasNamePattern
+          ? [`--test-reporter=${pathToFileURL(matchReporterPath).href}`]
+          : []),
+        ...runnerArguments,
+        ...selectedTests,
+      ],
+      {
+        cwd: repositoryRoot,
+        encoding: "utf8",
+        env:
+          matchReportPath === undefined
+            ? process.env
+            : {
+                ...process.env,
+                HARNESS_MRTOOL_TEST_MATCH_REPORT: matchReportPath,
+              },
+        stdio: "inherit",
+        windowsHide: true,
+      },
+    );
+
+    if (result.error !== undefined) {
+      throw result.error;
+    }
+    if (result.status !== 0 || matchReportPath === undefined) {
+      process.exitCode = result.status ?? 1;
+    } else {
+      const report = JSON.parse(readFileSync(matchReportPath, "utf8"));
+      if (report.schemaVersion !== 1 || report.matchedTests === 0) {
+        console.error("No non-skipped test cases matched --test-name-pattern.");
+        process.exitCode = 1;
+      } else {
+        process.exitCode = 0;
+      }
+    }
+  } finally {
+    if (matchReportDirectory !== undefined) {
+      rmSync(matchReportDirectory, { recursive: true, force: true });
+    }
   }
-  process.exitCode = result.status ?? 1;
 }

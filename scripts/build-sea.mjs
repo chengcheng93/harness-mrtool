@@ -6,6 +6,11 @@ import { fileURLToPath } from "node:url";
 
 import { assertExactNodeVersion, buildApplication } from "./build.mjs";
 import {
+  collectSeaBuildInputs,
+  createSeaBuildReceipt,
+  writeSeaBuildReceipt,
+} from "./sea-build-receipt.mjs";
+import {
   finalizeSeaExecutable,
   verifySeaExecutable,
 } from "./sea-verification.mjs";
@@ -18,6 +23,7 @@ const distDirectory = resolve(repositoryRoot, "dist");
 const seaConfigPath = resolve(repositoryRoot, "sea-config.json");
 const blobPath = resolve(distDirectory, "harness-mrtool.blob");
 const executablePath = resolve(distDirectory, "harness-mrtool.exe");
+const receiptPath = resolve(distDirectory, "sea-build-receipt.json");
 const sentinelFuse = "NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2";
 
 function runBlobGeneration() {
@@ -47,14 +53,30 @@ export async function buildSeaExecutable() {
   await buildApplication();
   runBlobGeneration();
   await copyFile(process.execPath, executablePath);
-  await finalizeSeaExecutable(executablePath, {
-    injectBlob: async () =>
-      inject(executablePath, "NODE_SEA_BLOB", await readFile(blobPath), {
-        sentinelFuse,
-      }),
-    removeArtifact: (path) => rm(path, { force: true }),
-    verifyExecutable: verifySeaExecutable,
-  });
+  try {
+    await finalizeSeaExecutable(executablePath, {
+      injectBlob: async () =>
+        inject(executablePath, "NODE_SEA_BLOB", await readFile(blobPath), {
+          sentinelFuse,
+        }),
+      removeArtifact: (path) => rm(path, { force: true }),
+      verifyExecutable: verifySeaExecutable,
+    });
+    writeSeaBuildReceipt(
+      receiptPath,
+      createSeaBuildReceipt(
+        repositoryRoot,
+        executablePath,
+        collectSeaBuildInputs(repositoryRoot),
+      ),
+    );
+  } catch (error) {
+    await Promise.all([
+      rm(executablePath, { force: true }),
+      rm(receiptPath, { force: true }),
+    ]);
+    throw error;
+  }
 }
 
 await buildSeaExecutable();

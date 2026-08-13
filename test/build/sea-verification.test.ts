@@ -3,7 +3,9 @@ import test from "node:test";
 
 // The SEA build helper is JavaScript so it can run before TypeScript is compiled.
 // @ts-expect-error The build helper intentionally has no declaration file.
-import { EXPECTED_SEA_SELF_TEST_STDOUT, finalizeSeaExecutable, verifySeaExecutable } from "../../scripts/sea-verification.mjs";
+import { expectedSeaSelfTestStdout, finalizeSeaExecutable, verifySeaExecutable } from "../../scripts/sea-verification.mjs";
+
+const expectedStdout = expectedSeaSelfTestStdout("0.1.0-dev");
 
 test("rejects an injected executable whose self-test violates the contract", async () => {
   const invocations: unknown[] = [];
@@ -27,6 +29,7 @@ test("rejects an injected executable whose self-test violates the contract", asy
         };
       },
       systemRoot: "C:\\Windows",
+      expectedStdout,
     }),
     (error: unknown) => {
       assert.ok(error instanceof Error);
@@ -53,9 +56,9 @@ test("rejects an injected executable whose self-test violates the contract", asy
 
 test("accepts only the exact self-test JSON with an optional trailing newline", async () => {
   for (const stdout of [
-    EXPECTED_SEA_SELF_TEST_STDOUT,
-    `${EXPECTED_SEA_SELF_TEST_STDOUT}\n`,
-    `${EXPECTED_SEA_SELF_TEST_STDOUT}\r\n`,
+    expectedStdout,
+    `${expectedStdout}\n`,
+    `${expectedStdout}\r\n`,
   ]) {
     await assert.doesNotReject(
       verifySeaExecutable("C:\\release\\harness-mrtool.exe", {
@@ -68,6 +71,7 @@ test("accepts only the exact self-test JSON with an optional trailing newline", 
           stdout,
         }),
         systemRoot: "C:\\Windows",
+        expectedStdout,
       }),
     );
   }
@@ -82,9 +86,10 @@ test("rejects otherwise successful self-test output with extra text", async () =
         error: undefined,
         status: 0,
         stderr: "",
-        stdout: `log line\n${EXPECTED_SEA_SELF_TEST_STDOUT}\n`,
+        stdout: `log line\n${expectedStdout}\n`,
       }),
       systemRoot: "C:\\Windows",
+      expectedStdout,
     }),
     /SEA self-test failed/,
   );

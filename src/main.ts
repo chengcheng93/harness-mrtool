@@ -2,7 +2,7 @@ import { isSea } from "node:sea";
 
 import { normalizeRuntimeArguments } from "./runtime-arguments.ts";
 
-const VERSION = "0.1.0-dev";
+declare const __HARNESS_MRTOOL_VERSION__: string;
 
 interface JsonResult {
   readonly ok: boolean;
@@ -16,13 +16,13 @@ function writeJson(result: JsonResult): void {
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
 
-function fail(message: string, output: string | undefined): never {
+function fail(message: string, output: string | undefined): void {
   if (output === "json") {
     writeJson({ ok: false, code: "USAGE_ERROR", message });
   } else {
     process.stderr.write(`${message}\n`);
   }
-  process.exit(2);
+  process.exitCode = 2;
 }
 
 function main(arguments_: readonly string[]): void {
@@ -32,12 +32,19 @@ function main(arguments_: readonly string[]): void {
 
   if (command !== "self-test") {
     fail("Usage: harness-mrtool self-test --output json", output);
+    return;
   }
   if (output !== "json") {
     fail("self-test requires --output json", output);
+    return;
   }
 
-  writeJson({ ok: true, code: "OK", sea: isSea(), version: VERSION });
+  writeJson({
+    ok: true,
+    code: "OK",
+    sea: isSea(),
+    version: __HARNESS_MRTOOL_VERSION__,
+  });
 }
 
 main(normalizeRuntimeArguments(process.argv));
