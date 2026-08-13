@@ -14,6 +14,7 @@ import test from "node:test";
 
 import {
   MAX_BUNDLE_MANIFEST_BYTES,
+  MAX_BUNDLE_PAYLOAD_BYTES,
   REQUIRED_H2_HEADINGS,
   loadTemplateBundle,
   nodeTemplateBundleIo,
@@ -326,36 +327,124 @@ test("loader accepts canonical SemVer metadata but rejects aliases", async (cont
 
 test("loader reads each manifest and payload file exactly once", async (context) => {
   const bundlePath = await createValidBundleFixture(context);
-  const reads = new Map<string, number>();
+  const opens = new Map<string, number>();
   const io: TemplateBundleIo = {
     ...nodeTemplateBundleIo,
-    readFile: async (path) => {
-      reads.set(path, (reads.get(path) ?? 0) + 1);
-      return nodeTemplateBundleIo.readFile(path);
+    openFile: async (path) => {
+      opens.set(path, (opens.get(path) ?? 0) + 1);
+      return nodeTemplateBundleIo.openFile(path);
     },
   };
 
   await loadTemplateBundle(bundlePath, io);
 
-  assert.equal(reads.size, 10);
-  assert.equal([...reads.values()].every((count) => count === 1), true);
+  assert.equal(opens.size, 10);
+  assert.equal([...opens.values()].every((count) => count === 1), true);
+});
+
+test("loader never uses an unbounded path read after metadata validation", async (context) => {
+  const bundlePath = await createValidBundleFixture(context);
+  const manifestPath = resolve(bundlePath, "bundle-manifest.json");
+  const scannedSizes = new Map<string, number>();
+  const requestedBytes = new Map<string, number>();
+  const io = {
+    ...nodeTemplateBundleIo,
+    lstat: async (path: string) => {
+      const metadata = await nodeTemplateBundleIo.lstat(path);
+      scannedSizes.set(path, Number(metadata.size));
+      return metadata;
+    },
+    openFile: async (path: string) => {
+      const handle = await nodeTemplateBundleIo.openFile(path);
+      return {
+        close: () => handle.close(),
+        read: async (
+          buffer: Uint8Array,
+          offset: number,
+          length: number,
+          position: number,
+        ) => {
+          requestedBytes.set(path, (requestedBytes.get(path) ?? 0) + length);
+          assert.equal(buffer.byteLength <= MAX_BUNDLE_PAYLOAD_BYTES, true);
+          return handle.read(buffer, offset, length, position);
+        },
+        stat: () => handle.stat(),
+      };
+    },
+  } as TemplateBundleIo;
+
+  await assert.doesNotReject(() => loadTemplateBundle(bundlePath, io));
+
+  assert.equal(requestedBytes.size, 10);
+  assert.equal(requestedBytes.has(manifestPath), true);
+  for (const [path, bytes] of requestedBytes) {
+    assert.equal(bytes <= (scannedSizes.get(path) as number) + 1, true, path);
+  }
+});
+
+test("loader rejects opened-file identity, truncation, and growth races", async (context) => {
+  const modes = ["identity", "truncated", "grown"] as const;
+
+  for (const mode of modes) {
+    const bundlePath = await createValidBundleFixture(context);
+    const manifestPath = resolve(bundlePath, "bundle-manifest.json");
+    let closed = false;
+    const io: TemplateBundleIo = {
+      ...nodeTemplateBundleIo,
+      openFile: async (path) => {
+        const handle = await nodeTemplateBundleIo.openFile(path);
+        if (path !== manifestPath) return handle;
+        return {
+          close: async () => {
+            closed = true;
+            await handle.close();
+          },
+          read: async (buffer, offset, length, position) => {
+            if (mode === "truncated") return { bytesRead: 0 };
+            if (mode === "grown" && length === 1) return { bytesRead: 1 };
+            return handle.read(buffer, offset, length, position);
+          },
+          stat: async () => {
+            const metadata = await handle.stat();
+            return mode === "identity"
+              ? {
+                  ...metadata,
+                  dev: metadata.dev + 1n,
+                  isFile: () => metadata.isFile(),
+                  isDirectory: () => metadata.isDirectory(),
+                  isSymbolicLink: () => metadata.isSymbolicLink(),
+                }
+              : metadata;
+          },
+        };
+      },
+    };
+
+    await assertTemplateError(
+      () => loadTemplateBundle(bundlePath, io),
+      /identity|size changed/i,
+    );
+    assert.equal(closed, true, mode);
+  }
 });
 
 test("loader rejects oversized manifest before reading it", async (context) => {
   const bundlePath = await createValidBundleFixture(context);
   const manifestPath = resolve(bundlePath, "bundle-manifest.json");
-  let manifestReads = 0;
+  let manifestOpens = 0;
   const io: TemplateBundleIo = {
     ...nodeTemplateBundleIo,
-    readFile: async (path) => {
-      if (path === manifestPath) manifestReads += 1;
-      return nodeTemplateBundleIo.readFile(path);
+    openFile: async (path) => {
+      if (path === manifestPath) manifestOpens += 1;
+      return nodeTemplateBundleIo.openFile(path);
     },
     lstat: async (path) => {
       const metadata = await nodeTemplateBundleIo.lstat(path);
       return path === manifestPath
         ? {
-            size: MAX_BUNDLE_MANIFEST_BYTES + 1,
+            dev: metadata.dev,
+            ino: metadata.ino,
+            size: BigInt(MAX_BUNDLE_MANIFEST_BYTES + 1),
             isFile: () => metadata.isFile(),
             isDirectory: () => metadata.isDirectory(),
             isSymbolicLink: () => metadata.isSymbolicLink(),
@@ -368,7 +457,7 @@ test("loader rejects oversized manifest before reading it", async (context) => {
     () => loadTemplateBundle(bundlePath, io),
     /size limit|exceeds/i,
   );
-  assert.equal(manifestReads, 0);
+  assert.equal(manifestOpens, 0);
 });
 
 test("loader rejects reparse paths and non-file payload entries", async (context) => {
@@ -390,6 +479,8 @@ test("loader rejects reparse paths and non-file payload entries", async (context
       const metadata = await nodeTemplateBundleIo.lstat(path);
       return path === layoutPath
         ? {
+            dev: metadata.dev,
+            ino: metadata.ino,
             size: metadata.size,
             isFile: () => false,
             isDirectory: () => true,

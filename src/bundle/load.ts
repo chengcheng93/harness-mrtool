@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
-import type { Stats } from "node:fs";
+import type { BigIntStats } from "node:fs";
 import {
   lstat,
-  readFile,
+  open,
   readdir,
   realpath,
 } from "node:fs/promises";
@@ -42,23 +42,44 @@ export const REQUIRED_H2_HEADINGS = [
 ] as const;
 
 export interface BundleFileMetadata {
-  readonly size: number;
+  readonly dev: bigint;
+  readonly ino: bigint;
+  readonly size: bigint;
   isFile(): boolean;
   isDirectory(): boolean;
   isSymbolicLink(): boolean;
 }
 
+export interface TemplateBundleFileHandle {
+  close(): Promise<void>;
+  read(
+    buffer: Uint8Array,
+    offset: number,
+    length: number,
+    position: number,
+  ): Promise<{ readonly bytesRead: number }>;
+  stat(): Promise<BundleFileMetadata>;
+}
+
 export interface TemplateBundleIo {
-  readFile(path: string): Promise<Uint8Array>;
+  openFile(path: string): Promise<TemplateBundleFileHandle>;
   listDirectory(path: string): Promise<readonly string[]>;
   lstat(path: string): Promise<BundleFileMetadata>;
   realpath(path: string): Promise<string>;
 }
 
 export const nodeTemplateBundleIo: TemplateBundleIo = {
-  readFile,
+  openFile: async (path) => {
+    const handle = await open(path, "r");
+    return {
+      close: () => handle.close(),
+      read: (buffer, offset, length, position) =>
+        handle.read(buffer, offset, length, position),
+      stat: () => handle.stat({ bigint: true }) as Promise<BigIntStats>,
+    };
+  },
   listDirectory: (path) => readdir(path),
-  lstat: (path) => lstat(path) as Promise<Stats>,
+  lstat: (path) => lstat(path, { bigint: true }) as Promise<BigIntStats>,
   realpath,
 };
 
@@ -347,26 +368,71 @@ async function readBounded(
   limit: number,
   io: TemplateBundleIo,
 ): Promise<Uint8Array> {
+  const expectedSize = Number(expectedMetadata.size);
   if (
-    !Number.isSafeInteger(expectedMetadata.size) ||
-    expectedMetadata.size < 1 ||
-    expectedMetadata.size > limit
+    expectedMetadata.size < 1n ||
+    expectedMetadata.size > BigInt(limit) ||
+    !Number.isSafeInteger(expectedSize)
   ) {
     throw templateError("bundle file exceeds its size limit");
   }
-  let bytes: Uint8Array;
+  let handle: TemplateBundleFileHandle;
   try {
-    bytes = await io.readFile(resolve(root, relativePath));
+    handle = await io.openFile(resolve(root, relativePath));
   } catch {
     throw templateError("bundle file could not be read");
   }
-  if (!(bytes instanceof Uint8Array)) {
-    throw templateError("bundle reader returned a non-byte value");
+  try {
+    const before = await handle.stat();
+    assertSameRegularFile(expectedMetadata, before);
+    const bytes = new Uint8Array(expectedSize);
+    let offset = 0;
+    while (offset < bytes.byteLength) {
+      const result = await handle.read(bytes, offset, bytes.byteLength - offset, offset);
+      if (!Number.isSafeInteger(result.bytesRead) || result.bytesRead < 0 ||
+          result.bytesRead > bytes.byteLength - offset) {
+        throw templateError("bundle reader returned an invalid byte count");
+      }
+      if (result.bytesRead === 0) {
+        throw templateError("bundle file size changed while loading");
+      }
+      offset += result.bytesRead;
+    }
+    const probe = new Uint8Array(1);
+    const extra = await handle.read(probe, 0, 1, offset);
+    if (extra.bytesRead !== 0) {
+      throw templateError("bundle file size changed while loading");
+    }
+    assertSameRegularFile(expectedMetadata, await handle.stat());
+    return bytes;
+  } catch (error) {
+    if (isToolError(error, "TEMPLATE_ERROR")) {
+      throw error;
+    }
+    throw templateError("bundle file could not be read safely");
+  } finally {
+    try {
+      await handle.close();
+    } catch {
+      // The validated bytes are unusable if their handle cannot be closed cleanly.
+    }
   }
-  if (bytes.byteLength !== expectedMetadata.size || bytes.byteLength > limit) {
-    throw templateError("bundle file size changed while loading");
+}
+
+function assertSameRegularFile(
+  expected: BundleFileMetadata,
+  actual: BundleFileMetadata,
+): void {
+  if (
+    !actual.isFile() ||
+    actual.isDirectory() ||
+    actual.isSymbolicLink() ||
+    actual.dev !== expected.dev ||
+    actual.ino !== expected.ino ||
+    actual.size !== expected.size
+  ) {
+    throw templateError("bundle file changed identity while loading");
   }
-  return bytes;
 }
 
 function sha256(bytes: Uint8Array): string {
