@@ -1,15 +1,20 @@
 import assert from "node:assert/strict";
+import { spawn, type ChildProcess } from "node:child_process";
 import {
+  access,
   chmod,
   copyFile,
   mkdir,
   readFile,
   realpath,
+  rename,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
-import { delimiter, isAbsolute, resolve } from "node:path";
+import { delimiter, dirname, isAbsolute, resolve } from "node:path";
 import test, { type TestContext } from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 
 import { isToolError } from "../../src/contracts/errors.ts";
@@ -51,6 +56,64 @@ class RecordingProcessRunner implements ProcessRunner {
 
 function isPushRequest(request: ProcessRequest): boolean {
   return request.arguments[0] === "push" || request.arguments[2] === "push";
+}
+
+interface HeldWindowsFile {
+  readonly child: ChildProcess;
+  readonly temporaryRoot: string;
+}
+
+async function holdTemporaryViewFile(temporaryRoot: string): Promise<HeldWindowsFile> {
+  const lockPath = resolve(temporaryRoot, "cleanup-lock");
+  const readyPath = resolve(temporaryRoot, "cleanup-lock-ready");
+  await writeFile(lockPath, "locked\n");
+  const child = spawn(
+    "powershell.exe",
+    [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      "$stream=[IO.File]::Open($env:HMR_LOCK_PATH,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::None);" +
+        "[IO.File]::WriteAllText($env:HMR_READY_PATH,'ready');" +
+        "try { while ($true) { Start-Sleep -Milliseconds 100 } } finally { $stream.Dispose() }",
+    ],
+    {
+      env: {
+        ...process.env,
+        HMR_LOCK_PATH: lockPath,
+        HMR_READY_PATH: readyPath,
+      },
+      stdio: "ignore",
+      windowsHide: true,
+    },
+  );
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      await access(readyPath);
+      return { child, temporaryRoot };
+    } catch {
+      if (child.exitCode !== null) {
+        throw new Error("Temporary-view lock process exited before acquiring the file");
+      }
+      await delay(25);
+    }
+  }
+  child.kill();
+  throw new Error("Timed out acquiring the temporary-view cleanup lock");
+}
+
+async function releaseTemporaryViewFile(held: HeldWindowsFile | undefined): Promise<void> {
+  if (held === undefined) return;
+  const exited = new Promise<void>((resolveExit) => {
+    if (held.child.exitCode !== null) {
+      resolveExit();
+      return;
+    }
+    held.child.once("exit", () => resolveExit());
+  });
+  held.child.kill();
+  await Promise.race([exited, delay(5_000)]);
+  await rm(held.temporaryRoot, { force: true, recursive: true });
 }
 
 type PushFault = "post-read-fails" | "post-read-other" | "timeout-after-write";
@@ -127,6 +190,64 @@ test("GitRunner always invokes git with an argv array and shell disabled", async
   assert.equal(requests[0]?.environment.GIT_ATTR_NOSYSTEM, "1");
   assert.equal(requests[0]?.environment.GIT_NO_REPLACE_OBJECTS, "1");
   assert.equal(requests[0]?.environment.GIT_TERMINAL_PROMPT, "0");
+  assert.equal(requests[0]?.fileIdentityGuards.length, 1);
+  assert.equal(
+    requests[0]?.fileIdentityGuards[0]?.identity.path,
+    trustedExecutable,
+  );
+  assert.equal(requests[0]?.fileIdentityGuards[0]?.compareContentMetadata, true);
+});
+
+test("GitRunner scrubs executable ambient Git transport and prompt hooks", async () => {
+  const requests: ProcessRequest[] = [];
+  const processRunner: ProcessRunner = {
+    async run(request) {
+      requests.push(request);
+      return {
+        exitCode: 0,
+        signal: null,
+        stderr: Buffer.alloc(0),
+        stdout: Buffer.alloc(0),
+        timedOut: false,
+      };
+    },
+  };
+  const dangerous = [
+    "GIT_SSH",
+    "GIT_SSH_COMMAND",
+    "GIT_PROXY_COMMAND",
+    "GIT_ASKPASS",
+    "SSH_ASKPASS",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_KEY_0",
+    "GIT_CONFIG_VALUE_0",
+  ] as const;
+  const trustedExecutable = await realpath(process.execPath);
+  const previous = new Map<string, string | undefined>();
+  for (const key of dangerous) {
+    previous.set(key, process.env[key]);
+    process.env[key] = `canary-${key}`;
+  }
+  try {
+    await new GitRunner("C:\\fixture", processRunner, {
+      gitExecutable: trustedExecutable,
+    }).run(["--version"]);
+  } finally {
+    for (const key of dangerous) {
+      const value = previous.get(key);
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+
+  assert.equal(requests.length, 1);
+  for (const key of dangerous) {
+    assert.equal(requests[0]?.environment[key], undefined, key);
+  }
 });
 
 test("GitRunner does not execute a repository-local git.exe on Windows", {
@@ -183,6 +304,105 @@ test("GitRunner ignores arbitrary absolute PATH entries outside its trusted root
 
   assert.equal(processRunner.requests[0]?.executable, await realpath(trustedExecutable));
   assert.notEqual(processRunner.requests[0]?.executable, await realpath(untrustedExecutable));
+});
+
+test("GitRunner rejects replacement of its resolved executable at the spawn boundary", async (t) => {
+  const fixture = await fixtureFor(t);
+  const executableRoot = resolve(fixture.root, "replaceable-git");
+  const movedRoot = resolve(fixture.root, "original-git");
+  await mkdir(executableRoot);
+  const executableName = process.platform === "win32" ? "git.exe" : "git";
+  const executable = resolve(executableRoot, executableName);
+  await copyFile(process.execPath, executable);
+  if (process.platform !== "win32") await chmod(executable, 0o755);
+  let runCount = 0;
+  const processRunner: ProcessRunner = {
+    async run(request) {
+      runCount += 1;
+      if (runCount === 2) {
+        await rename(executableRoot, movedRoot);
+        await mkdir(executableRoot);
+        await copyFile(
+          process.platform === "win32"
+            ? resolve(process.env.SystemRoot ?? "C:\\Windows", "System32", "where.exe")
+            : process.execPath,
+          executable,
+        );
+        if (process.platform !== "win32") await chmod(executable, 0o755);
+      }
+      if (runCount === 1) {
+        return {
+          exitCode: 0,
+          signal: null,
+          stderr: Buffer.alloc(0),
+          stdout: Buffer.alloc(0),
+          timedOut: false,
+        };
+      }
+      return nodeProcessRunner.run(request);
+    },
+  };
+  const runner = new GitRunner(fixture.worktreePath, processRunner, {
+    gitExecutable: executable,
+  });
+  await runner.run(["--version"]);
+
+  await assert.rejects(runner.run(["--version"]), /filesystem identity changed/i);
+});
+
+test("GitRunner rejects in-place modification of its resolved executable", async (t) => {
+  const fixture = await fixtureFor(t);
+  const executableRoot = resolve(fixture.root, "mutable-git");
+  await mkdir(executableRoot);
+  const executable = resolve(
+    executableRoot,
+    process.platform === "win32" ? "git.exe" : "git",
+  );
+  await copyFile(process.execPath, executable);
+  if (process.platform !== "win32") await chmod(executable, 0o755);
+  const processRunner: ProcessRunner = {
+    async run() {
+      return {
+        exitCode: 0,
+        signal: null,
+        stderr: Buffer.alloc(0),
+        stdout: Buffer.alloc(0),
+        timedOut: false,
+      };
+    },
+  };
+  const runner = new GitRunner(fixture.worktreePath, processRunner, {
+    gitExecutable: executable,
+  });
+  await runner.run(["--version"]);
+  await writeFile(executable, "modified executable bytes\n");
+
+  await assert.rejects(runner.run(["--version"]), /filesystem identity changed/i);
+});
+
+test("production process runner rejects injected Git executable authority", async (t) => {
+  await assert.rejects(
+    new GitRunner(process.cwd(), nodeProcessRunner, {
+      gitExecutable: process.execPath,
+    }).run(["--version"]),
+    /test process runner|injected Git executable/i,
+  );
+
+  const fixture = await fixtureFor(t);
+  const injectedRoot = resolve(fixture.root, "injected-trusted-root");
+  await mkdir(injectedRoot);
+  const executable = resolve(
+    injectedRoot,
+    process.platform === "win32" ? "git.exe" : "git",
+  );
+  await copyFile(process.execPath, executable);
+  if (process.platform !== "win32") await chmod(executable, 0o755);
+  await assert.rejects(
+    new GitRunner(fixture.worktreePath, nodeProcessRunner, {
+      trustedGitRoots: [injectedRoot],
+    }).run(["--version"]),
+    /test process runner|trusted Git roots/i,
+  );
 });
 
 test("repository discovery preserves an explicitly trusted Git executable", async (t) => {
@@ -484,6 +704,49 @@ test("canonical ChangeSet is isolated from transient repository attributes", asy
   assert.deepEqual(actual, expected);
 });
 
+test("canonical ChangeSet reports a typed temporary-view cleanup failure", {
+  skip: process.platform !== "win32",
+}, async (t) => {
+  const fixture = await fixtureFor(t);
+  await fixture.commitFile(
+    "src/cleanup-failure.ts",
+    "export const cleanupFailure = true;\n",
+    "cleanup failure",
+  );
+  const discovered = await discoverRepository({
+    cwd: fixture.worktreePath,
+    targetBranch: "main",
+  });
+  let held: HeldWindowsFile | undefined;
+  let heldPromise: Promise<HeldWindowsFile> | undefined;
+  const processRunner: ProcessRunner = {
+    async run(request) {
+      if (request.arguments.includes("diff")) {
+        const gitDirectory = request.environment.GIT_DIR;
+        assert.notEqual(gitDirectory, undefined);
+        heldPromise ??= holdTemporaryViewFile(dirname(gitDirectory as string));
+        held = await heldPromise;
+      }
+      return nodeProcessRunner.run(request);
+    },
+  };
+  const repository = {
+    ...discovered,
+    runner: new GitRunner(fixture.worktreePath, processRunner),
+  };
+
+  try {
+    await assert.rejects(
+      readCanonicalChangeSet(repository),
+      (error: unknown) =>
+        isToolError(error, "REPOSITORY_ERROR", /cleanup|temporary/i) &&
+        !JSON.stringify(error.details).includes("EBUSY"),
+    );
+  } finally {
+    await releaseTemporaryViewFile(held);
+  }
+});
+
 test("repository rejects fetch and push URLs for different GitLab projects", async (t) => {
   const fixture = await fixtureFor(t);
   await fixture.git([
@@ -507,6 +770,26 @@ test("repository rejects fetch and push URLs for different GitLab projects", asy
     }),
     (error: unknown) => isToolError(error, "REPOSITORY_ERROR", /fetch|push|identity/i),
   );
+});
+
+test("repository rejects HTTP credentials before they can enter a push plan", async (t) => {
+  const fixture = await fixtureFor(t);
+  const credentialCanary = "credential-canary";
+  const endpoint = `https://oauth2:${credentialCanary}@gitlab.example.test/team/project.git`;
+  await fixture.git(["remote", "set-url", "origin", endpoint]);
+
+  let error: unknown;
+  try {
+    await discoverRepository({
+      cwd: fixture.worktreePath,
+      targetBranch: "main",
+    });
+  } catch (caught) {
+    error = caught;
+  }
+
+  assert.equal(isToolError(error, "REPOSITORY_ERROR", /credential|userinfo|URL/i), true);
+  assert.equal(JSON.stringify(error).includes(credentialCanary), false);
 });
 
 test("repository normalizes equivalent GitLab fetch and push identities", async (t) => {
@@ -792,6 +1075,111 @@ test("push execution clears configured GitLab push options", async (t) => {
   );
 });
 
+test("local push does not expose credential configuration to child env or hooks", async (t) => {
+  const fixture = await fixtureFor(t);
+  await fixture.commitFile("src/no-credential-leak.ts", "export const safe = true;\n", "safe push");
+  const credentialCanary = "credential-canary";
+  const globalConfig = resolve(fixture.root, "credential-probe.gitconfig");
+  await writeFile(
+    globalConfig,
+    `[credential]\n\thelper = ${credentialCanary}\n[http]\n\textraHeader = Authorization: Bearer ${credentialCanary}\n`,
+  );
+  const hookPath = resolve(fixture.remotePath, "hooks", "pre-receive");
+  await writeFile(
+    hookPath,
+    `#!/bin/sh\nif env | grep -q '${credentialCanary}' || git config --global --get-regexp '^(credential\\.|http\\.)' 2>/dev/null | grep -q '${credentialCanary}'; then printf leaked > credential-leaked.txt; fi\n`,
+  );
+  await chmod(hookPath, 0o755);
+  const processRunner = new RecordingProcessRunner();
+  const repository = await discoverRepository({
+    cwd: fixture.worktreePath,
+    gitRunnerOptions: { environment: { GIT_CONFIG_GLOBAL: globalConfig } },
+    processRunner,
+    targetBranch: "main",
+  });
+  const plan = await planSourceBranchPush(repository, { allowPush: true });
+
+  await executeSourceBranchPush(repository, plan, { authorized: true });
+
+  const transactionRequests = processRunner.requests.filter((request) =>
+    request.arguments[0] === "ls-remote" || isPushRequest(request)
+  );
+  assert.equal(JSON.stringify(transactionRequests).includes(credentialCanary), false);
+  await assert.rejects(readFile(resolve(fixture.remotePath, "credential-leaked.txt"), "utf8"));
+});
+
+test("HTTPS transaction scopes auth config without placing secrets in child env", async (t) => {
+  const fixture = await fixtureFor(t);
+  const endpointCanary = "endpoint-secret-canary";
+  const otherCanary = "other-endpoint-canary";
+  const unrelatedHttpCanary = "unrelated-http-config-canary";
+  const endpoint = "https://gitlab.example.test/team/project.git";
+  const globalConfig = resolve(fixture.root, "https-auth.gitconfig");
+  await writeFile(
+    globalConfig,
+    `[credential]\n\thelper = manager\n[http "https://gitlab.example.test/team/"]\n\textraHeader = Authorization: Bearer ${endpointCanary}\n\tuserAgent = ${unrelatedHttpCanary}\n[http "https://other.example.test/"]\n\textraHeader = Authorization: Bearer ${otherCanary}\n`,
+  );
+  await fixture.git(["remote", "set-url", "origin", endpoint]);
+  let scopedConfig = "";
+  let credentialConfig = "";
+  const processRunner: ProcessRunner = {
+    async run(request) {
+      if (request.arguments[0] === "ls-remote") {
+        assert.equal(JSON.stringify(request.environment).includes(endpointCanary), false);
+        assert.equal(JSON.stringify(request.environment).includes(otherCanary), false);
+        const authConfigPath = request.environment.GIT_CONFIG_GLOBAL;
+        assert.equal(typeof authConfigPath, "string");
+        const probe = await nodeProcessRunner.run({
+          ...request,
+          arguments: [
+            "config",
+            "--null",
+            "--get-urlmatch",
+            "http",
+            endpoint,
+          ],
+        });
+        assert.equal(probe.exitCode, 0);
+        scopedConfig = probe.stdout.toString("utf8");
+        const credentialProbe = await nodeProcessRunner.run({
+          ...request,
+          arguments: [
+            "config",
+            "--null",
+            "--get-urlmatch",
+            "credential",
+            endpoint,
+          ],
+        });
+        assert.equal(credentialProbe.exitCode, 0);
+        credentialConfig = credentialProbe.stdout.toString("utf8");
+        return {
+          exitCode: 2,
+          signal: null,
+          stderr: Buffer.alloc(0),
+          stdout: Buffer.alloc(0),
+          timedOut: false,
+        };
+      }
+      return nodeProcessRunner.run(request);
+    },
+  };
+  const repository = await discoverRepository({
+    cwd: fixture.worktreePath,
+    gitRunnerOptions: { environment: { GIT_CONFIG_GLOBAL: globalConfig } },
+    processRunner,
+    targetBranch: "main",
+  });
+
+  await planSourceBranchPush(repository, { allowPush: false });
+
+  assert.equal(credentialConfig.includes("credential.helper"), true, JSON.stringify(credentialConfig));
+  assert.equal(credentialConfig.includes("manager"), true, JSON.stringify(credentialConfig));
+  assert.equal(scopedConfig.includes(endpointCanary), true);
+  assert.equal(scopedConfig.includes(otherCanary), false);
+  assert.equal(scopedConfig.includes(unrelatedHttpCanary), false);
+});
+
 test("remote ahead and diverged source refs are blocked without a push command", async (t) => {
   await t.test("ahead", async (t) => {
     const fixture = await fixtureFor(t);
@@ -952,7 +1340,8 @@ test("push execution cannot be redirected at the process spawn boundary", async 
 
   await assert.rejects(
     executeSourceBranchPush(repository, plan, { authorized: true }),
-    (error: unknown) => isToolError(error, "CONCURRENT_UPDATE", /repository|remote|changed/i),
+    (error: unknown) =>
+      isToolError(error, "CONCURRENT_UPDATE", /repository|remote|changed/i),
   );
 
   await fixture.git(["remote", "set-url", "origin", originalRemotePath]);
@@ -1006,6 +1395,100 @@ test("push exact endpoint cannot be rewritten by concurrent Git config", async (
   assert.equal(await fixture.remoteHead(), null);
 });
 
+test("push pins a local endpoint when its configured junction is swapped", async (t) => {
+  const fixture = await fixtureFor(t);
+  const localHead = await fixture.commitFile(
+    "src/junction-endpoint.ts",
+    "export const junctionEndpoint = true;\n",
+    "junction endpoint",
+  );
+  const endpointPath = resolve(fixture.root, "endpoint.git");
+  const redirectedRemotePath = resolve(fixture.root, "junction-redirected.git");
+  await fixture.git(["init", "--bare", "--initial-branch=main", redirectedRemotePath]);
+  await symlink(
+    fixture.remotePath,
+    endpointPath,
+    process.platform === "win32" ? "junction" : "dir",
+  );
+  await fixture.git(["remote", "set-url", "origin", endpointPath]);
+  let redirected = false;
+  const processRunner: ProcessRunner = {
+    async run(request) {
+      if (!redirected && isPushRequest(request)) {
+        redirected = true;
+        await rm(endpointPath, { force: true, recursive: false });
+        await symlink(
+          redirectedRemotePath,
+          endpointPath,
+          process.platform === "win32" ? "junction" : "dir",
+        );
+      }
+      return nodeProcessRunner.run(request);
+    },
+  };
+  const repository = await discoverRepository({
+    cwd: fixture.worktreePath,
+    processRunner,
+    targetBranch: "main",
+  });
+  const plan = await planSourceBranchPush(repository, { allowPush: true });
+
+  await assert.rejects(
+    executeSourceBranchPush(repository, plan, { authorized: true }),
+    (error: unknown) => isToolError(error, "CONCURRENT_UPDATE", /repository|remote|changed/i),
+  );
+
+  await fixture.git(["remote", "set-url", "origin", fixture.remotePath]);
+  assert.equal(await fixture.remoteHead(), localHead);
+  await fixture.git(["remote", "set-url", "origin", redirectedRemotePath]);
+  assert.equal(await fixture.remoteHead(), null);
+});
+
+test("push rejects replacement of the pinned local endpoint before spawn", async (t) => {
+  const fixture = await fixtureFor(t);
+  await fixture.commitFile(
+    "src/replaced-endpoint.ts",
+    "export const replacedEndpoint = true;\n",
+    "replaced endpoint",
+  );
+  const originalRemotePath = fixture.remotePath;
+  const movedRemotePath = resolve(fixture.root, "original-moved.git");
+  const redirectedRemotePath = resolve(fixture.root, "replacement-redirected.git");
+  await fixture.git(["init", "--bare", "--initial-branch=main", redirectedRemotePath]);
+  let replaced = false;
+  const processRunner: ProcessRunner = {
+    async run(request) {
+      if (!replaced && isPushRequest(request)) {
+        replaced = true;
+        await rename(originalRemotePath, movedRemotePath);
+        await symlink(
+          redirectedRemotePath,
+          originalRemotePath,
+          process.platform === "win32" ? "junction" : "dir",
+        );
+      }
+      return nodeProcessRunner.run(request);
+    },
+  };
+  const repository = await discoverRepository({
+    cwd: fixture.worktreePath,
+    processRunner,
+    targetBranch: "main",
+  });
+  const plan = await planSourceBranchPush(repository, { allowPush: true });
+
+  await assert.rejects(
+    executeSourceBranchPush(repository, plan, { authorized: true }),
+    (error: unknown) =>
+      isToolError(error, "PARTIAL_REMOTE_STATE", /outcome|remote|process/i),
+  );
+
+  await fixture.git(["remote", "set-url", "origin", movedRemotePath]);
+  assert.equal(await fixture.remoteHead(), null);
+  await fixture.git(["remote", "set-url", "origin", redirectedRemotePath]);
+  assert.equal(await fixture.remoteHead(), null);
+});
+
 test("push execution cannot be redirected after plan validation", async (t) => {
   const fixture = await fixtureFor(t);
   const localHead = await fixture.commitFile(
@@ -1041,6 +1524,48 @@ test("push execution cannot be redirected after plan validation", async (t) => {
   assert.equal(result.kind, "pushed");
   assert.equal(await fixture.remoteHead(), localHead);
   assert.equal(await fixture.remoteHead("unrelated"), null);
+});
+
+test("push cleanup failure retains the verified remote outcome in a typed error", {
+  skip: process.platform !== "win32",
+}, async (t) => {
+  const fixture = await fixtureFor(t);
+  const localHead = await fixture.commitFile(
+    "src/push-cleanup-failure.ts",
+    "export const pushCleanupFailure = true;\n",
+    "push cleanup failure",
+  );
+  let held: HeldWindowsFile | undefined;
+  const processRunner: ProcessRunner = {
+    async run(request) {
+      const result = await nodeProcessRunner.run(request);
+      if (isPushRequest(request)) {
+        const gitDirectory = request.environment.GIT_DIR;
+        assert.notEqual(gitDirectory, undefined);
+        held = await holdTemporaryViewFile(dirname(gitDirectory as string));
+      }
+      return result;
+    },
+  };
+  const repository = await discoverRepository({
+    cwd: fixture.worktreePath,
+    processRunner,
+    targetBranch: "main",
+  });
+  const plan = await planSourceBranchPush(repository, { allowPush: true });
+
+  try {
+    await assert.rejects(
+      executeSourceBranchPush(repository, plan, { authorized: true }),
+      (error: unknown) =>
+        isToolError(error, "PARTIAL_REMOTE_STATE", /cleanup|temporary/i) &&
+        error.details.actual === `remote source SHA verified as ${localHead}; temporary cleanup failed` &&
+        !JSON.stringify(error.details).includes("EBUSY"),
+    );
+    assert.equal(await fixture.remoteHead(), localHead);
+  } finally {
+    await releaseTemporaryViewFile(held);
+  }
 });
 
 test("push execution preserves unknown and concurrent remote outcomes", async (t) => {

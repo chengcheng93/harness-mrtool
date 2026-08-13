@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, realpath, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -10,6 +10,7 @@ import {
   readGitText,
   runGitChecked,
 } from "./repository.ts";
+import { removeTemporaryDirectory } from "./runner.ts";
 
 interface RawDiffRecord {
   readonly binary: boolean;
@@ -25,6 +26,23 @@ export interface CanonicalChangeSet {
   readonly mergeBaseSha: string;
   readonly sourceHeadSha: string;
   readonly targetRefSha: string;
+}
+
+function cleanupAfterChangeSetFailure(
+  operationError: unknown,
+  cleanupError: unknown,
+): ToolError<"REPOSITORY_ERROR"> {
+  return new ToolError(
+    "REPOSITORY_ERROR",
+    "Cannot read canonical ChangeSet: operation failed and temporary Git view cleanup also failed",
+    {
+      field: "changeSet",
+      expected: "a canonical ChangeSet and all temporary Git state removed",
+      actual: "ChangeSet read failed; temporary cleanup also failed",
+      safeNextStep: "Close processes using temporary Git files, remove the temporary directory, inspect the committed diff, and retry.",
+    },
+    new AggregateError([operationError, cleanupError]),
+  );
 }
 
 function changeSetError(message: string): ToolError<"REPOSITORY_ERROR"> {
@@ -104,12 +122,26 @@ async function createIsolatedGitView(
       baseEnvironment,
     );
   } catch (error) {
-    await rm(temporaryRoot, { force: true, recursive: true });
+    try {
+      await removeTemporaryDirectory(temporaryRoot);
+    } catch (cleanupError) {
+      throw new ToolError(
+        "REPOSITORY_ERROR",
+        "Cannot initialize canonical ChangeSet: temporary Git view cleanup failed",
+        {
+          field: "changeSet",
+          expected: "temporary Git state removed before returning",
+          actual: "temporary cleanup failed after initialization failed",
+          safeNextStep: "Close processes using temporary Git files, remove the temporary directory, and retry.",
+        },
+        new AggregateError([error, cleanupError]),
+      );
+    }
     throw error;
   }
   return Object.freeze({
     async dispose(): Promise<void> {
-      await rm(temporaryRoot, { force: true, recursive: true });
+      await removeTemporaryDirectory(temporaryRoot);
     },
     environment: Object.freeze({
       ...baseEnvironment,
@@ -304,6 +336,7 @@ export async function readCanonicalChangeSet(
   repository: RepositorySnapshot,
 ): Promise<CanonicalChangeSet> {
   const isolated = await createIsolatedGitView(repository);
+  let operationError: unknown;
   try {
     const mergeBases = (await readGitText(
       repository.runner,
@@ -363,7 +396,27 @@ export async function readCanonicalChangeSet(
       sourceHeadSha: repository.sourceHeadSha,
       targetRefSha: repository.targetRefSha,
     });
+  } catch (error) {
+    operationError = error;
+    throw error;
   } finally {
-    await isolated.dispose();
+    try {
+      await isolated.dispose();
+    } catch (cleanupError) {
+      if (operationError !== undefined) {
+        throw cleanupAfterChangeSetFailure(operationError, cleanupError);
+      }
+      throw new ToolError(
+        "REPOSITORY_ERROR",
+        "Cannot read canonical ChangeSet: temporary Git view cleanup failed",
+        {
+          field: "changeSet",
+          expected: "temporary Git state removed before returning",
+          actual: "canonical ChangeSet computed; temporary cleanup failed",
+          safeNextStep: "Close processes using temporary Git files, remove the temporary directory, and retry.",
+        },
+        cleanupError,
+      );
+    }
   }
 }

@@ -3,6 +3,8 @@ import { fileURLToPath } from "node:url";
 
 import { ToolError } from "../contracts/errors.ts";
 import {
+  captureFileIdentity,
+  type FileIdentity,
   GitRunner,
   type GitRunnerOptions,
   type ProcessResult,
@@ -34,6 +36,7 @@ export type RemoteEndpointIdentity =
   | {
       readonly key: string;
       readonly kind: "local";
+      readonly fileIdentity: FileIdentity;
       readonly project: null;
     };
 
@@ -327,14 +330,31 @@ function normalizedProjectPath(value: string): string | null {
   return path;
 }
 
-function localEndpointIdentity(root: string, value: string): RemoteEndpointIdentity {
+async function localEndpointIdentity(
+  root: string,
+  value: string,
+): Promise<RemoteEndpointIdentity> {
   const absolutePath = resolve(root, value);
+  let fileIdentity: FileIdentity;
+  try {
+    fileIdentity = await captureFileIdentity(absolutePath);
+  } catch (error) {
+    throw repositoryError(
+      "Selected local remote endpoint is not accessible",
+      "remote",
+      "one existing local Git repository",
+      "unavailable local endpoint",
+      "Correct the selected local remote path and retry.",
+      error,
+    );
+  }
   const canonicalPath = process.platform === "win32"
-    ? absolutePath.replaceAll("\\", "/").toLowerCase()
-    : absolutePath;
+    ? fileIdentity.path.replaceAll("\\", "/").toLowerCase()
+    : fileIdentity.path;
   return Object.freeze({
-    key: `local:${canonicalPath}`,
+    key: `local:${canonicalPath}:${fileIdentity.device}:${fileIdentity.inode}`,
     kind: "local",
+    fileIdentity,
     project: null,
   });
 }
@@ -362,10 +382,10 @@ function gitLabEndpointIdentity(
   });
 }
 
-function normalizeRemoteEndpoint(
+async function normalizeRemoteEndpoint(
   root: string,
   value: string,
-): RemoteEndpointIdentity {
+): Promise<RemoteEndpointIdentity> {
   if (value === "" || value.includes("\u0000") || /[\r\n]/u.test(value)) {
     throw repositoryError(
       "Selected remote URL is invalid",
@@ -388,7 +408,7 @@ function normalizeRemoteEndpoint(
   }
   if (value.startsWith("file:")) {
     try {
-      return localEndpointIdentity(root, fileURLToPath(value));
+      return await localEndpointIdentity(root, fileURLToPath(value));
     } catch (error) {
       throw repositoryError(
         "Selected remote file URL is invalid",
@@ -411,6 +431,18 @@ function normalizeRemoteEndpoint(
   try {
     const url = new URL(value);
     if (
+      url.password !== "" ||
+      ((url.protocol === "http:" || url.protocol === "https:") && url.username !== "")
+    ) {
+      throw repositoryError(
+        "Selected remote URL contains embedded credentials",
+        "remote",
+        "a credential-free remote URL",
+        "embedded URL userinfo",
+        "Remove credentials from the remote URL and use a credential helper instead.",
+      );
+    }
+    if (
       !["git:", "http:", "https:", "ssh:"].includes(url.protocol) ||
       url.hash !== "" ||
       url.search !== ""
@@ -419,6 +451,7 @@ function normalizeRemoteEndpoint(
     }
     return gitLabEndpointIdentity(url.host, url.pathname);
   } catch (error) {
+    if (error instanceof ToolError) throw error;
     throw repositoryError(
       "Selected remote URL does not identify one GitLab project",
       "remote",
@@ -470,8 +503,10 @@ async function readRemoteIdentity(
     readRemoteUrl(runner, remote, false),
     readRemoteUrl(runner, remote, true),
   ]);
-  const fetchIdentity = normalizeRemoteEndpoint(root, fetchUrl);
-  const pushIdentity = normalizeRemoteEndpoint(root, pushUrl);
+  const [fetchIdentity, pushIdentity] = await Promise.all([
+    normalizeRemoteEndpoint(root, fetchUrl),
+    normalizeRemoteEndpoint(root, pushUrl),
+  ]);
   if (fetchIdentity.key !== pushIdentity.key) {
     throw repositoryError(
       "Selected remote fetch and push URLs identify different repositories",
@@ -481,7 +516,11 @@ async function readRemoteIdentity(
       "Select or configure a remote whose fetch and push URLs identify the same project.",
     );
   }
-  return Object.freeze({ fetchUrl, identity: fetchIdentity, pushUrl });
+  return Object.freeze({
+    fetchUrl: fetchIdentity.kind === "local" ? fetchIdentity.fileIdentity.path : fetchUrl,
+    identity: fetchIdentity,
+    pushUrl: pushIdentity.kind === "local" ? pushIdentity.fileIdentity.path : pushUrl,
+  });
 }
 
 export async function discoverRepository(
