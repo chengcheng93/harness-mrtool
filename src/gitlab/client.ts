@@ -226,7 +226,7 @@ export class GitLabClient {
       if (nextRaw === "") return Object.freeze(result);
       if (!/^\d+$/u.test(nextRaw)) throw apiError("pagination", "invalid next page");
       const next = Number(nextRaw);
-      if (!Number.isSafeInteger(next) || next < 1) throw apiError("pagination", "invalid next page");
+      if (!Number.isSafeInteger(next) || next !== page + 1) throw apiError("pagination", "non-consecutive next page");
       page = next;
     }
     throw apiError("pagination", "page limit exceeded");
@@ -235,8 +235,12 @@ export class GitLabClient {
   async getProject(project: string): Promise<GitLabProject> {
     const response = await this.get(`/api/v4/projects/${encodeId(project)}`);
     const record = object(response.data, "project");
+    const id = String(integer(record.id, "project.id"));
+    if (/^[1-9]\d*$/u.test(project) && id !== project) {
+      throw apiError("project", "project ID mismatch");
+    }
     return Object.freeze({
-      id: String(integer(record.id, "project.id")),
+      id,
       fullPath: string(record.path_with_namespace, "project.path_with_namespace"),
       defaultBranch: string(record.default_branch, "project.default_branch"),
       webUrl: string(record.web_url, "project.web_url"),
@@ -260,14 +264,18 @@ export class GitLabClient {
     return Object.freeze(groups.sort((a, b) => ordinal(a.fullPath, b.fullPath)));
   }
 
-  private async labelGlobalIds(projectPath: string): Promise<ReadonlyMap<string, string>> {
+  private async labelGlobalIds(project: GitLabProject): Promise<ReadonlyMap<string, string>> {
     const result = new Map<string, string>();
     const cursors = new Set<string>();
     let after: string | null = null;
     for (let count = 0; count < MAX_GRAPHQL_PAGES; count += 1) {
-      const data = await this.graphql(LABEL_GLOBAL_IDS_QUERY, { fullPath: projectPath, after });
-      const project = object(data.project, "GraphQL project");
-      const labels = object(project.labels, "GraphQL labels");
+      const data = await this.graphql(LABEL_GLOBAL_IDS_QUERY, { fullPath: project.fullPath, after });
+      const graphqlProject = object(data.project, "GraphQL project");
+      if (string(graphqlProject.id, "GraphQL project.id") !== `gid://gitlab/Project/${project.id}` ||
+          string(graphqlProject.fullPath, "GraphQL project.fullPath") !== project.fullPath) {
+        throw apiError("GraphQL project", "project identity mismatch");
+      }
+      const labels = object(graphqlProject.labels, "GraphQL labels");
       for (const value of array(labels.nodes, "GraphQL label nodes")) {
         const node = object(value, "GraphQL label");
         const id = string(node.id, "GraphQL label.id");
@@ -306,7 +314,7 @@ export class GitLabClient {
       }));
       rest.push(...values.map((value) => restLabel(value, { kind: "group", id: group.id, path: group.fullPath })));
     }
-    const gids = await this.labelGlobalIds(project.fullPath);
+    const gids = await this.labelGlobalIds(project);
     const seenScopeIds = new Set<string>();
     const all = rest.map((label): GitLabLabel => {
       const key = `${label.scopeKind}:${label.scopeId}:${String(label.restId)}`;
@@ -429,10 +437,16 @@ export class GitLabClient {
   }
 
   async getReviewState(projectReference: string, iid: number): Promise<GitLabReviewState> {
+    if (!Number.isSafeInteger(iid) || iid < 1) throw new TypeError("MR IID must be positive");
     const project = await this.getProject(projectReference);
     const approvals = object((await this.get(
       `/api/v4/projects/${encodeId(project.id)}/merge_requests/${String(iid)}/approvals`,
     )).data, "merge request approvals");
+    const mergeRequestId = integer(approvals.id, "merge request approvals.id");
+    if (integer(approvals.project_id, "merge request approvals.project_id") !== Number(project.id) ||
+        integer(approvals.iid, "merge request approvals.iid") !== iid) {
+      throw apiError("merge request approvals", "project or MR identity mismatch");
+    }
     const approved = array(approvals.approved_by, "merge request approvals approved_by").map((value) => {
       const record = object(value, "merge request approval");
       return user(record.user as JsonValue, "merge request approver").id;
@@ -442,10 +456,21 @@ export class GitLabClient {
     for (const value of discussions) {
       const record = object(value, "merge request discussion");
       const notes = array(record.notes, "discussion notes");
-      if (notes.some((note) => {
+      let discussionUnresolved = false;
+      for (const note of notes) {
         const noteRecord = object(note, "discussion note");
-        return noteRecord.resolvable === true && noteRecord.resolved === false;
-      })) unresolved += 1;
+        if (integer(noteRecord.project_id, "discussion note.project_id") !== Number(project.id) ||
+            integer(noteRecord.noteable_id, "discussion note.noteable_id") !== mergeRequestId ||
+            string(noteRecord.noteable_type, "discussion note.noteable_type") !== "MergeRequest" ||
+            (noteRecord.noteable_iid !== undefined && noteRecord.noteable_iid !== null &&
+              integer(noteRecord.noteable_iid, "discussion note.noteable_iid") !== iid)) {
+          throw apiError("merge request discussion", "project or noteable identity mismatch");
+        }
+        const resolvable = boolean(noteRecord.resolvable, "discussion note.resolvable");
+        const resolved = boolean(noteRecord.resolved, "discussion note.resolved");
+        if (resolvable && !resolved) discussionUnresolved = true;
+      }
+      if (discussionUnresolved) unresolved += 1;
     }
     return Object.freeze({
       approvedUserIds: Object.freeze([...new Set(approved)].sort(ordinal)),

@@ -37,10 +37,20 @@ function restLabel(
   };
 }
 
-function labelGraphql(nodes: readonly Record<string, unknown>[], hasNextPage: boolean, endCursor: string | null): Record<string, unknown> {
+function labelGraphql(
+  nodes: readonly Record<string, unknown>[],
+  hasNextPage: boolean,
+  endCursor: string | null,
+  project: { readonly id: string; readonly fullPath: string } = {
+    id: "gid://gitlab/Project/7",
+    fullPath: "group/project",
+  },
+): Record<string, unknown> {
   return {
     data: {
       project: {
+        id: project.id,
+        fullPath: project.fullPath,
         labels: { nodes, pageInfo: { hasNextPage, endCursor } },
       },
     },
@@ -96,6 +106,19 @@ test("rejects malformed credential and response-header runtime values with stabl
   await assert.rejects(badCredential.requestJson("GET", "/api/v4/version"), (error: unknown) =>
     typeof error === "object" && error !== null && "code" in error && error.code === "AUTH_ERROR");
 
+  let whitespaceCredentialCalls = 0;
+  const whitespaceCredential = new GitLabHttpClient({
+    origin: "https://gitlab.example.test",
+    tokenProvider: async () => " token ",
+    transport: { async request() {
+      whitespaceCredentialCalls += 1;
+      throw new Error("must not run");
+    } },
+  });
+  await assert.rejects(whitespaceCredential.requestJson("GET", "/api/v4/version"), (error: unknown) =>
+    typeof error === "object" && error !== null && "code" in error && error.code === "AUTH_ERROR");
+  assert.equal(whitespaceCredentialCalls, 0);
+
   const badHeader = new GitLabHttpClient({
     origin: "https://gitlab.example.test",
     tokenProvider: async () => "token",
@@ -127,6 +150,19 @@ test("bounds response size before strict JSON parsing", async () => {
   });
   const project = await api.getProject("group/project");
   assert.equal(project.fullPath.length, 2_200_006);
+});
+
+test("rejects a numeric project lookup whose response has another ID", async () => {
+  const fake = new FakeGitLab();
+  fake.enqueue("GET", "/api/v4/projects/7", { body: {
+    id: 8,
+    path_with_namespace: "other/project",
+    default_branch: "develop",
+    web_url: "https://gitlab.example.test/other/project",
+  } });
+
+  await assert.rejects(client(fake).getProject("7"), (error: unknown) =>
+    typeof error === "object" && error !== null && "code" in error && error.code === "GITLAB_ERROR");
 });
 
 test("enforces the response limit even when a custom transport ignores it", async () => {
@@ -218,6 +254,35 @@ test("reads every project and ancestor-group label page and applies project prec
   );
 });
 
+test("rejects labels when a GraphQL full path resolves to another project", async () => {
+  const fake = new FakeGitLab();
+  fake.enqueue("GET", "/api/v4/projects/7", { body: {
+    id: 7,
+    path_with_namespace: "group/project",
+    default_branch: "develop",
+    web_url: "https://gitlab.example.test/group/project",
+  } });
+  fake.enqueue("GET", "/api/v4/projects/7/groups?with_shared=false&per_page=100&page=1", {
+    headers: { "x-next-page": "" },
+    body: [],
+  });
+  fake.enqueue("GET", "/api/v4/projects/7/labels?include_ancestor_groups=false&per_page=100&page=1", {
+    headers: { "x-next-page": "" },
+    body: [restLabel(1, "type::bug")],
+  });
+  fake.enqueue("POST", "/api/graphql", {
+    body: labelGraphql(
+      [{ id: "gid://gitlab/ProjectLabel/1", title: "type::bug" }],
+      false,
+      null,
+      { id: "gid://gitlab/Project/8", fullPath: "group/project" },
+    ),
+  });
+
+  await assert.rejects(client(fake).listLabels("7"), (error: unknown) =>
+    typeof error === "object" && error !== null && "code" in error && error.code === "GITLAB_ERROR");
+});
+
 test("rejects same-priority duplicate group labels instead of guessing", async () => {
   const fake = new FakeGitLab();
   fake.enqueue("GET", "/api/v4/projects/group%2Fproject", { body: {
@@ -256,6 +321,22 @@ test("rejects a paginated REST response with missing continuation metadata", asy
 
   await assert.rejects(client(fake).listAncestorGroups("7"), (error: unknown) =>
     typeof error === "object" && error !== null && "code" in error && error.code === "GITLAB_ERROR");
+});
+
+test("rejects a paginated REST response that skips a page", async () => {
+  const fake = new FakeGitLab();
+  fake.enqueue("GET", "/api/v4/projects/7/groups?with_shared=false&per_page=100&page=1", {
+    headers: { "x-next-page": "3" },
+    body: [{ id: 11, full_path: "group" }],
+  });
+  fake.enqueue("GET", "/api/v4/projects/7/groups?with_shared=false&per_page=100&page=3", {
+    headers: { "x-next-page": "" },
+    body: [{ id: 13, full_path: "parent" }],
+  });
+
+  await assert.rejects(client(fake).listAncestorGroups("7"), (error: unknown) =>
+    typeof error === "object" && error !== null && "code" in error && error.code === "GITLAB_ERROR");
+  assert.equal(fake.requests.length, 1);
 });
 
 test("doctor capability probe requires label ID ADD and REMOVE", async () => {
@@ -343,17 +424,64 @@ test("classifies authenticated HTTP failures without exposing credentials", asyn
   }
 });
 
+test("redacts a credential reflected through request IDs from successful audit and errors", async () => {
+  const token = "Response-Header-Canary-Token";
+  const reflectedToken = token.toLowerCase();
+  const fake = new FakeGitLab();
+  fake.enqueue("GET", "/api/v4/projects/group%2Fproject", {
+    headers: { "x-request-id": `prefix-${reflectedToken}-suffix` },
+    body: {
+      id: 7,
+      path_with_namespace: "group/project",
+      default_branch: "develop",
+      web_url: "https://gitlab.example.test/group/project",
+    },
+  });
+  const api = client(fake, token);
+  await api.getProject("group/project");
+  assert.deepEqual(api.audit().requestIds, []);
+  assert.doesNotMatch(JSON.stringify(api.audit()), new RegExp(token, "iu"));
+
+  const http = new GitLabHttpClient({
+    origin: "https://gitlab.example.test",
+    tokenProvider: async () => token,
+    transport: {
+      async request() {
+        return {
+          status: 500,
+          headers: { "x-request-id": `prefix-${reflectedToken}-suffix` },
+          body: new TextEncoder().encode("{}"),
+        };
+      },
+    },
+  });
+  const error = await http.requestJson("GET", "/api/v4/version").catch((caught: unknown) => caught);
+  assert.equal((error as { code: string }).code, "GITLAB_ERROR");
+  assert.doesNotMatch(JSON.stringify(error), new RegExp(token, "iu"));
+  assert.doesNotMatch(inspect(error, { depth: 10 }), new RegExp(token, "iu"));
+});
+
 test("review state uses approvals rather than treating a completed review as approval", async () => {
   const fake = new FakeGitLab();
   fake.enqueue("GET", "/api/v4/projects/group%2Fproject", { body: {
     id: 7, path_with_namespace: "group/project", default_branch: "develop", web_url: "https://gitlab.example.test/group/project",
   } });
   fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12/approvals", { body: {
+    id: 120,
+    iid: 12,
+    project_id: 7,
     approved_by: [{ user: { id: 41, username: "approver", name: "Approver", state: "active" } }],
   } });
   fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12/discussions?per_page=100&page=1", {
     headers: { "x-next-page": "" },
-    body: [{ notes: [{ resolvable: true, resolved: false }] }],
+    body: [{ notes: [{
+      project_id: 7,
+      noteable_id: 120,
+      noteable_iid: null,
+      noteable_type: "MergeRequest",
+      resolvable: true,
+      resolved: false,
+    }] }],
   });
 
   assert.deepEqual(await client(fake).getReviewState("group/project", 12), {
@@ -361,6 +489,72 @@ test("review state uses approvals rather than treating a completed review as app
     unresolvedDiscussions: 1,
   });
   assert.equal(fake.requests.some((request) => request.url.includes("/reviewers")), false);
+});
+
+test("rejects review state whose approvals or discussions belong to another resource", async () => {
+  for (const variant of ["approval-project", "approval-iid", "discussion-project", "discussion-mr"] as const) {
+    const fake = new FakeGitLab();
+    fake.enqueue("GET", "/api/v4/projects/7", { body: {
+      id: 7,
+      path_with_namespace: "group/project",
+      default_branch: "develop",
+      web_url: "https://gitlab.example.test/group/project",
+    } });
+    fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12/approvals", { body: {
+      id: 120,
+      iid: variant === "approval-iid" ? 13 : 12,
+      project_id: variant === "approval-project" ? 8 : 7,
+      approved_by: [],
+    } });
+    fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12/discussions?per_page=100&page=1", {
+      headers: { "x-next-page": "" },
+      body: [{ notes: [{
+        project_id: variant === "discussion-project" ? 8 : 7,
+        noteable_id: variant === "discussion-mr" ? 121 : 120,
+        noteable_iid: variant === "discussion-mr" ? 13 : 12,
+        noteable_type: "MergeRequest",
+        resolvable: true,
+        resolved: false,
+      }] }],
+    });
+
+    await assert.rejects(client(fake).getReviewState("7", 12), (error: unknown) =>
+      typeof error === "object" && error !== null && "code" in error && error.code === "GITLAB_ERROR");
+  }
+});
+
+test("rejects review discussion state with unknown resolution booleans", async () => {
+  const identity = { project_id: 7, noteable_id: 120, noteable_iid: 12, noteable_type: "MergeRequest" };
+  for (const notes of [
+    [{ ...identity, resolvable: "true", resolved: false }],
+    [{ ...identity, resolvable: true, resolved: "false" }],
+    [{ ...identity, resolvable: false }],
+    [
+      { ...identity, resolvable: true, resolved: false },
+      { ...identity, resolvable: true, resolved: "false" },
+    ],
+  ]) {
+    const fake = new FakeGitLab();
+    fake.enqueue("GET", "/api/v4/projects/7", { body: {
+      id: 7,
+      path_with_namespace: "group/project",
+      default_branch: "develop",
+      web_url: "https://gitlab.example.test/group/project",
+    } });
+    fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12/approvals", { body: {
+      id: 120,
+      iid: 12,
+      project_id: 7,
+      approved_by: [],
+    } });
+    fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12/discussions?per_page=100&page=1", {
+      headers: { "x-next-page": "" },
+      body: [{ notes }],
+    });
+
+    await assert.rejects(client(fake).getReviewState("7", 12), (error: unknown) =>
+      typeof error === "object" && error !== null && "code" in error && error.code === "GITLAB_ERROR");
+  }
 });
 
 test("reads exact applied label IDs and the live target branch head", async () => {
@@ -441,7 +635,10 @@ test("discovers tokenized live candidates while keeping lifecycle labels derived
     { id: "gid://gitlab/ProjectLabel/4", title: "status::review" },
     { id: "gid://gitlab/GroupLabel/21", title: "week::2026-w32-0803-0809" },
   ], false, null) });
-  fake.enqueue("GET", "/api/v4/projects/group%2Fproject", { body: {
+  fake.enqueue("GET", "/api/v4/projects/7", { body: {
+    id: 7, path_with_namespace: "group/project", default_branch: "develop", web_url: "https://gitlab.example.test/group/project",
+  } });
+  fake.enqueue("GET", "/api/v4/projects/7", { body: {
     id: 7, path_with_namespace: "group/project", default_branch: "develop", web_url: "https://gitlab.example.test/group/project",
   } });
   fake.enqueue("GET", "/api/v4/projects/group%2Fproject", { body: {
@@ -458,10 +655,10 @@ test("discovers tokenized live candidates while keeping lifecycle labels derived
   fake.enqueue("GET", "/api/v4/user", { body: {
     id: 40, username: "author", name: "Author", state: "active",
   } });
-  fake.enqueue("GET", "/api/v4/projects/group%2Fproject/repository/branches/develop", { body: {
+  fake.enqueue("GET", "/api/v4/projects/7/repository/branches/develop", { body: {
     name: "develop", commit: { id: "a".repeat(40) },
   } });
-  fake.enqueue("GET", "/api/v4/projects/group%2Fproject/repository/branches/develop", { body: {
+  fake.enqueue("GET", "/api/v4/projects/7/repository/branches/develop", { body: {
     name: "develop", commit: { id: "a".repeat(40) },
   } });
 
@@ -701,5 +898,73 @@ test("context refuses to issue tokens when target HEAD moves during discovery", 
     "code" in error && error.code === "GITLAB_ERROR" &&
     "message" in error && error.message === "Target branch moved during context discovery");
   assert.equal(branchReads, 2);
+  assert.equal(issues, 0);
+});
+
+test("context pins target reads by project ID and rejects a rebound target path before issuing tokens", async () => {
+  const bundle = await loadTemplateBundle(resolve(repositoryRoot, "template-bundle"));
+  const active = [
+    [1, "week::2026-w32-0803-0809"], [2, "type::bug"], [3, "priority::p1"],
+    [4, "status::doing"], [5, "status::review"],
+  ].map(([restId, name]) => ({
+    restId: restId as number,
+    globalId: `gid://gitlab/ProjectLabel/${String(restId)}`,
+    name: name as string,
+    description: "Policy label",
+    color: "#123456",
+    archived: false,
+    scopeKind: "project" as const,
+    scopeId: "7",
+    scopePath: "group/project",
+  }));
+  let pathReads = 0;
+  let issues = 0;
+  const pinnedReferences: string[] = [];
+  const api = {
+    origin: "https://gitlab.example.test",
+    getProject: async (reference: string) => {
+      assert.equal(reference, "group/project");
+      pathReads += 1;
+      return pathReads === 1
+        ? { id: "7", fullPath: "group/project", defaultBranch: "develop", webUrl: "https://gitlab.example.test/group/project" }
+        : { id: "8", fullPath: "group/project", defaultBranch: "develop", webUrl: "https://gitlab.example.test/group/project" };
+    },
+    getBranchHead: async (reference: string) => { pinnedReferences.push(reference); return "a".repeat(40); },
+    labelInventory: async (reference: string) => {
+      pinnedReferences.push(reference);
+      return { all: active, effective: active, audit: { requestIds: [] } };
+    },
+    listUsers: async (reference: string) => {
+      pinnedReferences.push(reference);
+      return [{ id: "40", username: "author", displayName: "Author", state: "active" as const, accessLevel: 40 }];
+    },
+    getCurrentUser: async () => ({ id: "40", username: "author", displayName: "Author", state: "active" as const, accessLevel: null }),
+    audit: () => ({ requestIds: [] }),
+  };
+
+  await assert.rejects(getContext({
+    operation: "create", gitlabOrigin: api.origin, targetProject: "group/project", mrIid: null, issueIid: null,
+    git: {
+      sourceProject: { id: "7", path: "group/project" }, sourceBranch: "fix/51-labels", targetBranch: "develop",
+      targetRefSha: "a".repeat(40), mergeBaseSha: "a".repeat(40), sourceHeadSha: "b".repeat(40),
+      localChecks: {
+        commitConvention: { status: "passed", evidence: "Checked commit convention." },
+        secretScan: { status: "passed", evidence: "Secret scan passed." },
+        repositoryHygiene: { status: "passed", evidence: "Repository hygiene passed." },
+      },
+    },
+    bundle,
+    release: {
+      releaseSetId: "stable-1", releaseTag: "templates-v1.0.0", bundleManifestHash: bundleManifestHash(bundle),
+      cliVersion: "0.1.0-dev", skillProtocol: 1,
+    },
+    gitlab: api as unknown as GitLabClient,
+    store: { issue: async () => { issues += 1; throw new Error("must not issue"); } } as never,
+  }), (error: unknown) => typeof error === "object" && error !== null &&
+    "code" in error && error.code === "GITLAB_ERROR" &&
+    "message" in error && error.message === "Target project identity changed during context discovery");
+  assert.equal(pathReads, 2);
+  assert.equal(pinnedReferences.length > 0, true);
+  assert.equal(pinnedReferences.every((reference) => reference === "7"), true);
   assert.equal(issues, 0);
 });

@@ -1,5 +1,7 @@
 export const LABEL_GLOBAL_IDS_QUERY = `query HarnessMrtoolLabelGlobalIds($fullPath: ID!, $after: String) {
   project(fullPath: $fullPath) {
+    id
+    fullPath
     labels(includeAncestorGroups: true, first: 100, after: $after) {
       nodes { id title }
       pageInfo { hasNextPage endCursor }

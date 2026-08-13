@@ -296,16 +296,16 @@ export async function getContext(options: GetContextOptions): Promise<Discovered
   if (sourceProject.id === project.id && options.git.sourceBranch === options.git.targetBranch) {
     throw contextError("GITLAB_ERROR", "Source and target branches cannot be identical", "identical source and target branch");
   }
-  const targetHead = await options.gitlab.getBranchHead(project.fullPath, options.git.targetBranch);
+  const targetHead = await options.gitlab.getBranchHead(project.id, options.git.targetBranch);
   if (targetHead !== options.git.targetRefSha) {
     throw contextError("GITLAB_ERROR", "Target branch moved after the local Git snapshot", "target HEAD mismatch");
   }
   const [inventory, users, currentUser, issue, mr] = await Promise.all([
-    options.gitlab.labelInventory(project.fullPath),
-    options.gitlab.listUsers(project.fullPath),
+    options.gitlab.labelInventory(project.id),
+    options.gitlab.listUsers(project.id),
     options.gitlab.getCurrentUser(),
-    options.issueIid === null ? Promise.resolve(null) : options.gitlab.getIssue(project.fullPath, options.issueIid),
-    options.mrIid === null ? Promise.resolve(null) : options.gitlab.getMergeRequest(project.fullPath, options.mrIid),
+    options.issueIid === null ? Promise.resolve(null) : options.gitlab.getIssue(project.id, options.issueIid),
+    options.mrIid === null ? Promise.resolve(null) : options.gitlab.getMergeRequest(project.id, options.mrIid),
   ]);
   if (mr !== null && (
     mr.targetProjectId !== project.id || mr.targetBranch !== options.git.targetBranch ||
@@ -316,7 +316,7 @@ export async function getContext(options: GetContextOptions): Promise<Discovered
   }
   const review = mr === null
     ? { approvedUserIds: Object.freeze([]) as readonly string[], unresolvedDiscussions: 0 }
-    : await options.gitlab.getReviewState(project.fullPath, mr.iid);
+    : await options.gitlab.getReviewState(project.id, mr.iid);
   const policyView = policy(options.bundle);
   const categorized = inventory.effective.flatMap((label) => {
     const category = categoryFor(label, policyView.categories);
@@ -406,7 +406,11 @@ export async function getContext(options: GetContextOptions): Promise<Discovered
       skillProtocol: options.release.skillProtocol,
     },
   };
-  const finalTargetHead = await options.gitlab.getBranchHead(project.fullPath, options.git.targetBranch);
+  const finalProject = await options.gitlab.getProject(options.targetProject);
+  if (finalProject.id !== project.id || finalProject.fullPath !== project.fullPath) {
+    throw contextError("GITLAB_ERROR", "Target project identity changed during context discovery", "target project mismatch");
+  }
+  const finalTargetHead = await options.gitlab.getBranchHead(project.id, options.git.targetBranch);
   if (finalTargetHead !== options.git.targetRefSha) {
     throw contextError("GITLAB_ERROR", "Target branch moved during context discovery", "target HEAD mismatch");
   }
