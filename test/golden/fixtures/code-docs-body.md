@@ -126,7 +126,7 @@ None.
 - [x] Commit messages comply with the configured project convention
 - [x] The correct Issue or work item is linked, or the absence is explained
 - [x] Milestone, assignee, due date, and labels have been reviewed
-- [ ] No passwords, tokens, certificates, or SSH private keys are committed (Pending: Secret scan is not configured for this repository.)
+- [ ] No passwords, tokens, certificates, or SSH private keys are committed (Pending: The secret scan has not been run.)
 - [x] No temporary files, build artifacts, personal configuration, or unintended large files are committed
 - [ ] CI has passed, or its current status is documented (Pending: The target project pipeline is still pending.)
 - [x] At least one module owner or maintainer has been requested for review when required

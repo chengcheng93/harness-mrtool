@@ -171,6 +171,173 @@ test("external snapshot accepts only typed sources for derived review state", as
   );
 });
 
+test("renderer enforces every composed Profile base-field and semantic constraint", async () => {
+  const fixture = (name: string) => resolve(import.meta.dirname, "fixtures", name);
+  const [requestValue, snapshot, writePlan, bundle] = await Promise.all([
+    readFile(fixture("code-docs-request.json"), "utf8").then(JSON.parse),
+    readFile(fixture("code-docs-snapshot.json"), "utf8").then(JSON.parse),
+    readFile(fixture("code-docs-write-plan.json"), "utf8").then(JSON.parse),
+    loadTemplateBundle(resolve(repositoryRoot, "template-bundle")),
+  ]);
+  const render = (value: unknown) => {
+    const request = normalizeAndValidateRequest(value);
+    return renderDescription({
+      request,
+      snapshot,
+      writePlan: { ...writePlan, title: renderTitle(request, bundle) },
+      bundle,
+      releaseTag: "templates-v1.0.0",
+      cliVersion: "0.1.0-dev",
+      renderPhase: "final",
+    });
+  };
+
+  assert.throws(
+    () => render({
+      ...requestValue,
+      changes: { ...requestValue.changes, technicalChanges: [] },
+    }),
+    /required base field/u,
+  );
+  assert.throws(
+    () => render({
+      ...requestValue,
+      risk: { ...requestValue.risk, compatibilityImpact: [] },
+    }),
+    /required base field/u,
+  );
+  assert.throws(
+    () => render({
+      ...requestValue,
+      documentation: { ...requestValue.documentation, itemIds: ["no-documentation-changes"] },
+    }),
+    /Profile constraint/u,
+  );
+  assert.throws(
+    () => render({
+      ...requestValue,
+      profileIds: ["ops"],
+      title: { ...requestValue.title, type: "ci" },
+      risk: { ...requestValue.risk, rollbackPlan: [] },
+      verification: {
+        ...requestValue.verification,
+        items: [{
+          ...requestValue.verification.items[0],
+          id: "deployment-pipeline",
+        }],
+      },
+      profileFields: {
+        "ops.affected-environments": ["Production"],
+        "ops.deployment-plan": ["Deploy after approval."],
+        "ops.configuration-compatibility": ["No configuration migration is required."],
+      },
+    }),
+    /required base field/u,
+  );
+  const general = render({
+    ...requestValue,
+    profileIds: ["general"],
+    profileFields: {},
+  });
+  assert.match(general, /### Out of Scope\n\nNone\./u);
+  assert.match(general, /### Known Gaps\n\nNone\./u);
+});
+
+test("renderer rejects unknown, cross-section, and Profile-inapplicable checkbox IDs", async () => {
+  const fixture = (name: string) => resolve(import.meta.dirname, "fixtures", name);
+  const [requestValue, snapshot, writePlan, bundle] = await Promise.all([
+    readFile(fixture("code-docs-request.json"), "utf8").then(JSON.parse),
+    readFile(fixture("code-docs-snapshot.json"), "utf8").then(JSON.parse),
+    readFile(fixture("code-docs-write-plan.json"), "utf8").then(JSON.parse),
+    loadTemplateBundle(resolve(repositoryRoot, "template-bundle")),
+  ]);
+  const render = (value: unknown) => renderDescription({
+    request: normalizeAndValidateRequest(value),
+    snapshot,
+    writePlan,
+    bundle,
+    releaseTag: "templates-v1.0.0",
+    cliVersion: "0.1.0-dev",
+    renderPhase: "final",
+  });
+  const cases: readonly [string, (request: typeof requestValue) => void][] = [
+    ["unknown impact area", (request) => request.impact.areaIds = ["unknown-area"]],
+    ["risk ID in impact area", (request) => request.impact.areaIds = ["low"]],
+    ["evidence ID in impact area", (request) => request.impact.areaIds = ["local-build"]],
+    ["unknown documentation ID", (request) => request.documentation.itemIds = ["unknown-doc"]],
+    ["unknown evidence ID", (request) => request.verification.items[0].id = "unknown-check"],
+    ["categorical ID as evidence", (request) => request.verification.items[0].id = "app"],
+  ];
+
+  for (const [name, mutate] of cases) {
+    const request = structuredClone(requestValue);
+    mutate(request);
+    assert.throws(() => render(request), /checkbox registry contract/u, name);
+  }
+});
+
+test("derived pending reasons are fixed, status-accurate renderer text", async () => {
+  const fixture = (name: string) => resolve(import.meta.dirname, "fixtures", name);
+  const [requestValue, snapshotValue, bundle] = await Promise.all([
+    readFile(fixture("code-docs-request.json"), "utf8").then(JSON.parse),
+    readFile(fixture("code-docs-snapshot.json"), "utf8").then(JSON.parse),
+    loadTemplateBundle(resolve(repositoryRoot, "template-bundle")),
+  ]);
+  const request = normalizeAndValidateRequest(requestValue);
+  const expectedSecretReasons = {
+    failed: "The secret scan failed.",
+    "not-run": "The secret scan has not been run.",
+    unavailable: "The secret scan is unavailable.",
+  } as const;
+
+  for (const [status, reason] of Object.entries(expectedSecretReasons)) {
+    const snapshot = structuredClone(snapshotValue);
+    snapshot.localChecks.secretScan = {
+      status,
+      evidence: `externally controlled ${status} evidence`,
+    };
+    const states = deriveReviewStates(request, validateExternalContextSnapshot(snapshot), bundle);
+    assert.deepEqual(states["secret-scan-reviewed"], { state: "pending", reason });
+  }
+  const metadataUnavailable = structuredClone(snapshotValue);
+  metadataUnavailable.metadataRead = {
+    status: "unavailable",
+    evidence: "externally controlled metadata evidence",
+  };
+  assert.deepEqual(
+    deriveReviewStates(request, validateExternalContextSnapshot(metadataUnavailable), bundle)["metadata-reviewed"],
+    { state: "pending", reason: "Merge request metadata is unavailable." },
+  );
+});
+
+test("external snapshot evidence never enters the visible rendered description", async () => {
+  const fixture = (name: string) => resolve(import.meta.dirname, "fixtures", name);
+  const [requestValue, snapshot, writePlan, bundle] = await Promise.all([
+    readFile(fixture("code-docs-request.json"), "utf8").then(JSON.parse),
+    readFile(fixture("code-docs-snapshot.json"), "utf8").then(JSON.parse),
+    readFile(fixture("code-docs-write-plan.json"), "utf8").then(JSON.parse),
+    loadTemplateBundle(resolve(repositoryRoot, "template-bundle")),
+  ]);
+  const syntheticBearer = `hmrc1_${"A".repeat(43)}`;
+  snapshot.metadataRead = { status: "unavailable", evidence: syntheticBearer };
+  snapshot.localChecks.commitConvention = { status: "failed", evidence: syntheticBearer };
+  snapshot.localChecks.secretScan = { status: "failed", evidence: syntheticBearer };
+  snapshot.localChecks.repositoryHygiene = { status: "failed", evidence: syntheticBearer };
+
+  const description = renderDescription({
+    request: normalizeAndValidateRequest(requestValue),
+    snapshot,
+    writePlan,
+    bundle,
+    releaseTag: "templates-v1.0.0",
+    cliVersion: "0.1.0-dev",
+    renderPhase: "final",
+  });
+
+  assert.equal(description.includes("hmrc1_"), false);
+  assert.equal(description.includes("hmrc1&#95;"), false);
+});
+
 test("code+docs description body matches the canonical eight-section golden", async () => {
   const fixture = (name: string) => resolve(import.meta.dirname, "fixtures", name);
   const [requestValue, snapshot, writePlan, expectedBody, bundle] = await Promise.all([

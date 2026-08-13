@@ -46,6 +46,7 @@ interface CheckboxEntry {
   readonly id: string;
   readonly label: string;
   readonly kind: string;
+  readonly source: string;
   readonly sectionSlot: string;
   readonly order: number;
   readonly applicableProfiles: readonly string[];
@@ -148,7 +149,8 @@ function checkboxEntries(bundle: LoadedTemplateBundle): readonly CheckboxEntry[]
   return registry.checkboxes.map((value) => {
     const entry = asObject(value, "checkbox registry entry");
     if (typeof entry.id !== "string" || typeof entry.label !== "string" ||
-        typeof entry.kind !== "string" || typeof entry.sectionSlot !== "string" ||
+        typeof entry.kind !== "string" || typeof entry.source !== "string" ||
+        typeof entry.sectionSlot !== "string" ||
         !Number.isSafeInteger(entry.order) || !Array.isArray(entry.applicableProfiles) ||
         entry.applicableProfiles.some((profile) => typeof profile !== "string")) {
       throw renderError("checkbox registry entry is invalid");
@@ -157,6 +159,7 @@ function checkboxEntries(bundle: LoadedTemplateBundle): readonly CheckboxEntry[]
       id: entry.id,
       label: entry.label,
       kind: entry.kind,
+      source: entry.source,
       sectionSlot: entry.sectionSlot,
       order: entry.order as number,
       applicableProfiles: entry.applicableProfiles as string[],
@@ -206,6 +209,139 @@ function compareStableId(left: string, right: string): number {
 
 function sameStableIdSet(left: readonly string[], right: readonly string[]): boolean {
   return sameArray([...left].sort(), [...right].sort());
+}
+
+function hasRequiredBaseFieldContent(request: Request, fieldId: string): boolean {
+  switch (fieldId) {
+    case "changes.summary": return request.changes.summary.length > 0;
+    case "changes.technicalChanges": return request.changes.technicalChanges.length > 0;
+    case "changes.outOfScope": return request.changes.outOfScope.length > 0;
+    case "motivation.background": return request.motivation.background.length > 0;
+    case "motivation.whyNeeded": return request.motivation.whyNeeded.length > 0;
+    case "workItem": return true;
+    case "impact.details": return request.impact.details.length > 0;
+    case "verification.items": return request.verification.items.length > 0;
+    case "verification.acceptanceEvidence": return request.verification.acceptanceEvidence.length > 0;
+    case "verification.knownGaps": return request.verification.knownGaps.length > 0;
+    case "documentation.details": return request.documentation.details.length > 0;
+    case "risk.items": return request.risk.items.length > 0;
+    case "risk.compatibilityImpact": return request.risk.compatibilityImpact.length > 0;
+    case "risk.rollbackPlan": return request.risk.rollbackPlan.length > 0;
+    case "review.reviewerFocus": return request.review.reviewerFocus.length > 0;
+    case "review.additionalNotes": return request.review.additionalNotes.length > 0;
+    default: throw renderError(`Profile references unsupported required base field ${fieldId}`);
+  }
+}
+
+function assertProfileContentContract(request: Request, composition: ComposedProfile): void {
+  const nonEmptyBaseFields = new Set<string>();
+  if (composition.profileIds.includes("code")) {
+    nonEmptyBaseFields.add("changes.technicalChanges");
+    nonEmptyBaseFields.add("risk.compatibilityImpact");
+  }
+  if (composition.profileIds.includes("ops")) {
+    nonEmptyBaseFields.add("risk.rollbackPlan");
+  }
+  for (const fieldId of composition.requiredBaseFields) {
+    const hasContent = hasRequiredBaseFieldContent(request, fieldId);
+    if (nonEmptyBaseFields.has(fieldId) && !hasContent) {
+      throw renderError(`required base field ${fieldId} is empty`);
+    }
+  }
+  const expectedProfileFields = [...composition.requiredFieldIds];
+  if (!sameArray(Object.keys(request.profileFields).sort(), [...expectedProfileFields].sort())) {
+    throw renderError("profileFields do not exactly match the active Profile registry fields");
+  }
+  for (const fieldId of expectedProfileFields) {
+    if (request.profileFields[fieldId]?.length === 0) {
+      throw renderError(`required Profile field ${fieldId} is empty`);
+    }
+  }
+  for (const constraint of composition.constraints) {
+    switch (constraint) {
+      case "verification-evidence-state-required":
+      case "deployment-evidence-state-required":
+      case "at-least-one-verification-evidence-state":
+        if (request.verification.items.length === 0) {
+          throw renderError(`Profile constraint ${constraint} requires verification evidence`);
+        }
+        break;
+      case "documentation-change-required":
+        if (request.documentation.itemIds.length === 0 ||
+            request.documentation.itemIds.includes("no-documentation-changes")) {
+          throw renderError(`Profile constraint ${constraint} requires a documentation change`);
+        }
+        break;
+      default:
+        throw renderError(`Profile constraint ${constraint} is unsupported by this renderer`);
+    }
+  }
+}
+
+function assertCheckboxReference(
+  entries: readonly CheckboxEntry[],
+  id: string,
+  expected: { readonly kind: string; readonly source: string; readonly sectionSlot: string },
+  profileIds: readonly string[],
+): void {
+  const entry = entries.find((candidate) => candidate.id === id);
+  if (entry === undefined || entry.kind !== expected.kind || entry.source !== expected.source ||
+      entry.sectionSlot !== expected.sectionSlot ||
+      !entry.applicableProfiles.some((profileId) => profileIds.includes(profileId))) {
+    throw renderError(`checkbox registry contract does not allow ${id} in ${expected.sectionSlot}`);
+  }
+}
+
+function assertRequestCheckboxContract(
+  request: Request,
+  composition: ComposedProfile,
+  entries: readonly CheckboxEntry[],
+): void {
+  for (const id of request.impact.areaIds) {
+    assertCheckboxReference(
+      entries,
+      id,
+      { kind: "categorical", source: "request", sectionSlot: "impact.area" },
+      composition.profileIds,
+    );
+  }
+  assertCheckboxReference(
+    entries,
+    request.impact.nature,
+    { kind: "categorical", source: "request", sectionSlot: "impact.nature" },
+    composition.profileIds,
+  );
+  for (const id of request.documentation.itemIds) {
+    assertCheckboxReference(
+      entries,
+      id,
+      { kind: "categorical", source: "request", sectionSlot: "documentation" },
+      composition.profileIds,
+    );
+  }
+  if (request.documentation.itemIds.includes("no-documentation-changes") &&
+      request.documentation.itemIds.length !== 1) {
+    throw renderError("checkbox registry contract makes documentation selections mutually exclusive");
+  }
+  assertCheckboxReference(
+    entries,
+    request.risk.level,
+    { kind: "categorical", source: "request", sectionSlot: "risk.level" },
+    composition.profileIds,
+  );
+  for (const item of request.verification.items) {
+    assertCheckboxReference(
+      entries,
+      item.id,
+      { kind: "evidence-state", source: "request-evidence", sectionSlot: "verification" },
+      composition.profileIds,
+    );
+  }
+  const actualEvidenceIds = request.verification.items.map((item) => item.id).sort();
+  const requiredEvidenceIds = [...composition.requiredCheckboxIds].sort();
+  if (requiredEvidenceIds.length > 0 && !sameArray(actualEvidenceIds, requiredEvidenceIds)) {
+    throw renderError("verification evidence IDs do not exactly match the composed Profile contract");
+  }
 }
 
 function policyReview(bundle: LoadedTemplateBundle): {
@@ -320,6 +456,41 @@ function frozenReviewStates(value: Record<string, DerivedCheckboxState>): Review
   return Object.freeze(value);
 }
 
+type LocalCheckId = keyof ExternalContextSnapshot["localChecks"];
+type PendingLocalStatus = Exclude<
+  ExternalContextSnapshot["localChecks"][LocalCheckId]["status"],
+  "passed"
+>;
+
+const LOCAL_CHECK_PENDING_REASONS: Readonly<
+  Record<LocalCheckId, Readonly<Record<PendingLocalStatus, string>>>
+> = Object.freeze({
+  commitConvention: Object.freeze({
+    failed: "The commit convention check failed.",
+    "not-run": "The commit convention check has not been run.",
+    unavailable: "The commit convention check is unavailable.",
+  }),
+  secretScan: Object.freeze({
+    failed: "The secret scan failed.",
+    "not-run": "The secret scan has not been run.",
+    unavailable: "The secret scan is unavailable.",
+  }),
+  repositoryHygiene: Object.freeze({
+    failed: "The repository hygiene check failed.",
+    "not-run": "The repository hygiene check has not been run.",
+    unavailable: "The repository hygiene check is unavailable.",
+  }),
+});
+
+function localCheckState(
+  checkId: LocalCheckId,
+  status: ExternalContextSnapshot["localChecks"][LocalCheckId]["status"],
+): DerivedCheckboxState {
+  return status === "passed"
+    ? { state: "checked", reason: null }
+    : { state: "pending", reason: LOCAL_CHECK_PENDING_REASONS[checkId][status] };
+}
+
 export function deriveReviewStates(
   request: Request,
   snapshot: ExternalContextSnapshot,
@@ -345,10 +516,15 @@ export function deriveReviewStates(
     ? { state: "checked", reason: null }
     : { state: "pending", reason: "The linked Issue snapshot is unavailable." };
   const existingMr = snapshot.mergeRequest.iid !== null && snapshot.mergeRequest.lifecycle !== "new";
-  const metadataState: DerivedCheckboxState = existingMr && snapshot.metadataRead.status === "available" &&
-      (request.workItem.relation === "none" || (snapshot.issue.kind === "linked" && snapshot.issue.readStatus === "available"))
-    ? { state: "checked", reason: null }
-    : { state: "pending", reason: snapshot.metadataRead.evidence };
+  const issueMetadataAvailable = request.workItem.relation === "none" ||
+    (snapshot.issue.kind === "linked" && snapshot.issue.readStatus === "available");
+  const metadataState: DerivedCheckboxState = !existingMr
+    ? { state: "pending", reason: "Merge request metadata is unavailable before the merge request exists." }
+    : snapshot.metadataRead.status === "unavailable"
+      ? { state: "pending", reason: "Merge request metadata is unavailable." }
+      : !issueMetadataAvailable
+        ? { state: "pending", reason: "The linked Issue snapshot is unavailable." }
+        : { state: "checked", reason: null };
   const ciReason: Readonly<Record<ExternalContextSnapshot["ci"]["status"], string>> = {
     unavailable: "The target project pipeline status is unavailable.",
     pending: "The target project pipeline is still pending.",
@@ -362,17 +538,17 @@ export function deriveReviewStates(
     "source-branch-synced": snapshot.mergeBaseSha === snapshot.targetRefSha
       ? { state: "checked", reason: null }
       : { state: "pending", reason: "The source branch does not contain the recorded target ref." },
-    "commit-convention": snapshot.localChecks.commitConvention.status === "passed"
-      ? { state: "checked", reason: null }
-      : { state: "pending", reason: "The configured commit convention check has not passed." },
+    "commit-convention": localCheckState(
+      "commitConvention",
+      snapshot.localChecks.commitConvention.status,
+    ),
     "work-item-reviewed": workItemState,
     "metadata-reviewed": metadataState,
-    "secret-scan-reviewed": snapshot.localChecks.secretScan.status === "passed"
-      ? { state: "checked", reason: null }
-      : { state: "pending", reason: "Secret scan is not configured for this repository." },
-    "repository-hygiene-reviewed": snapshot.localChecks.repositoryHygiene.status === "passed"
-      ? { state: "checked", reason: null }
-      : { state: "pending", reason: "Repository hygiene checks have not passed." },
+    "secret-scan-reviewed": localCheckState("secretScan", snapshot.localChecks.secretScan.status),
+    "repository-hygiene-reviewed": localCheckState(
+      "repositoryHygiene",
+      snapshot.localChecks.repositoryHygiene.status,
+    ),
     "ci-status": snapshot.ci.status === "passed"
       ? { state: "checked", reason: null }
       : { state: "pending", reason: ciReason[snapshot.ci.status] },
@@ -423,10 +599,8 @@ function prepareInputs(value: RenderDescriptionInputs | unknown): PreparedInputs
   if (!sameArray(composition.profileIds, request.profileIds)) {
     throw renderError("Profile IDs are not in canonical composition order");
   }
-  const expectedProfileFields = [...composition.requiredFieldIds];
-  if (!sameArray(Object.keys(request.profileFields).sort(), [...expectedProfileFields].sort())) {
-    throw renderError("profileFields do not exactly match the active Profile registry fields");
-  }
+  assertProfileContentContract(request, composition);
+  assertRequestCheckboxContract(request, composition, checkboxEntries(bundle));
   return {
     request,
     snapshot,
