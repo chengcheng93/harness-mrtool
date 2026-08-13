@@ -377,17 +377,33 @@ test("rejects candidate or context bearer values anywhere in the document before
   assert.ok(labelCandidate);
 
   for (const bearer of bearerValues) {
-    await assert.rejects(
-      store.issue({
-        ...issueInput,
-        candidates: [{ ...labelCandidate, description: bearer }],
-      }),
-      (error: unknown) =>
-        isToolError(error, "INPUT_ERROR", /bearer|token/i) &&
-        !((error as Error).message.includes(bearer)),
-    );
-    assert.equal(await readFile(resolve(directory, "candidate-contexts-v1.json"), "utf8"), before);
+    for (const input of [
+      { ...issueInput, candidates: [{ ...labelCandidate, description: `prefix ${bearer} suffix` }] },
+      { ...issueInput, snapshot: { ...snapshot, note: `prefix ${bearer} suffix` } },
+    ]) {
+      await assert.rejects(
+        store.issue(input),
+        (error: unknown) =>
+          isToolError(error, "INPUT_ERROR", /bearer|token/i) &&
+          !((error as Error).message.includes(bearer)),
+      );
+      assert.equal(await readFile(resolve(directory, "candidate-contexts-v1.json"), "utf8"), before);
+    }
   }
+
+  const nearMatches = [
+    `hmrc1_${"A".repeat(42)}`,
+    `hmrx1_${"A".repeat(44)}`,
+  ];
+  await store.issue({
+    ...issueInput,
+    candidates: nearMatches.map((description, index) => ({
+      ...labelCandidate,
+      restId: labelCandidate.restId + index + 1,
+      globalId: `${labelCandidate.globalId}-${String(index)}`,
+      description: `prefix ${description} suffix`,
+    })),
+  });
 });
 
 test("rejects a symbolic-link store instead of following it", async (context) => {
@@ -526,6 +542,36 @@ test("issue rejects non-finite clocks before creating a store", async (context) 
   );
   await assert.rejects(
     readFile(resolve(directory, "candidate-contexts-v1.json"), "utf8"),
+    /ENOENT/u,
+  );
+});
+
+test("issue rejects a clock whose TTL would exceed the safe integer range without mutation", async (context) => {
+  const { directory, clock, store } = await fixture(context);
+  await store.issue(issueInput);
+  const storePath = resolve(directory, "candidate-contexts-v1.json");
+  const before = await readFile(storePath, "utf8");
+  clock.set(Number.MAX_SAFE_INTEGER - CANDIDATE_CONTEXT_TTL_MS + 1);
+
+  await assert.rejects(
+    store.issue(issueInput),
+    (error: unknown) => isToolError(error, "INTERNAL_ERROR", /clock/i),
+  );
+  assert.equal(await readFile(storePath, "utf8"), before);
+
+  const emptyDirectory = resolve(directory, "empty");
+  const emptyStore = new CandidateContextStore({
+    stateDirectory: emptyDirectory,
+    clock,
+    random: new CounterRandom(),
+    windowsAclVerifier: allowTestAcl,
+  });
+  await assert.rejects(
+    emptyStore.issue(issueInput),
+    (error: unknown) => isToolError(error, "INTERNAL_ERROR", /clock/i),
+  );
+  await assert.rejects(
+    readFile(resolve(emptyDirectory, "candidate-contexts-v1.json"), "utf8"),
     /ENOENT/u,
   );
 });

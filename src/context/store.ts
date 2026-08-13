@@ -54,7 +54,7 @@ const SHA256 = /^[a-f0-9]{64}$/u;
 const SHA = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u;
 const MAX_STORE_BYTES = 16 * 1024 * 1024;
 const MAX_COLLISION_ATTEMPTS = 8;
-const RAW_CANDIDATE_TOKEN = /^hmrc1_[A-Za-z0-9_-]{43}$/u;
+const RAW_BEARER = /(?:hmrc1_|hmrx1_)[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])/u;
 const LOCK_LEASE_MS = 10_000;
 const INCOMPLETE_LOCK_GRACE_MS = 1_000;
 
@@ -199,7 +199,7 @@ function assertTokenlessSnapshot(value: JsonValue): void {
   const pending: JsonValue[] = [value];
   while (pending.length > 0) {
     const current = pending.pop();
-    if (typeof current === "string" && RAW_CANDIDATE_TOKEN.test(current)) {
+    if (typeof current === "string" && RAW_BEARER.test(current)) {
       throw contextInputError("External context must be a tokenless snapshot", "snapshot");
     }
     if (Array.isArray(current)) {
@@ -214,7 +214,7 @@ function containsRawBearer(value: JsonValue): boolean {
   const pending: JsonValue[] = [value];
   while (pending.length > 0) {
     const current = pending.pop();
-    if (typeof current === "string" && /^(?:hmrc1_|hmrx1_)[A-Za-z0-9_-]{43}$/u.test(current)) {
+    if (typeof current === "string" && RAW_BEARER.test(current)) {
       return true;
     }
     if (Array.isArray(current)) {
@@ -546,9 +546,11 @@ export class CandidateContextStore {
     throw internalError("Secure random candidate token collision limit exceeded");
   }
 
-  private now(): number {
+  private now(requiredFutureMs = 0): number {
     const now = this.clock.now();
-    if (!Number.isSafeInteger(now) || now < 0) {
+    if (!Number.isSafeInteger(now) || now < 0 ||
+        !Number.isSafeInteger(requiredFutureMs) || requiredFutureMs < 0 ||
+        now > Number.MAX_SAFE_INTEGER - requiredFutureMs) {
       throw internalError("Candidate context clock is invalid");
     }
     return now;
@@ -577,7 +579,7 @@ export class CandidateContextStore {
     assertTokenlessSnapshot(input.snapshot);
     return this.locked(async (lease) => {
       const document = await this.readDocument();
-      const now = this.now();
+      const now = this.now(CANDIDATE_CONTEXT_TTL_MS);
       const active = document.contexts.filter((context) => context.expiresAtMs > now);
       const activeDocument: ContextStoreDocument = { storeVersion: CONTEXT_STORE_VERSION, contexts: active };
       const contextId = this.uniqueContextId(activeDocument);
