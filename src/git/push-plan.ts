@@ -86,7 +86,7 @@ function partialRemoteError(message: string, actual: string, cause?: unknown): T
 function concurrentUpdateError(actual: string, cause?: unknown): ToolError<"CONCURRENT_UPDATE"> {
   return new ToolError(
     "CONCURRENT_UPDATE",
-    "Remote source branch SHA changed during push execution",
+    "Remote source branch SHA changed after push planning or during execution",
     {
       field: "sourceBranch",
       expected: "the planned local HEAD after push",
@@ -292,8 +292,20 @@ export async function executeSourceBranchPush(
   options: ExecutePushOptions,
 ): Promise<PushResult> {
   assertPushPlan(repository, plan);
+  if (plan.kind === "up-to-date") {
+    await assertCleanWorktree(repository);
+    await assertRepositoryUnchanged(repository);
+    const remoteSha = await readRemoteSha(repository);
+    if (remoteSha !== repository.sourceHeadSha) {
+      throw concurrentUpdateError(remoteSha ?? "absent");
+    }
+    return Object.freeze({
+      kind: "not-written",
+      beforeSha: plan.beforeSha,
+      afterSha: remoteSha,
+    });
+  }
   if (
-    plan.kind === "up-to-date" ||
     plan.kind === "confirmation-required" ||
     !options.authorized ||
     options.dryRun === true

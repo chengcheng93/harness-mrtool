@@ -1,3 +1,6 @@
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
+
 import type { DiffItem } from "../bundle/detect-profile.ts";
 import { ToolError } from "../contracts/errors.ts";
 import {
@@ -30,6 +33,91 @@ function changeSetError(message: string): ToolError<"REPOSITORY_ERROR"> {
     actual: "malformed or unsupported Git diff",
     safeNextStep: "Inspect the committed diff and repository history with Git, then retry.",
   });
+}
+
+async function assertDeterministicAttributes(
+  repository: RepositorySnapshot,
+): Promise<void> {
+  let configuredAttributes;
+  try {
+    configuredAttributes = await repository.runner.run([
+      "config",
+      "--null",
+      "--get-all",
+      "core.attributesFile",
+    ]);
+  } catch (error) {
+    throw new ToolError(
+      "REPOSITORY_ERROR",
+      "Cannot read canonical ChangeSet: Git attribute configuration is unavailable",
+      {
+        field: "changeSet.attributes",
+        expected: "no configured core.attributesFile",
+        actual: "Git process failure",
+        safeNextStep: "Inspect Git attribute configuration and retry.",
+      },
+      error,
+    );
+  }
+  if (configuredAttributes.timedOut ||
+      ![0, 1].includes(configuredAttributes.exitCode ?? -1)) {
+    throw changeSetError("Git attribute configuration could not be read");
+  }
+  if (configuredAttributes.exitCode === 0) {
+    throw new ToolError(
+      "REPOSITORY_ERROR",
+      "Cannot read canonical ChangeSet: core.attributesFile may alter committed diff classification",
+      {
+        field: "changeSet.attributes",
+        expected: "core.attributesFile unset",
+        actual: "configured",
+        safeNextStep: "Unset core.attributesFile for this invocation and retry.",
+      },
+    );
+  }
+  if (configuredAttributes.stdout.length !== 0) {
+    throw changeSetError("Git returned malformed attribute configuration output");
+  }
+
+  const infoAttributesPath = resolve(
+    repository.root,
+    await readGitText(
+      repository.runner,
+      ["rev-parse", "--git-path", "info/attributes"],
+      "repository attribute override path",
+    ),
+  );
+  let infoAttributes: Buffer;
+  try {
+    infoAttributes = await readFile(infoAttributesPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return;
+    }
+    throw new ToolError(
+      "REPOSITORY_ERROR",
+      "Cannot read canonical ChangeSet: repository attribute overrides are unreadable",
+      {
+        field: "changeSet.attributes",
+        expected: "an absent or empty info/attributes file",
+        actual: "unreadable",
+        safeNextStep: "Inspect .git/info/attributes permissions and retry.",
+      },
+      error,
+    );
+  }
+  if (infoAttributes.length !== 0) {
+    throw new ToolError(
+      "REPOSITORY_ERROR",
+      "Cannot read canonical ChangeSet: info/attributes may alter committed diff classification",
+      {
+        field: "changeSet.attributes",
+        expected: "an absent or empty info/attributes file",
+        actual: "non-empty",
+        safeNextStep: "Remove repository-local attribute overrides and retry.",
+      },
+    );
+  }
 }
 
 function decodePath(value: Buffer): string {
@@ -216,6 +304,7 @@ function compareItems(left: DiffItem, right: DiffItem): number {
 export async function readCanonicalChangeSet(
   repository: RepositorySnapshot,
 ): Promise<CanonicalChangeSet> {
+  await assertDeterministicAttributes(repository);
   const mergeBases = (await readGitText(
     repository.runner,
     ["merge-base", "--all", repository.targetRefSha, repository.sourceHeadSha],
@@ -227,6 +316,8 @@ export async function readCanonicalChangeSet(
   const mergeBaseSha = assertObjectId(mergeBases[0], "merge base");
   const commonArguments = [
     `--attr-source=${repository.sourceHeadSha}`,
+    "-c",
+    `core.attributesFile=${process.platform === "win32" ? "NUL" : "/dev/null"}`,
     "-c",
     "diff.renames=true",
     "-c",
@@ -249,6 +340,7 @@ export async function readCanonicalChangeSet(
       "numstat committed diff",
     ),
   ]);
+  await assertDeterministicAttributes(repository);
   const rawRecords = parseRawDiff(raw);
   const binaryByPath = parseNumstat(numstat);
   const items = rawRecords.map((record) => {

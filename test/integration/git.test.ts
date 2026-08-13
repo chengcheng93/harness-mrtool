@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { mkdir, writeFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import test, { type TestContext } from "node:test";
 
 import { isToolError } from "../../src/contracts/errors.ts";
@@ -95,7 +97,7 @@ test("GitRunner always invokes git with an argv array and shell disabled", async
     },
   };
   const runner = new GitRunner("C:\\fixture", processRunner, {
-    environment: { GIT_TERMINAL_PROMPT: "1" },
+    environment: { GIT_ATTR_NOSYSTEM: "0", GIT_TERMINAL_PROMPT: "1" },
   });
 
   const result = await runner.run(["--version"]);
@@ -105,6 +107,7 @@ test("GitRunner always invokes git with an argv array and shell disabled", async
   assert.equal(requests[0]?.executable, "git");
   assert.deepEqual(requests[0]?.arguments, ["--version"]);
   assert.equal(requests[0]?.shell, false);
+  assert.equal(requests[0]?.environment.GIT_ATTR_NOSYSTEM, "1");
   assert.equal(requests[0]?.environment.GIT_TERMINAL_PROMPT, "0");
 });
 
@@ -247,6 +250,122 @@ test("canonical ChangeSet parses NUL diff records for A/M/D/R, binary, and submo
   );
 });
 
+test("canonical ChangeSet rejects repository-local attribute overrides", async (t) => {
+  await t.test("non-empty info attributes", async (t) => {
+    const fixture = await fixtureFor(t);
+    await fixture.commitFile("src/added.ts", "export const added = true;\n", "add source");
+    const repository = await discoverRepository({
+      cwd: fixture.worktreePath,
+      targetBranch: "main",
+    });
+    await fixture.write(".git/info/attributes", "*.ts binary\n");
+
+    await assert.rejects(
+      readCanonicalChangeSet(repository),
+      (error: unknown) => isToolError(error, "REPOSITORY_ERROR", /attributes/i),
+    );
+  });
+
+  await t.test("configured core.attributesFile", async (t) => {
+    const fixture = await fixtureFor(t);
+    await fixture.commitFile("src/added.ts", "export const added = true;\n", "add source");
+    await fixture.write("custom.attributes", "*.ts binary\n");
+    await fixture.git([
+      "config",
+      "core.attributesFile",
+      `${fixture.worktreePath}/custom.attributes`,
+    ]);
+    const repository = await discoverRepository({
+      cwd: fixture.worktreePath,
+      targetBranch: "main",
+    });
+
+    await assert.rejects(
+      readCanonicalChangeSet(repository),
+      (error: unknown) => isToolError(error, "REPOSITORY_ERROR", /attributes/i),
+    );
+  });
+});
+
+test("canonical ChangeSet ignores default user attributes", async (t) => {
+  const fixture = await fixtureFor(t);
+  await fixture.commitFile("src/added.ts", "export const added = true;\n", "add source");
+  const xdgRoot = resolve(fixture.root, "xdg-config");
+  await mkdir(resolve(xdgRoot, "git"), { recursive: true });
+  await writeFile(resolve(xdgRoot, "git", "attributes"), "*.ts binary\n");
+  const discovered = await discoverRepository({
+    cwd: fixture.worktreePath,
+    targetBranch: "main",
+  });
+  const repository = {
+    ...discovered,
+    runner: new GitRunner(fixture.worktreePath, nodeProcessRunner, {
+      environment: { XDG_CONFIG_HOME: xdgRoot },
+    }),
+  };
+
+  const changeSet = await readCanonicalChangeSet(repository);
+
+  assert.deepEqual(
+    changeSet.items.find((item) => item.status === "added" && item.newPath === "src/added.ts"),
+    { status: "added", newPath: "src/added.ts", binary: false, submodule: false },
+  );
+});
+
+test("repository rejects fetch and push URLs for different GitLab projects", async (t) => {
+  const fixture = await fixtureFor(t);
+  await fixture.git([
+    "remote",
+    "set-url",
+    "origin",
+    "https://gitlab.example.test/team/project.git",
+  ]);
+  await fixture.git([
+    "remote",
+    "set-url",
+    "--push",
+    "origin",
+    "https://gitlab.example.test/other/project.git",
+  ]);
+
+  await assert.rejects(
+    discoverRepository({
+      cwd: fixture.worktreePath,
+      targetBranch: "main",
+    }),
+    (error: unknown) => isToolError(error, "REPOSITORY_ERROR", /fetch|push|identity/i),
+  );
+});
+
+test("repository normalizes equivalent GitLab fetch and push identities", async (t) => {
+  const fixture = await fixtureFor(t);
+  await fixture.git([
+    "remote",
+    "set-url",
+    "origin",
+    "https://GitLab.Example.Test/team/project.git",
+  ]);
+  await fixture.git([
+    "remote",
+    "set-url",
+    "--push",
+    "origin",
+    "git@gitlab.example.test:team/project.git",
+  ]);
+
+  const repository = await discoverRepository({
+    cwd: fixture.worktreePath,
+    targetBranch: "main",
+  });
+
+  assert.equal(repository.gitlabHost, "gitlab.example.test");
+  assert.deepEqual(repository.sourceProject, {
+    host: "gitlab.example.test",
+    path: "team/project",
+  });
+  assert.deepEqual(repository.targetProject, repository.sourceProject);
+});
+
 test("absent source ref needs authorization and dry-run never writes", async (t) => {
   const fixture = await fixtureFor(t);
   await fixture.commitFile("src/local.ts", "export const local = true;\n", "local");
@@ -297,6 +416,63 @@ test("equal source ref is a no-op", async (t) => {
 
   assert.equal(plan.kind, "up-to-date");
   assert.equal(plan.relation, "equal");
+});
+
+test("up-to-date execution rechecks the repository and live remote", async (t) => {
+  await t.test("remote advanced after planning", async (t) => {
+    const fixture = await fixtureFor(t);
+    await fixture.commitFile("src/equal.ts", "export const equal = true;\n", "equal");
+    await fixture.pushSource();
+    const repository = await discoverRepository({
+      cwd: fixture.worktreePath,
+      targetBranch: "main",
+    });
+    const plan = await planSourceBranchPush(repository, { allowPush: true });
+    const remoteHead = await fixture.peerCommitAndPush(
+      "src/remote-after-plan.ts",
+      "export const remoteAfterPlan = true;\n",
+    );
+
+    await assert.rejects(
+      executeSourceBranchPush(repository, plan, { authorized: true }),
+      (error: unknown) => isToolError(error, "CONCURRENT_UPDATE", /remote|SHA|changed/i),
+    );
+    assert.equal(await fixture.remoteHead(), remoteHead);
+  });
+
+  await t.test("worktree became dirty after planning", async (t) => {
+    const fixture = await fixtureFor(t);
+    await fixture.commitFile("src/equal.ts", "export const equal = true;\n", "equal");
+    await fixture.pushSource();
+    const repository = await discoverRepository({
+      cwd: fixture.worktreePath,
+      targetBranch: "main",
+    });
+    const plan = await planSourceBranchPush(repository, { allowPush: true });
+    await fixture.write("dirty-after-plan.txt", "dirty\n");
+
+    await assert.rejects(
+      executeSourceBranchPush(repository, plan, { authorized: true }),
+      (error: unknown) => isToolError(error, "REPOSITORY_ERROR", /clean worktree/i),
+    );
+  });
+
+  await t.test("local HEAD changed after planning", async (t) => {
+    const fixture = await fixtureFor(t);
+    await fixture.commitFile("src/equal.ts", "export const equal = true;\n", "equal");
+    await fixture.pushSource();
+    const repository = await discoverRepository({
+      cwd: fixture.worktreePath,
+      targetBranch: "main",
+    });
+    const plan = await planSourceBranchPush(repository, { allowPush: true });
+    await fixture.commitFile("src/local-after-plan.ts", "export const localAfterPlan = true;\n", "local after plan");
+
+    await assert.rejects(
+      executeSourceBranchPush(repository, plan, { authorized: true }),
+      (error: unknown) => isToolError(error, "REPOSITORY_ERROR", /changed/i),
+    );
+  });
 });
 
 test("push planning wraps process failures as repository errors", async (t) => {
@@ -472,6 +648,27 @@ test("push execution rejects a tampered plan without writing another ref", async
     (error: unknown) => isToolError(error, "REPOSITORY_ERROR", /plan|command/i),
   );
   assert.equal(await fixture.remoteHead("unrelated"), null);
+});
+
+test("push execution rejects a push URL changed after planning before writing", async (t) => {
+  const fixture = await fixtureFor(t);
+  await fixture.commitFile("src/local.ts", "export const local = true;\n", "local");
+  const processRunner = new RecordingProcessRunner();
+  const repository = await discoverRepository({
+    cwd: fixture.worktreePath,
+    processRunner,
+    targetBranch: "main",
+  });
+  const plan = await planSourceBranchPush(repository, { allowPush: true });
+  const otherRemotePath = resolve(fixture.root, "other-remote.git");
+  await fixture.git(["init", "--bare", "--initial-branch=main", otherRemotePath]);
+  await fixture.git(["remote", "set-url", "--push", "origin", otherRemotePath]);
+
+  await assert.rejects(
+    executeSourceBranchPush(repository, plan, { authorized: true }),
+    (error: unknown) => isToolError(error, "REPOSITORY_ERROR", /fetch|push|identit/i),
+  );
+  assert.equal(processRunner.requests.some((request) => request.arguments[0] === "push"), false);
 });
 
 test("push execution cannot be redirected after plan validation", async (t) => {

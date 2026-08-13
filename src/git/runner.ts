@@ -134,6 +134,7 @@ export class GitRunner {
       environment: {
         ...process.env,
         ...this.options.environment,
+        GIT_ATTR_NOSYSTEM: "1",
         GIT_CONFIG_NOSYSTEM: "1",
         GIT_OPTIONAL_LOCKS: "0",
         GIT_TERMINAL_PROMPT: "0",

@@ -1,4 +1,5 @@
-import { resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { ToolError } from "../contracts/errors.ts";
 import {
@@ -18,16 +19,39 @@ export interface WorktreeState {
   readonly untracked: boolean;
 }
 
+export interface GitLabProjectIdentity {
+  readonly host: string;
+  readonly path: string;
+}
+
+export type RemoteEndpointIdentity =
+  | {
+      readonly key: string;
+      readonly kind: "gitlab";
+      readonly project: GitLabProjectIdentity;
+    }
+  | {
+      readonly key: string;
+      readonly kind: "local";
+      readonly project: null;
+    };
+
 export interface RepositorySnapshot {
+  readonly gitlabHost: string | null;
   readonly root: string;
   readonly runner: GitRunner;
   readonly sourceBranch: string;
   readonly sourceHeadSha: string;
+  readonly sourceProject: GitLabProjectIdentity | null;
   readonly sourceRemote: string;
+  readonly sourceRemoteIdentity: RemoteEndpointIdentity;
   readonly sourceRemoteRef: string;
   readonly targetBranch: string;
+  readonly targetProject: GitLabProjectIdentity | null;
   readonly targetRef: string;
   readonly targetRefSha: string;
+  readonly targetRemote: string;
+  readonly targetRemoteIdentity: RemoteEndpointIdentity;
   readonly worktree: WorktreeState;
 }
 
@@ -277,6 +301,174 @@ async function resolveRemote(
   );
 }
 
+function normalizedProjectPath(value: string): string | null {
+  let path = value.replaceAll("\\", "/").replace(/^\/+|\/+$/gu, "");
+  if (path.endsWith(".git")) {
+    path = path.slice(0, -4);
+  }
+  const segments = path.split("/");
+  if (
+    path === "" ||
+    segments.some((segment) => segment === "" || segment === "." || segment === "..")
+  ) {
+    return null;
+  }
+  return path;
+}
+
+function localEndpointIdentity(root: string, value: string): RemoteEndpointIdentity {
+  const absolutePath = resolve(root, value);
+  const canonicalPath = process.platform === "win32"
+    ? absolutePath.replaceAll("\\", "/").toLowerCase()
+    : absolutePath;
+  return Object.freeze({
+    key: `local:${canonicalPath}`,
+    kind: "local",
+    project: null,
+  });
+}
+
+function gitLabEndpointIdentity(
+  hostValue: string,
+  pathValue: string,
+): RemoteEndpointIdentity {
+  const host = hostValue.toLowerCase();
+  const path = normalizedProjectPath(pathValue);
+  if (host === "" || path === null) {
+    throw repositoryError(
+      "Selected remote URL does not identify one GitLab project",
+      "remote",
+      "a GitLab host and non-empty project path",
+      "unrecognized remote URL",
+      "Configure one canonical GitLab fetch/push URL for the selected remote and retry.",
+    );
+  }
+  const project = Object.freeze({ host, path });
+  return Object.freeze({
+    key: `gitlab:${host}/${path}`,
+    kind: "gitlab",
+    project,
+  });
+}
+
+function normalizeRemoteEndpoint(
+  root: string,
+  value: string,
+): RemoteEndpointIdentity {
+  if (value === "" || value.includes("\u0000") || /[\r\n]/u.test(value)) {
+    throw repositoryError(
+      "Selected remote URL is invalid",
+      "remote",
+      "one non-empty remote URL",
+      "invalid remote URL",
+      "Configure one canonical GitLab fetch/push URL for the selected remote and retry.",
+    );
+  }
+  if (
+    isAbsolute(value) ||
+    /^[A-Za-z]:[\\/]/u.test(value) ||
+    value.startsWith("./") ||
+    value.startsWith("../") ||
+    value.startsWith(".\\") ||
+    value.startsWith("..\\") ||
+    value.startsWith("\\\\")
+  ) {
+    return localEndpointIdentity(root, value);
+  }
+  if (value.startsWith("file:")) {
+    try {
+      return localEndpointIdentity(root, fileURLToPath(value));
+    } catch (error) {
+      throw repositoryError(
+        "Selected remote file URL is invalid",
+        "remote",
+        "one valid local file URL",
+        "invalid remote URL",
+        "Correct the selected remote URL and retry.",
+        error,
+      );
+    }
+  }
+  const scpLike = /^(?:[^@/:\s]+@)?([^/:\s]+):(.+)$/u.exec(value);
+  if (scpLike !== null && !value.includes("://")) {
+    const host = scpLike[1];
+    const path = scpLike[2];
+    if (host !== undefined && path !== undefined) {
+      return gitLabEndpointIdentity(host, path);
+    }
+  }
+  try {
+    const url = new URL(value);
+    if (
+      !["git:", "http:", "https:", "ssh:"].includes(url.protocol) ||
+      url.hash !== "" ||
+      url.search !== ""
+    ) {
+      throw new TypeError("unsupported Git transport URL");
+    }
+    return gitLabEndpointIdentity(url.host, url.pathname);
+  } catch (error) {
+    throw repositoryError(
+      "Selected remote URL does not identify one GitLab project",
+      "remote",
+      "one canonical GitLab or local repository URL",
+      "unrecognized remote URL",
+      "Configure one canonical GitLab fetch/push URL for the selected remote and retry.",
+      error,
+    );
+  }
+}
+
+async function readRemoteUrl(
+  runner: GitRunner,
+  remote: string,
+  push: boolean,
+): Promise<string> {
+  const output = decodeText(
+    await runGitChecked(
+      runner,
+      ["remote", "get-url", ...(push ? ["--push"] : []), "--all", remote],
+      `${push ? "push" : "fetch"} URL for remote ${remote}`,
+    ),
+    `${push ? "push" : "fetch"} URL for remote ${remote}`,
+  );
+  const records = output.split(/\r?\n/u);
+  if (records.at(-1) === "") records.pop();
+  if (records.length !== 1 || records[0] === undefined || records[0] === "") {
+    throw repositoryError(
+      "Selected remote URL is ambiguous",
+      "remote",
+      "exactly one fetch URL and one push URL",
+      `${records.length} ${push ? "push" : "fetch"} URLs`,
+      "Configure one canonical fetch/push URL for the selected remote and retry.",
+    );
+  }
+  return records[0];
+}
+
+async function readRemoteIdentity(
+  runner: GitRunner,
+  root: string,
+  remote: string,
+): Promise<RemoteEndpointIdentity> {
+  const [fetchUrl, pushUrl] = await Promise.all([
+    readRemoteUrl(runner, remote, false),
+    readRemoteUrl(runner, remote, true),
+  ]);
+  const fetchIdentity = normalizeRemoteEndpoint(root, fetchUrl);
+  const pushIdentity = normalizeRemoteEndpoint(root, pushUrl);
+  if (fetchIdentity.key !== pushIdentity.key) {
+    throw repositoryError(
+      "Selected remote fetch and push URLs identify different repositories",
+      "remote",
+      "fetch and push URLs for the same GitLab project",
+      "different fetch/push identities",
+      "Select or configure a remote whose fetch and push URLs identify the same project.",
+    );
+  }
+  return fetchIdentity;
+}
+
 export async function discoverRepository(
   options: DiscoverRepositoryOptions,
 ): Promise<RepositorySnapshot> {
@@ -302,6 +494,32 @@ export async function discoverRepository(
   const targetRemote = options.targetRemote ?? sourceRemote;
   validateRemote(targetRemote, "target remote");
   const configuredTarget = await resolveRemote(runner, targetRemote);
+  const sourceRemoteIdentity = await readRemoteIdentity(runner, root, sourceRemote);
+  const targetRemoteIdentity = configuredTarget === sourceRemote
+    ? sourceRemoteIdentity
+    : await readRemoteIdentity(runner, root, configuredTarget);
+  if (sourceRemoteIdentity.kind !== targetRemoteIdentity.kind) {
+    throw repositoryError(
+      "Source and target remotes do not provide one GitLab host identity",
+      "remote",
+      "source and target remotes on one GitLab host",
+      "mixed local and GitLab remotes",
+      "Select explicit source and target remotes on the same GitLab host.",
+    );
+  }
+  if (
+    sourceRemoteIdentity.kind === "gitlab" &&
+    targetRemoteIdentity.kind === "gitlab" &&
+    sourceRemoteIdentity.project.host !== targetRemoteIdentity.project.host
+  ) {
+    throw repositoryError(
+      "Source and target projects are on different GitLab hosts",
+      "remote",
+      "source and target projects on one GitLab host",
+      "different GitLab hosts",
+      "Select explicit source and target remotes on the same GitLab host.",
+    );
+  }
   const targetRef = `refs/remotes/${configuredTarget}/${options.targetBranch}`;
   const targetRefSha = assertObjectId(
     await readGitText(
@@ -312,16 +530,24 @@ export async function discoverRepository(
     "target tracking ref",
   );
   const worktree = await readWorktree(runner);
+  const sourceProject = sourceRemoteIdentity.project;
+  const targetProject = targetRemoteIdentity.project;
   return Object.freeze({
+    gitlabHost: sourceProject?.host ?? null,
     root,
     runner,
     sourceBranch,
     sourceHeadSha,
+    sourceProject,
     sourceRemote,
+    sourceRemoteIdentity,
     sourceRemoteRef: `refs/heads/${sourceBranch}`,
     targetBranch: options.targetBranch,
+    targetProject,
     targetRef,
     targetRefSha,
+    targetRemote: configuredTarget,
+    targetRemoteIdentity,
     worktree,
   });
 }
@@ -344,6 +570,14 @@ export async function assertCleanWorktree(
 export async function assertRepositoryUnchanged(
   repository: RepositorySnapshot,
 ): Promise<void> {
+  const sourceIdentity = await readRemoteIdentity(
+    repository.runner,
+    repository.root,
+    repository.sourceRemote,
+  );
+  const targetIdentity = repository.targetRemote === repository.sourceRemote
+    ? sourceIdentity
+    : await readRemoteIdentity(repository.runner, repository.root, repository.targetRemote);
   const [branch, head, target] = await Promise.all([
     readGitText(repository.runner, ["symbolic-ref", "--quiet", "--short", "HEAD"], "source branch"),
     readGitText(repository.runner, ["rev-parse", "--verify", "HEAD^{commit}"], "source HEAD"),
@@ -356,7 +590,9 @@ export async function assertRepositoryUnchanged(
   if (
     branch !== repository.sourceBranch ||
     head !== repository.sourceHeadSha ||
-    target !== repository.targetRefSha
+    target !== repository.targetRefSha ||
+    sourceIdentity.key !== repository.sourceRemoteIdentity.key ||
+    targetIdentity.key !== repository.targetRemoteIdentity.key
   ) {
     throw repositoryError(
       "Repository state changed after discovery",
