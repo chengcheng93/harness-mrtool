@@ -125,6 +125,9 @@ export function renderProjectTemplate(
     validateTemplateBundle(bundle);
     const profile = profileValue as ProfileId;
     const composition = composeProfiles(bundle, [profile]);
+    const requiredBaseFields = new Set(composition.requiredBaseFields);
+    const prompt = (fieldId: string, required: string, optional: string) =>
+      requiredBaseFields.has(fieldId) ? required : optional;
     const entries = checkboxEntries(bundle);
     const fields = profileSlots(fieldEntries(bundle), composition.requiredFieldIds);
     const verificationIds = profile === "general"
@@ -138,8 +141,16 @@ export function renderProjectTemplate(
         `| ${entry.label} | _Enter command or method._ | _Enter result or status._ | _Enter evidence or reason._ |`).join("\n");
     return replaceLayout(bundle.layout.markdown, {
       "changes.summary": "- _Enter the change summary._",
-      "changes.technicalChanges": "- _Enter technical changes, or `None.`._",
-      "changes.outOfScope": "None.",
+      "changes.technicalChanges": prompt(
+        "changes.technicalChanges",
+        "- _Enter technical changes._",
+        "- _Enter technical changes, or `None.`._",
+      ),
+      "changes.outOfScope": prompt(
+        "changes.outOfScope",
+        "- _Enter out-of-scope items._",
+        "None.",
+      ),
       "profileFields.changes": fields.changes ?? "",
       "motivation.background": "- _Enter the background._",
       "motivation.whyNeeded": "- _Enter why this change is needed._",
@@ -156,9 +167,17 @@ export function renderProjectTemplate(
       "verification.checkboxes": verification.map((entry) => `- [ ] ${entry.label}`).join("\n"),
       "verification.rows": rows,
       "verification.acceptanceEvidence": "- _Enter acceptance evidence._",
-      "verification.knownGaps": "None.",
+      "verification.knownGaps": prompt(
+        "verification.knownGaps",
+        "- _Enter known gaps._",
+        "None.",
+      ),
       "documentation.checkboxes": unchecked(entries, "documentation"),
-      "documentation.details": "- _Enter documentation details, or `None.`._",
+      "documentation.details": prompt(
+        "documentation.details",
+        "- _Enter documentation details._",
+        "- _Enter documentation details, or `None.`._",
+      ),
       "profileFields.documentation": fields.documentation ?? "",
       "risk.levelCheckboxes": unchecked(entries, "risk.level"),
       "risk.items": "- _Enter risks._",
@@ -167,7 +186,11 @@ export function renderProjectTemplate(
       "profileFields.risk": fields.risk ?? "",
       "review.checkboxes": unchecked(entries, "review"),
       "review.reviewerFocus": "- _Enter reviewer focus._",
-      "review.additionalNotes": "None.",
+      "review.additionalNotes": prompt(
+        "review.additionalNotes",
+        "- _Enter additional notes._",
+        "None.",
+      ),
       diagnosticMarker: "",
     });
   } catch (error) {

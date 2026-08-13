@@ -6,11 +6,11 @@
 
 ### Technical Changes
 
-- _Enter technical changes, or `None.`._
+- _Enter technical changes._
 
 ### Out of Scope
 
-None.
+- _Enter out-of-scope items._
 
 ## 2. Motivation
 
@@ -78,7 +78,7 @@ None.
 
 ### Known Gaps
 
-None.
+- _Enter known gaps._
 
 ## 6. Documentation
 
@@ -90,7 +90,7 @@ None.
 - [ ] README updated
 - [ ] Applicable documentation policy reviewed
 
-- _Enter documentation details, or `None.`._
+- _Enter documentation details._
 
 ## 7. Risks and Rollback
 
@@ -131,4 +131,4 @@ None.
 
 ### Additional Notes
 
-None.
+- _Enter additional notes._

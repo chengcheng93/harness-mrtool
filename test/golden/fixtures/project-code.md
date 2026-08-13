@@ -6,7 +6,7 @@
 
 ### Technical Changes
 
-- _Enter technical changes, or `None.`._
+- _Enter technical changes._
 
 ### Out of Scope
 

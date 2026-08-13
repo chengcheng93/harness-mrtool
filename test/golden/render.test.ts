@@ -9,6 +9,8 @@ import { loadTemplateBundle } from "../../src/bundle/load.ts";
 import { decodeInputBytes } from "../../src/input/load-input.ts";
 import { normalizeAndValidateRequest } from "../../src/input/normalize.ts";
 import { canonicalizeJson } from "../../src/contracts/jcs.ts";
+import { ToolError } from "../../src/contracts/errors.ts";
+import { createFailureOutput, serializeOutput } from "../../src/contracts/output.ts";
 import { renderTitle } from "../../src/render/title.ts";
 import { deriveReviewStates, renderDescription } from "../../src/render/markdown.ts";
 import { renderProjectTemplate } from "../../src/render/project-template.ts";
@@ -234,13 +236,37 @@ test("renderer enforces every composed Profile base-field and semantic constrain
     }),
     /required base field/u,
   );
-  const general = render({
+  const general = {
     ...requestValue,
     profileIds: ["general"],
     profileFields: {},
-  });
-  assert.match(general, /### Out of Scope\n\nNone\./u);
-  assert.match(general, /### Known Gaps\n\nNone\./u);
+    changes: { ...requestValue.changes, outOfScope: ["No additional scope."] },
+    verification: { ...requestValue.verification, knownGaps: ["No known gaps."] },
+  };
+  assert.doesNotThrow(() => render(general));
+  const requiredProseFields: readonly [string, (request: typeof general) => void][] = [
+    ["changes.summary", (request) => { request.changes.summary = []; }],
+    ["changes.technicalChanges", (request) => { request.changes.technicalChanges = []; }],
+    ["changes.outOfScope", (request) => { request.changes.outOfScope = []; }],
+    ["motivation.background", (request) => { request.motivation.background = []; }],
+    ["motivation.whyNeeded", (request) => { request.motivation.whyNeeded = []; }],
+    ["impact.details", (request) => { request.impact.details = []; }],
+    ["verification.acceptanceEvidence", (request) => {
+      request.verification.acceptanceEvidence = [];
+    }],
+    ["verification.knownGaps", (request) => { request.verification.knownGaps = []; }],
+    ["documentation.details", (request) => { request.documentation.details = []; }],
+    ["risk.items", (request) => { request.risk.items = []; }],
+    ["risk.compatibilityImpact", (request) => { request.risk.compatibilityImpact = []; }],
+    ["risk.rollbackPlan", (request) => { request.risk.rollbackPlan = []; }],
+    ["review.reviewerFocus", (request) => { request.review.reviewerFocus = []; }],
+    ["review.additionalNotes", (request) => { request.review.additionalNotes = []; }],
+  ];
+  for (const [fieldId, mutate] of requiredProseFields) {
+    const request = structuredClone(general);
+    mutate(request);
+    assert.throws(() => render(request), /required base field/u, fieldId);
+  }
 });
 
 test("renderer rejects unknown, cross-section, and Profile-inapplicable checkbox IDs", async () => {
@@ -273,6 +299,42 @@ test("renderer rejects unknown, cross-section, and Profile-inapplicable checkbox
     const request = structuredClone(requestValue);
     mutate(request);
     assert.throws(() => render(request), /checkbox registry contract/u, name);
+  }
+});
+
+test("renderer errors never echo unvalidated registry IDs or opaque bearers", async () => {
+  const fixture = (name: string) => resolve(import.meta.dirname, "fixtures", name);
+  const [requestValue, snapshot, writePlan, bundle] = await Promise.all([
+    readFile(fixture("code-docs-request.json"), "utf8").then(JSON.parse),
+    readFile(fixture("code-docs-snapshot.json"), "utf8").then(JSON.parse),
+    readFile(fixture("code-docs-write-plan.json"), "utf8").then(JSON.parse),
+    loadTemplateBundle(resolve(repositoryRoot, "template-bundle")),
+  ]);
+  const unvalidatedIds = [
+    "private-unvalidated-checkbox-id",
+    `hmrc1_${"A".repeat(43)}`,
+    `hmrx1_${"B".repeat(43)}`,
+  ];
+
+  for (const id of unvalidatedIds) {
+    const request = structuredClone(requestValue);
+    request.impact.areaIds = [id];
+    assert.throws(
+      () => renderDescription({
+        request: normalizeAndValidateRequest(request), snapshot, writePlan, bundle,
+        releaseTag: "templates-v1.0.0", cliVersion: "0.1.0-dev", renderPhase: "final",
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof ToolError);
+        const serialized = serializeOutput(createFailureOutput(
+          { cliVersion: "0.1.0-dev" },
+          error,
+        ));
+        assert.equal(serialized.includes(id), false);
+        assert.doesNotMatch(serialized, /(?:hmrc1_|hmrx1_)[A-Za-z0-9_-]{43}/u);
+        return true;
+      },
+    );
   }
 });
 
@@ -380,6 +442,79 @@ test("MR label display order follows policy categories despite token and API ord
   });
 
   assert.match(description, /Merge Request Labels: week&#58;&#58;[^,]+, type&#58;&#58;bug, priority&#58;&#58;p1, status&#58;&#58;review/u);
+});
+
+test("final Ready rendering distinguishes the pending transition snapshot from a postcondition snapshot", async () => {
+  const fixture = (name: string) => resolve(import.meta.dirname, "fixtures", name);
+  const [requestValue, snapshotValue, writePlan, bundle] = await Promise.all([
+    readFile(fixture("code-docs-request.json"), "utf8").then(JSON.parse),
+    readFile(fixture("code-docs-snapshot.json"), "utf8").then(JSON.parse),
+    readFile(fixture("code-docs-write-plan.json"), "utf8").then(JSON.parse),
+    loadTemplateBundle(resolve(repositoryRoot, "template-bundle")),
+  ]);
+  const snapshot = structuredClone(snapshotValue);
+  snapshot.labelCandidates.push({ id: "label:status-doing", name: "status::doing" });
+  snapshot.mergeRequest.lifecycle = "draft";
+  snapshot.mergeRequest.labelIds = snapshot.mergeRequest.labelIds.map((id: string) =>
+    id === "label:status" ? "label:status-doing" : id);
+  const inputs = {
+    request: normalizeAndValidateRequest(requestValue), snapshot, writePlan, bundle,
+    releaseTag: "templates-v1.0.0", cliVersion: "0.1.0-dev", renderPhase: "final" as const,
+  };
+
+  assert.throws(
+    () => renderDescription(inputs),
+    /final snapshot does not match the desired write plan/u,
+  );
+  const description = renderDescription({
+    ...inputs,
+    snapshotExpectation: "ready-transition-pending",
+  });
+  const marker = parseDiagnosticMarker(description);
+
+  assert.match(description, /Merge Request Labels: .*status&#58;&#58;review/u);
+  assert.equal(marker.renderPhase, "final");
+  assert.equal(marker.snapshotDigest, createHash("sha256").update(
+    canonicalizeJson(validateExternalContextSnapshot(snapshot)),
+  ).digest("hex"));
+  assert.equal(marker.writePlanDigest, createHash("sha256").update(
+    canonicalizeJson(validateDesiredWritePlan(writePlan)),
+  ).digest("hex"));
+  assert.notEqual(marker.snapshotDigest, marker.writePlanDigest);
+});
+
+test("pending Ready transition rendering rejects snapshots outside the exact Draft boundary", async () => {
+  const fixture = (name: string) => resolve(import.meta.dirname, "fixtures", name);
+  const [requestValue, snapshotValue, writePlan, bundle] = await Promise.all([
+    readFile(fixture("code-docs-request.json"), "utf8").then(JSON.parse),
+    readFile(fixture("code-docs-snapshot.json"), "utf8").then(JSON.parse),
+    readFile(fixture("code-docs-write-plan.json"), "utf8").then(JSON.parse),
+    loadTemplateBundle(resolve(repositoryRoot, "template-bundle")),
+  ]);
+  const render = (snapshot: typeof snapshotValue) => renderDescription({
+    request: normalizeAndValidateRequest(requestValue), snapshot, writePlan, bundle,
+    releaseTag: "templates-v1.0.0", cliVersion: "0.1.0-dev", renderPhase: "final",
+    snapshotExpectation: "ready-transition-pending",
+  });
+  const draftSnapshot = structuredClone(snapshotValue);
+  draftSnapshot.labelCandidates.push({ id: "label:status-doing", name: "status::doing" });
+  draftSnapshot.mergeRequest.lifecycle = "draft";
+  draftSnapshot.mergeRequest.labelIds = draftSnapshot.mergeRequest.labelIds.map((id: string) =>
+    id === "label:status" ? "label:status-doing" : id);
+
+  assert.doesNotThrow(() => render(draftSnapshot));
+  assert.throws(() => render(snapshotValue), /pending Ready transition/u);
+  const missingDraftStatus = structuredClone(draftSnapshot);
+  missingDraftStatus.mergeRequest.labelIds = snapshotValue.mergeRequest.labelIds;
+  assert.throws(() => render(missingDraftStatus), /pending Ready transition/u);
+  const missingManagedLabel = structuredClone(draftSnapshot);
+  missingManagedLabel.mergeRequest.labelIds = missingManagedLabel.mergeRequest.labelIds.filter(
+    (id: string) => id !== "label:priority",
+  );
+  assert.throws(() => render(missingManagedLabel), /pending Ready transition/u);
+  const wrongAssignee = structuredClone(draftSnapshot);
+  wrongAssignee.mergeRequest.assigneeUserId = null;
+  assert.throws(() => render(wrongAssignee), /pending Ready transition/u);
 });
 
 test("opaque context tokens never enter snapshot or decoded marker metadata", async () => {
@@ -737,6 +872,20 @@ for (const profile of ["general", "code", "docs", "ops"] as const) {
     assert.equal(rendered.includes("/assign"), false);
   });
 }
+
+test("general project template prompts for every required base prose field", async () => {
+  const bundle = await loadTemplateBundle(resolve(repositoryRoot, "template-bundle"));
+  const rendered = renderProjectTemplate("general", bundle);
+
+  assert.equal(rendered.includes("None."), false);
+  assert.equal(rendered.includes("or `None.`"), false);
+  for (const heading of [
+    "### Technical Changes", "### Out of Scope", "### Known Gaps",
+    "### Compatibility Impact", "### Rollback Plan", "### Additional Notes",
+  ]) {
+    assert.match(rendered, new RegExp(`${heading}\\n\\n- _Enter`, "u"));
+  }
+});
 
 test("project template export rejects auto and Profile combinations", async () => {
   const bundle = await loadTemplateBundle(resolve(repositoryRoot, "template-bundle"));

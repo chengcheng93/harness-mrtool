@@ -33,7 +33,10 @@ export interface RenderDescriptionInputs {
   readonly releaseTag: string;
   readonly cliVersion: string;
   readonly renderPhase: RenderPhase;
+  readonly snapshotExpectation?: FinalSnapshotExpectation;
 }
+
+export type FinalSnapshotExpectation = "write-plan-applied" | "ready-transition-pending";
 
 export interface DerivedCheckboxState {
   readonly state: "checked" | "pending" | "not-applicable";
@@ -68,11 +71,13 @@ interface PreparedInputs {
   readonly releaseTag: string;
   readonly cliVersion: string;
   readonly renderPhase: RenderPhase;
+  readonly snapshotExpectation: FinalSnapshotExpectation | null;
 }
 
 const RENDER_INPUT_FIELDS = new Set([
   "request", "snapshot", "writePlan", "bundle", "releaseTag", "cliVersion", "renderPhase",
 ]);
+const OPTIONAL_RENDER_INPUT_FIELDS = new Set(["snapshotExpectation"]);
 const REVIEW_IDS = [
   "source-branch-synced",
   "commit-convention",
@@ -103,10 +108,16 @@ function asObject(value: JsonValue | undefined, subject: string): JsonObject {
   return value;
 }
 
-function exactFields(value: JsonObject, expected: ReadonlySet<string>, subject: string): void {
+function exactFields(
+  value: JsonObject,
+  expected: ReadonlySet<string>,
+  subject: string,
+  optional: ReadonlySet<string> = new Set(),
+): void {
   const actual = Object.keys(value).sort();
-  const wanted = [...expected].sort();
-  if (actual.length !== wanted.length || actual.some((field, index) => field !== wanted[index])) {
+  const allowed = new Set([...expected, ...optional]);
+  if ([...expected].some((field) => !actual.includes(field)) ||
+      actual.some((field) => !allowed.has(field))) {
     throw renderError(`${subject} has missing or unknown fields`);
   }
 }
@@ -234,17 +245,8 @@ function hasRequiredBaseFieldContent(request: Request, fieldId: string): boolean
 }
 
 function assertProfileContentContract(request: Request, composition: ComposedProfile): void {
-  const nonEmptyBaseFields = new Set<string>();
-  if (composition.profileIds.includes("code")) {
-    nonEmptyBaseFields.add("changes.technicalChanges");
-    nonEmptyBaseFields.add("risk.compatibilityImpact");
-  }
-  if (composition.profileIds.includes("ops")) {
-    nonEmptyBaseFields.add("risk.rollbackPlan");
-  }
   for (const fieldId of composition.requiredBaseFields) {
-    const hasContent = hasRequiredBaseFieldContent(request, fieldId);
-    if (nonEmptyBaseFields.has(fieldId) && !hasContent) {
+    if (!hasRequiredBaseFieldContent(request, fieldId)) {
       throw renderError(`required base field ${fieldId} is empty`);
     }
   }
@@ -288,7 +290,9 @@ function assertCheckboxReference(
   if (entry === undefined || entry.kind !== expected.kind || entry.source !== expected.source ||
       entry.sectionSlot !== expected.sectionSlot ||
       !entry.applicableProfiles.some((profileId) => profileIds.includes(profileId))) {
-    throw renderError(`checkbox registry contract does not allow ${id} in ${expected.sectionSlot}`);
+    throw renderError(
+      `checkbox registry contract rejects an unrecognized or inapplicable ID in ${expected.sectionSlot}`,
+    );
   }
 }
 
@@ -437,13 +441,41 @@ function assertWritePlan(inputs: PreparedInputs): {
     throw renderError("a merge request author cannot be selected as a reviewer");
   }
 
-  if (inputs.renderPhase === "final") {
+  if (inputs.snapshotExpectation === "write-plan-applied") {
     const current = inputs.snapshot.mergeRequest;
     if (current.lifecycle !== inputs.request.intent ||
         !sameStableIdSet(current.labelIds, inputs.writePlan.labelIds) ||
         current.assigneeUserId !== inputs.writePlan.assigneeUserId ||
         !sameStableIdSet(current.reviewerUserIds, inputs.writePlan.reviewerUserIds)) {
       throw renderError("final snapshot does not match the desired write plan");
+    }
+  } else if (inputs.snapshotExpectation === "ready-transition-pending") {
+    const current = inputs.snapshot.mergeRequest;
+    const labelPolicy = asObject(asObject(inputs.bundle.policy, "policy").labels, "label policy");
+    const expectedNames = asObject(
+      asObject(labelPolicy.lifecycle, "label lifecycle").expectedNames,
+      "label lifecycle names",
+    );
+    const draftName = canonicalString(expectedNames.draft, "label lifecycle draft name");
+    const readyName = canonicalString(expectedNames.ready, "label lifecycle ready name");
+    const desiredReadyLabels = labels.filter((label) => label.name === readyName);
+    const draftCandidates = inputs.snapshot.labelCandidates.filter((label) => label.name === draftName);
+    if (inputs.request.intent !== "ready" || current.lifecycle !== "draft" ||
+        desiredReadyLabels.length !== 1 || draftCandidates.length !== 1) {
+      throw renderError("pending Ready transition snapshot is not in the required Draft lifecycle state");
+    }
+    const desiredReadyLabelId = desiredReadyLabels[0]?.id;
+    const draftLabelId = draftCandidates[0]?.id;
+    if (desiredReadyLabelId === undefined || draftLabelId === undefined) {
+      throw renderError("pending Ready transition lifecycle labels are incomplete");
+    }
+    const expectedCurrentLabelIds = inputs.writePlan.labelIds
+      .filter((id) => id !== desiredReadyLabelId)
+      .concat(draftLabelId);
+    if (!sameStableIdSet(current.labelIds, expectedCurrentLabelIds) ||
+        current.assigneeUserId !== inputs.writePlan.assigneeUserId ||
+        !sameStableIdSet(current.reviewerUserIds, inputs.writePlan.reviewerUserIds)) {
+      throw renderError("pending Ready transition snapshot does not match the desired write plan");
     }
   }
   return { labels: labelsInPolicyOrder(inputs.bundle, labels), assignee, reviewers };
@@ -580,7 +612,7 @@ export function deriveReviewStates(
 
 function prepareInputs(value: RenderDescriptionInputs | unknown): PreparedInputs {
   const input = asObject(copyJsonValue(value), "renderer input");
-  exactFields(input, RENDER_INPUT_FIELDS, "renderer input");
+  exactFields(input, RENDER_INPUT_FIELDS, "renderer input", OPTIONAL_RENDER_INPUT_FIELDS);
   const bundle = input.bundle as unknown as LoadedTemplateBundle;
   validateTemplateBundle(bundle);
   const requestSnapshot = copyJsonValue(input.request);
@@ -594,6 +626,20 @@ function prepareInputs(value: RenderDescriptionInputs | unknown): PreparedInputs
   const cliVersion = canonicalString(input.cliVersion, "cliVersion");
   if (!(["preview", "provisional", "final"] as const).includes(input.renderPhase as RenderPhase)) {
     throw renderError("renderPhase is invalid");
+  }
+  let snapshotExpectation: FinalSnapshotExpectation | null = null;
+  if (input.snapshotExpectation !== undefined) {
+    if (!(["write-plan-applied", "ready-transition-pending"] as const).includes(
+      input.snapshotExpectation as FinalSnapshotExpectation,
+    )) {
+      throw renderError("snapshotExpectation is invalid");
+    }
+    snapshotExpectation = input.snapshotExpectation as FinalSnapshotExpectation;
+  } else if (input.renderPhase === "final") {
+    snapshotExpectation = "write-plan-applied";
+  }
+  if (input.renderPhase !== "final" && snapshotExpectation !== null) {
+    throw renderError("snapshotExpectation is only valid for final rendering");
   }
   const composition = composeProfiles(bundle, request.profileIds, { impactNature: request.impact.nature });
   if (!sameArray(composition.profileIds, request.profileIds)) {
@@ -610,6 +656,7 @@ function prepareInputs(value: RenderDescriptionInputs | unknown): PreparedInputs
     releaseTag,
     cliVersion,
     renderPhase: input.renderPhase as RenderPhase,
+    snapshotExpectation,
   };
 }
 
