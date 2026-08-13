@@ -52,39 +52,43 @@ export function parseStrictYaml(text: string): JsonValue {
   }
 
   let unsafeReason: string | undefined;
-  visit(document, (key, node) => {
-    if (unsafeReason !== undefined) {
-      return visit.BREAK;
-    }
-    if (isAlias(node)) {
-      unsafeReason = "aliases are not permitted";
-      return visit.BREAK;
-    }
-    if (isPair(node)) {
-      if (!isScalar(node.key) || typeof node.key.value !== "string") {
-        unsafeReason = "mapping keys must be strings";
+  try {
+    visit(document, (key, node) => {
+      if (unsafeReason !== undefined) {
         return visit.BREAK;
       }
-      if (node.key.value === "<<") {
-        unsafeReason = "merge keys are not permitted";
+      if (isAlias(node)) {
+        unsafeReason = "aliases are not permitted";
+        return visit.BREAK;
+      }
+      if (isPair(node)) {
+        if (!isScalar(node.key) || typeof node.key.value !== "string") {
+          unsafeReason = "mapping keys must be strings";
+          return visit.BREAK;
+        }
+        if (node.key.value === "<<") {
+          unsafeReason = "merge keys are not permitted";
+          return visit.BREAK;
+        }
+        return undefined;
+      }
+      if (isNode(node) && typeof node.anchor === "string") {
+        unsafeReason = "anchors are not permitted";
+        return visit.BREAK;
+      }
+      if (isNode(node) && typeof node.tag === "string") {
+        unsafeReason = "explicit tags are not permitted";
+        return visit.BREAK;
+      }
+      if (isScalar(node) && typeof node.value === "number" && !Number.isFinite(node.value)) {
+        unsafeReason = "non-finite numbers are not permitted";
         return visit.BREAK;
       }
       return undefined;
-    }
-    if (isNode(node) && typeof node.anchor === "string") {
-      unsafeReason = "anchors are not permitted";
-      return visit.BREAK;
-    }
-    if (isNode(node) && typeof node.tag === "string") {
-      unsafeReason = "explicit tags are not permitted";
-      return visit.BREAK;
-    }
-    if (isScalar(node) && typeof node.value === "number" && !Number.isFinite(node.value)) {
-      unsafeReason = "non-finite numbers are not permitted";
-      return visit.BREAK;
-    }
-    return undefined;
-  });
+    });
+  } catch (error) {
+    throw inputError("YAML structure is too deeply nested or invalid", error);
+  }
 
   if (unsafeReason !== undefined) {
     throw inputError(unsafeReason);

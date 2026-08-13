@@ -10,7 +10,10 @@ import {
   type InputIo,
 } from "../../src/input/load-input.ts";
 import { normalizeAndValidateRequest } from "../../src/input/normalize.ts";
-import { parseStrictJson } from "../../src/input/strict-json.ts";
+import {
+  MAX_JSON_NESTING_DEPTH,
+  parseStrictJson,
+} from "../../src/input/strict-json.ts";
 import { parseStrictYaml } from "../../src/input/strict-yaml.ts";
 
 function assertInputError(action: () => unknown, message?: RegExp): void {
@@ -84,6 +87,16 @@ test("does not disclose JSON payloads through input errors", () => {
   });
 });
 
+test("bounds JSON nesting and converts parser stack failures to ToolError", () => {
+  const nestedArray = (depth: number): string =>
+    `${"[".repeat(depth)}0${"]".repeat(depth)}`;
+  assert.deepEqual(parseStrictJson(nestedArray(MAX_JSON_NESTING_DEPTH)),
+    Array.from({ length: MAX_JSON_NESTING_DEPTH }).reduce<unknown>((value) => [value], 0));
+  for (const depth of [MAX_JSON_NESTING_DEPTH + 1, 10_000]) {
+    assertInputError(() => parseStrictJson(nestedArray(depth)));
+  }
+});
+
 test("rejects unsafe YAML graph features", () => {
   for (const raw of [
     "a: &value 1\nb: 2",
@@ -100,6 +113,10 @@ test("rejects unsafe YAML graph features", () => {
   ]) {
     assertInputError(() => parseStrictYaml(raw));
   }
+});
+
+test("converts deeply nested YAML parser failures to ToolError", () => {
+  assertInputError(() => parseStrictYaml(`${"[".repeat(10_000)}0${"]".repeat(10_000)}`));
 });
 
 test("rejects duplicate keys, empty YAML and every extra document", () => {
@@ -326,12 +343,15 @@ test("equivalent complete JSON and YAML fixtures normalize identically", async (
   ]);
 });
 
-test("keeps Bundle membership out of the base request schema", () => {
-  const normalized = normalizeAndValidateRequest(validRequest());
-  assert.deepEqual(normalized.profileIds, ["future-profile"]);
-  assert.equal(normalized.title.type, "future-type");
-  assert.deepEqual(normalized.impact.areaIds, ["future-area"]);
-  assert.equal(normalized.verification.items[0]?.id, "future-check");
+test("preserves profile order until Bundle composition validates membership", () => {
+  const request = validRequest();
+  request.profileIds = ["future-zeta", "future-alpha"];
+  const normalized = normalizeAndValidateRequest(request);
+  assert.deepEqual(normalized.profileIds, ["future-zeta", "future-alpha"]);
+  const futureIds = normalizeAndValidateRequest(validRequest());
+  assert.equal(futureIds.title.type, "future-type");
+  assert.deepEqual(futureIds.impact.areaIds, ["future-area"]);
+  assert.equal(futureIds.verification.items[0]?.id, "future-check");
 });
 
 test("rejects unknown properties at every fixed request object boundary", () => {
@@ -448,6 +468,58 @@ test("rejects title newlines, existing prefixes and obvious Markdown", () => {
   }
 });
 
+test("uses the conservative V1 plain-title rule and allows business punctuation", () => {
+  const markupTitles = [
+    "Fix *thing*",
+    "Fix _thing_",
+    "Fix ~~thing~~",
+    "Fix `thing`",
+    "Fix <em>thing</em>",
+    "Fix <https://example.invalid>",
+    "Fix \\*thing\\*",
+    "Fix &amp; preserve behavior",
+    "Fix [thing](https://example.invalid)",
+    "Fix ![thing](https://example.invalid/image.png)",
+    "Fix [thing][reference]",
+    "1) Fix thing",
+    "[reference]: https://example.invalid",
+    "---",
+  ];
+  const unexpectedlyAccepted: string[] = [];
+  for (const titleSummary of markupTitles) {
+    const request = validRequest();
+    (request.title as Record<string, unknown>).titleSummary = titleSummary;
+    try {
+      normalizeAndValidateRequest(request);
+      unexpectedlyAccepted.push(titleSummary);
+    } catch (error) {
+      assert.equal(isToolError(error, "INPUT_ERROR"), true);
+    }
+  }
+  assert.deepEqual(unexpectedlyAccepted, []);
+
+  for (const titleSummary of [
+    "Keep CSS @property compatible with Qt/C++",
+    "Preserve fallback-values: Debug (Windows)",
+    "Handle issue #51 in API v2.0",
+  ]) {
+    const request = validRequest();
+    (request.title as Record<string, unknown>).titleSummary = titleSummary;
+    assert.equal(normalizeAndValidateRequest(request).title.titleSummary, titleSummary);
+  }
+});
+
+test("requires impact areas for functional and non-functional requests", () => {
+  for (const nature of ["functional", "non-functional"]) {
+    const request = validRequest();
+    request.impact = { nature, areaIds: [] };
+    assertInvalidRequest(request);
+  }
+  const docsOnly = validRequest();
+  docsOnly.impact = { nature: "docs-only", areaIds: [] };
+  assert.equal(normalizeAndValidateRequest(docsOnly).impact.nature, "docs-only");
+});
+
 test("rejects blank or placeholder provided prose and always requires evidence", () => {
   for (const placeholder of ["   ", "\u65e0", "n/a", "N / A", " t b d "]) {
     const request = validRequest();
@@ -463,6 +535,49 @@ test("rejects blank or placeholder provided prose and always requires evidence",
       verification.items[0]!.evidence = evidence;
     }
     assertInvalidRequest(request);
+  }
+});
+
+test("requires substantive verification evidence for checked and not-applicable states", () => {
+  const rejected: readonly [string, string][] = [
+    ["not-applicable", "Not applicable"],
+    ["not-applicable", "Does not apply"],
+    ["not-applicable", "N/A because this does not apply"],
+    ["not-applicable", "Short"],
+    ["checked", "yes"],
+    ["checked", "pass"],
+    ["checked", "passed"],
+    ["checked", "ok"],
+    ["checked", "success"],
+    ["checked", "Passed!"],
+  ];
+  const unexpectedlyAccepted: string[] = [];
+  for (const [state, evidence] of rejected) {
+    const request = validRequest();
+    (request.verification as { items: Record<string, unknown>[] }).items = [
+      { id: "manual-check", state, evidence },
+    ];
+    try {
+      normalizeAndValidateRequest(request);
+      unexpectedlyAccepted.push(`${state}:${evidence}`);
+    } catch (error) {
+      assert.equal(isToolError(error, "INPUT_ERROR"), true);
+    }
+  }
+  assert.deepEqual(unexpectedlyAccepted, []);
+
+  for (const [state, evidence] of [
+    ["checked", "Manually verified the login page in Qt WebEngine"],
+    ["not-applicable", "No deployment path exists for this documentation-only change"],
+  ] as const) {
+    const request = validRequest();
+    (request.verification as { items: Record<string, unknown>[] }).items = [
+      { id: "manual-check", state, evidence },
+    ];
+    const item = normalizeAndValidateRequest(request).verification.items[0];
+    assert.equal(item?.evidence, evidence);
+    assert.equal(item?.command, null);
+    assert.equal(item?.result, null);
   }
 });
 

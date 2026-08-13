@@ -203,7 +203,8 @@ function safeField(error: ErrorObject): string | null {
 function isPlaceholder(value: string): boolean {
   const trimmed = value.trim();
   const compactAscii = trimmed.replace(/\s/gu, "").toUpperCase();
-  return trimmed === "\u65e0" || compactAscii === "N/A" || compactAscii === "NA" || compactAscii === "TBD";
+  return trimmed === "\u65e0" || compactAscii === "N/A" || compactAscii === "NA" ||
+    compactAscii === "TBD" || compactAscii === "NOTAPPLICABLE";
 }
 
 function assertProse(value: string, field: string): void {
@@ -244,11 +245,45 @@ function assertSemanticContent(request: Request): void {
   }
   for (const [index, item] of request.verification.items.entries()) {
     assertProse(item.evidence, `/verification/items/${index}/evidence`);
+    assertVerificationEvidence(item.state, item.evidence, index);
     if (item.command !== null) {
       assertProse(item.command, `/verification/items/${index}/command`);
     }
     if (item.result !== null) {
       assertProse(item.result, `/verification/items/${index}/result`);
+    }
+  }
+}
+
+const GENERIC_AFFIRMATIONS = new Set(["yes", "pass", "passed", "ok", "success"]);
+const MINIMUM_REASON_SCALARS = 8;
+
+function normalizedWords(value: string): string {
+  return value.trim().replace(/\s+/gu, " ").toLowerCase();
+}
+
+function assertVerificationEvidence(
+  state: Request["verification"]["items"][number]["state"],
+  evidence: string,
+  index: number,
+): void {
+  const field = `/verification/items/${index}/evidence`;
+  const normalized = normalizedWords(evidence);
+  const affirmation = normalized.replace(/[^\p{L}\p{N}]+/gu, "");
+  if (state === "checked" && GENERIC_AFFIRMATIONS.has(affirmation)) {
+    throw inputError(field, "specific verification evidence", "generic affirmation");
+  }
+  if (state === "not-applicable") {
+    const compact = normalized.replace(/[^\p{L}\p{N}]+/gu, "");
+    if (isPlaceholder(evidence) || /^n\s*\/\s*a\b/iu.test(normalized) ||
+        normalized.startsWith("not applicable") ||
+        normalized.startsWith("does not apply") ||
+        [...compact].length < MINIMUM_REASON_SCALARS) {
+      throw inputError(
+        field,
+        "a substantive reason explaining why the check is not applicable",
+        "missing or generic not-applicable reason",
+      );
     }
   }
 }
@@ -264,9 +299,33 @@ function assertTitle(titleSummary: string): void {
       /^draft\s*:/iu.test(titleSummary)) {
     throw inputError("/title/titleSummary", "summary without a rendered title prefix", "existing title prefix");
   }
-  if (/^\s{0,3}(?:#{1,6}\s|>|[-+*]\s|\d+\.\s|```|~~~)/u.test(titleSummary) ||
-      /!?\[[^\]\r\n]+\]\([^\r\n)]+\)|`[^`]+`|\*\*[^*]+\*\*|__[^_]+__|~~[^~]+~~/u.test(titleSummary)) {
+  if (containsConservativeV1TitleMarkup(titleSummary)) {
     throw inputError("/title/titleSummary", "plain single-line text without Markdown", "Markdown syntax");
+  }
+}
+
+// V1 titles intentionally reject Markdown-capable punctuation instead of
+// attempting to embed a full CommonMark parser in the input contract.
+const DISALLOWED_TITLE_CHARACTERS = new Set(["*", "_", "~", "`", "<", ">", "\\", "&"]);
+
+function containsConservativeV1TitleMarkup(title: string): boolean {
+  if ([...title].some((character) => DISALLOWED_TITLE_CHARACTERS.has(character))) {
+    return true;
+  }
+  if (/^\s{0,3}(?:#{1,6}\s|>|[-+]\s|\d{1,9}[.)]\s|\[[^\]\r\n]+\]:)/u.test(title) ||
+      /^\s{0,3}(?:-\s*){3,}$/u.test(title)) {
+    return true;
+  }
+  return /!?\[[^\]\r\n]+\](?:\([^\r\n)]*\)|\[[^\]\r\n]*\])/u.test(title);
+}
+
+function assertImpactAreas(request: Request): void {
+  if (request.impact.nature !== "docs-only" && request.impact.areaIds.length === 0) {
+    throw inputError(
+      "/impact/areaIds",
+      "at least one impact area for functional or non-functional changes",
+      "empty impact area selection",
+    );
   }
 }
 
@@ -330,6 +389,7 @@ export function normalizeAndValidateRequest(value: unknown): Request {
     );
   }
   assertTitle(normalized.title.titleSummary);
+  assertImpactAreas(normalized);
   assertCanonicalScalars(normalized);
   assertSemanticContent(normalized);
   assertUniqueVerificationIds(normalized);

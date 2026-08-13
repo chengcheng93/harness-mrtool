@@ -78,7 +78,8 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 72,
-          "pattern": "^[^\\r\\n\\u2028\\u2029]+$"
+          "pattern": "^[^\\r\\n\\u2028\\u2029]+$",
+          "description": "Plain text under the conservative V1 title rule; Markdown-capable punctuation is rejected after schema validation."
         }
       }
     },
