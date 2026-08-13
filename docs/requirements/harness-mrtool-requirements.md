@@ -906,10 +906,10 @@ metadata 还必须记录 Template Release tag、Bundle manifest hash、`renderPh
 V1 提供只读导出命令：
 
 ```powershell
-harness-mrtool template export --profile general --output Default.md
-harness-mrtool template export --profile code --output Code.md
-harness-mrtool template export --profile docs --output Docs.md
-harness-mrtool template export --profile ops --output Ops.md
+harness-mrtool template export --profile general --destination Default.md
+harness-mrtool template export --profile code --destination Code.md
+harness-mrtool template export --profile docs --destination Docs.md
+harness-mrtool template export --profile ops --destination Ops.md
 ```
 
 这些文件可提交到业务仓库的 `.gitlab/merge_request_templates/`，供网页用户参考。V1 不自动批量写入项目，也不在投影模板中硬编码项目标签。
@@ -1402,6 +1402,9 @@ JSON 输出必须包含稳定的：
 人员与标签在 JSON 输入中使用 opaque candidate token；成功输出为了审计同时包含 token 对应的 canonical GitLab object type、scope、真实 ID 和名称。调用方不得把成功输出中的真实 ID 直接复用为下一次 Request。
 
 日志写 stderr，机器 JSON 写 stdout，二者不得混杂。
+
+`--output json` 始终只选择机器输出格式。`template export` 的文件路径使用
+`--destination <path>`，不得让同一个 flag 同时表示输出格式和文件路径。
 
 ### 13.2 `doctor`
 

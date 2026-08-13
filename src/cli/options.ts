@@ -70,6 +70,18 @@ const VALUE_FLAGS = new Set([
 const EXACT_SEMVER =
   /^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u;
 
+export type CliOptionArity = "boolean" | "value";
+
+export function cliOptionArity(flag: string): CliOptionArity | null {
+  if (BOOLEAN_FLAGS.has(flag)) return "boolean";
+  if (VALUE_FLAGS.has(flag)) return "value";
+  return null;
+}
+
+export function isExactCliSemver(value: string): boolean {
+  return EXACT_SEMVER.test(value) && validSemver(value) !== null;
+}
+
 function cliInputError(
   field: string | null,
   expected: JsonValue,
@@ -185,7 +197,7 @@ function applyValue(options: MutableOptions, flag: string, value: string): void 
 function assertClientTuple(options: MutableOptions): void {
   if (
     options.clientVersion !== null &&
-    (!EXACT_SEMVER.test(options.clientVersion) || validSemver(options.clientVersion) === null)
+    !isExactCliSemver(options.clientVersion)
   ) {
     invalidFlag("--client-version", "an exact semantic version", "invalid semantic version");
   }
