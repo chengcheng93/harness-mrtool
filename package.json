@@ -1,0 +1,32 @@
+{
+  "name": "harness-mrtool",
+  "version": "0.1.0-dev",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "24.16.0"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "build:sea": "node scripts/build-sea.mjs",
+    "test": "node scripts/test.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "ajv": "8.20.0",
+    "commander": "15.0.0",
+    "fflate": "0.8.3",
+    "json-canonicalize": "2.0.0",
+    "jsonc-parser": "3.3.1",
+    "semver": "7.8.5",
+    "yaml": "2.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "@types/semver": "7.7.1",
+    "esbuild": "0.28.2",
+    "postject": "1.0.0-alpha.6",
+    "tsx": "4.23.12",
+    "typescript": "5.9.3"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "main": "dist/main.cjs",
+  "output": "dist/harness-mrtool.blob",
+  "disableExperimentalSEAWarning": true,
+  "useSnapshot": false,
+  "useCodeCache": false,
+  "execArgvExtension": "none"
+}
