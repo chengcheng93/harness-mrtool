@@ -20,6 +20,11 @@ import { renderProjectTemplate } from "./render/project-template.ts";
 import { renderTitle } from "./render/title.ts";
 import { normalizeRuntimeArguments } from "./runtime-arguments.ts";
 import { executeCliJson, type CliCommandHandlers } from "./cli/execute.ts";
+import {
+  createLocalCommandHandlers,
+  type TrustedBundleSelection,
+} from "./cli/commands/local.ts";
+import { writeProjectTemplate } from "./cli/projection-writer.ts";
 
 declare const __HARNESS_MRTOOL_VERSION__: string;
 declare const __HARNESS_MRTOOL_BOOTSTRAP_BUNDLE__: unknown;
@@ -64,14 +69,24 @@ function fail(message: string, output: string | undefined): void {
   process.exitCode = 2;
 }
 
-const publicCommandHandlers: CliCommandHandlers = {
-  version: () => ({
-    output: {
-      message: "Harness MR Tool version inspected",
-      data: { version: cliVersion, sea: isSea() },
-    },
-  }),
-};
+function embeddedBundleSelection(): TrustedBundleSelection {
+  const bundle = loadBootstrapTemplateBundle();
+  const bundleManifestHash = sha256Utf8(`${canonicalizeJson(bundle.manifest)}\n`);
+  return {
+    bundle,
+    bundleManifestHash,
+    releaseSetId: `embedded:${bundleManifestHash}`,
+    releaseTag: `templates-v${bundle.manifest.version}`,
+  };
+}
+
+function publicCommandHandlers(): CliCommandHandlers {
+  return createLocalCommandHandlers({
+    cliVersion,
+    current: embeddedBundleSelection(),
+    writeProjection: writeProjectTemplate,
+  });
+}
 
 function requestsJsonOutput(arguments_: readonly string[]): boolean {
   return arguments_.some((argument, index) =>
@@ -375,7 +390,7 @@ async function main(arguments_: readonly string[]): Promise<void> {
             return process.stdout.write(chunk, callback);
           },
         },
-        handlers: publicCommandHandlers,
+        handlers: publicCommandHandlers(),
       });
       process.exitCode = result.exitCode;
       return;
