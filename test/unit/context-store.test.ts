@@ -7,6 +7,7 @@ import {
   readdir,
   rm,
   symlink,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -25,7 +26,10 @@ import {
   type IssueContextInput,
 } from "../../src/context/types.ts";
 import { candidateTokenDigest } from "../../src/context/tokens.ts";
-import { ensurePrivateStateDirectory } from "../../src/platform/state-path.ts";
+import {
+  ensurePrivateStateDirectory,
+  type WindowsAclVerifier,
+} from "../../src/platform/state-path.ts";
 
 class FakeClock implements ContextClock {
   constructor(private value: number) {}
@@ -54,6 +58,8 @@ class CounterRandom implements ContextRandomSource {
     return bytes;
   }
 }
+
+const allowTestAcl: WindowsAclVerifier = { verify: async () => undefined };
 
 const binding: ContextBinding = {
   operation: "create",
@@ -133,6 +139,7 @@ async function fixture(context: test.TestContext) {
     clock,
     random: new CounterRandom(),
     lockTimeoutMs: 1_000,
+    windowsAclVerifier: allowTestAcl,
   });
   return { directory, clock, store };
 }
@@ -155,6 +162,7 @@ test("issues 256-bit opaque tokens while persisting only their SHA-256 digests",
   }
   assert.equal(persisted.includes('"token"'), false);
   assert.equal(persisted.includes("hmrc1_"), false);
+  assert.equal(persisted.includes("hmrx1_"), false);
 });
 
 test("resolves only tokens matching context, host, project, kind, release, Bundle and protocol", async (context) => {
@@ -264,7 +272,7 @@ test("batch consume is all-or-nothing and prevents replay", async (context) => {
       consume: true,
       selections: [{ token: first.token, kind: first.kind }],
     }),
-    (error: unknown) => isToolError(error, "INPUT_ERROR", /consumed/i),
+    (error: unknown) => isToolError(error, first.kind === "label" ? "LABEL_ERROR" : "INPUT_ERROR", /consumed/i),
   );
 
   const persisted = await readFile(resolve(directory, "candidate-contexts-v1.json"), "utf8");
@@ -288,6 +296,7 @@ test("concurrent stores serialize updates without losing contexts", async (conte
         },
       },
       lockTimeoutMs: 2_000,
+      windowsAclVerifier: allowTestAcl,
     });
   });
 
@@ -313,7 +322,7 @@ test("corrupt state is quarantined and never treated as an empty store", async (
 test("private state path rejects symbolic links and applies private POSIX permissions", async (context) => {
   const { directory } = await fixture(context);
   const privateDirectory = resolve(directory, "private");
-  await ensurePrivateStateDirectory(privateDirectory);
+  await ensurePrivateStateDirectory(privateDirectory, { windowsAclVerifier: allowTestAcl });
   const info = await lstat(privateDirectory);
   if (process.platform !== "win32") {
     assert.equal(info.mode & 0o777, 0o700);
@@ -324,7 +333,7 @@ test("private state path rejects symbolic links and applies private POSIX permis
   await mkdir(target);
   await symlink(target, linked, process.platform === "win32" ? "junction" : "dir");
   await assert.rejects(
-    ensurePrivateStateDirectory(linked),
+    ensurePrivateStateDirectory(linked, { windowsAclVerifier: allowTestAcl }),
     (error: unknown) => isToolError(error, "INTERNAL_ERROR", /reparse|symbolic/i),
   );
 });
@@ -359,6 +368,28 @@ test("rejects raw candidate tokens embedded in the tokenless snapshot", async (c
   );
 });
 
+test("rejects candidate or context bearer values anywhere in the document before persistence", async (context) => {
+  const { directory, store } = await fixture(context);
+  const first = await store.issue(issueInput);
+  const before = await readFile(resolve(directory, "candidate-contexts-v1.json"), "utf8");
+  const bearerValues = [first.contextId, first.candidates[0]!.token];
+  const labelCandidate = issueInput.candidates.find((candidate) => candidate.kind === "label");
+  assert.ok(labelCandidate);
+
+  for (const bearer of bearerValues) {
+    await assert.rejects(
+      store.issue({
+        ...issueInput,
+        candidates: [{ ...labelCandidate, description: bearer }],
+      }),
+      (error: unknown) =>
+        isToolError(error, "INPUT_ERROR", /bearer|token/i) &&
+        !((error as Error).message.includes(bearer)),
+    );
+    assert.equal(await readFile(resolve(directory, "candidate-contexts-v1.json"), "utf8"), before);
+  }
+});
+
 test("rejects a symbolic-link store instead of following it", async (context) => {
   const { directory, store } = await fixture(context);
   const outside = resolve(directory, "outside.json");
@@ -388,6 +419,7 @@ test("lock contention fails closed within the configured timeout", async (contex
     clock,
     random: new CounterRandom(),
     lockTimeoutMs: 50,
+    windowsAclVerifier: allowTestAcl,
   });
   await mkdir(resolve(directory, "candidate-contexts-v1.lock"));
   const started = Date.now();
@@ -414,6 +446,7 @@ test("strict store parsing quarantines unknown fields, duplicate keys and oversi
       stateDirectory: directory,
       clock: new FakeClock(Date.UTC(2026, 7, 14)),
       random: new CounterRandom(),
+      windowsAclVerifier: allowTestAcl,
     });
     await first.issue(issueInput);
     const storePath = resolve(directory, "candidate-contexts-v1.json");
@@ -425,6 +458,21 @@ test("strict store parsing quarantines unknown fields, duplicate keys and oversi
     );
     assert.equal((await readdir(directory)).some((entry) => entry.includes(".corrupt.")), true);
   }
+});
+
+test("read validation quarantines a raw bearer injected into persisted metadata", async (context) => {
+  const { directory, store } = await fixture(context);
+  const issued = await store.issue(issueInput);
+  const storePath = resolve(directory, "candidate-contexts-v1.json");
+  const document = JSON.parse(await readFile(storePath, "utf8"));
+  document.contexts[0].candidates[0].metadata.description = issued.candidates[0]!.token;
+  await writeFile(storePath, `${JSON.stringify(document)}\n`, "utf8");
+
+  await assert.rejects(
+    store.cleanup(),
+    (error: unknown) => isToolError(error, "INTERNAL_ERROR", /corrupt/i),
+  );
+  assert.equal((await readdir(directory)).some((entry) => entry.includes(".corrupt.")), true);
 });
 
 test("clock rollback fails closed instead of extending a context", async (context) => {
@@ -444,6 +492,97 @@ test("clock rollback fails closed instead of extending a context", async (contex
   );
 });
 
+test("resolve and cleanup reject non-finite clocks without mutating valid contexts", async (context) => {
+  const { directory, clock, store } = await fixture(context);
+  const issued = await store.issue(issueInput);
+  const candidate = issued.candidates[0]!;
+  const storePath = resolve(directory, "candidate-contexts-v1.json");
+  const before = await readFile(storePath, "utf8");
+
+  for (const invalid of [Number.NaN, Number.POSITIVE_INFINITY]) {
+    clock.set(invalid);
+    await assert.rejects(
+      store.resolve({
+        contextId: issued.contextId,
+        expectedBinding: binding,
+        selections: [{ token: candidate.token, kind: candidate.kind }],
+      }),
+      (error: unknown) => isToolError(error, "INTERNAL_ERROR", /clock/i),
+    );
+    await assert.rejects(
+      store.cleanup(),
+      (error: unknown) => isToolError(error, "INTERNAL_ERROR", /clock/i),
+    );
+    assert.equal(await readFile(storePath, "utf8"), before);
+  }
+});
+
+test("issue rejects non-finite clocks before creating a store", async (context) => {
+  const { directory, clock, store } = await fixture(context);
+  clock.set(Number.NaN);
+  await assert.rejects(
+    store.issue(issueInput),
+    (error: unknown) => isToolError(error, "INTERNAL_ERROR", /clock/i),
+  );
+  await assert.rejects(
+    readFile(resolve(directory, "candidate-contexts-v1.json"), "utf8"),
+    /ENOENT/u,
+  );
+});
+
+test("label selections use LABEL_ERROR for malformed, unknown, wrong-kind and consumed tokens", async (context) => {
+  const { store } = await fixture(context);
+  const issued = await store.issue(issueInput);
+  const label = issued.candidates.find((candidate) => candidate.kind === "label")!;
+  const reviewer = issued.candidates.find((candidate) => candidate.kind === "reviewer")!;
+  const cases = [
+    "malformed",
+    `hmrc1_${Buffer.alloc(32, 99).toString("base64url")}`,
+    reviewer.token,
+  ];
+
+  for (const token of cases) {
+    await assert.rejects(
+      store.resolve({
+        contextId: issued.contextId,
+        expectedBinding: binding,
+        selections: [{ token, kind: "label" }],
+      }),
+      (error: unknown) => isToolError(error, "LABEL_ERROR"),
+    );
+  }
+
+  await store.resolve({
+    contextId: issued.contextId,
+    expectedBinding: binding,
+    selections: [{ token: label.token, kind: "label" }],
+    consume: true,
+  });
+  await assert.rejects(
+    store.resolve({
+      contextId: issued.contextId,
+      expectedBinding: binding,
+      selections: [{ token: label.token, kind: "label" }],
+    }),
+    (error: unknown) => isToolError(error, "LABEL_ERROR"),
+  );
+});
+
+test("user candidate failures remain INPUT_ERROR", async (context) => {
+  const { store } = await fixture(context);
+  const issued = await store.issue(issueInput);
+  for (const kind of ["assignee", "reviewer"] as const) {
+    await assert.rejects(
+      store.resolve({
+        contextId: issued.contextId,
+        expectedBinding: binding,
+        selections: [{ token: "malformed", kind }],
+      }),
+      (error: unknown) => isToolError(error, "INPUT_ERROR"),
+    );
+  }
+});
+
 test("candidate digest collisions retry and then fail at the bounded limit", async (context) => {
   const directory = (await fixture(context)).directory;
   const clock = new FakeClock(Date.UTC(2026, 7, 14));
@@ -456,7 +595,12 @@ test("candidate digest collisions retry and then fail at the bounded limit", asy
       return bytes;
     },
   };
-  const store = new CandidateContextStore({ stateDirectory: directory, clock, random });
+  const store = new CandidateContextStore({
+    stateDirectory: directory,
+    clock,
+    random,
+    windowsAclVerifier: allowTestAcl,
+  });
   const singleCandidate = { ...issueInput, candidates: [issueInput.candidates[0]!] };
   const first = await store.issue(singleCandidate);
   const second = await store.issue(singleCandidate);
@@ -472,6 +616,7 @@ test("candidate digest collisions retry and then fail at the bounded limit", asy
         return bytes;
       },
     },
+    windowsAclVerifier: allowTestAcl,
   });
   await assert.rejects(
     stuck.issue({ ...issueInput, candidates: [issueInput.candidates[0]!, issueInput.candidates[1]!] }),
@@ -493,11 +638,78 @@ test("takes over an expired lock without accepting a live lock", async (context)
     clock,
     random: new CounterRandom(),
     lockTimeoutMs: 200,
+    windowsAclVerifier: allowTestAcl,
   });
 
   const issued = await store.issue(issueInput);
   assert.match(issued.contextId, /^hmrx1_/u);
   assert.equal((await readdir(directory)).some((entry) => entry.includes("lock.stale")), false);
+});
+
+test("recovers old ownerless and malformed locks but does not steal a fresh ownerless lock", async (context) => {
+  const { directory, clock } = await fixture(context);
+  for (const [index, owner] of [null, "not-json"] .entries()) {
+    const stateDirectory = resolve(directory, `orphan-${String(index)}`);
+    const lockPath = resolve(stateDirectory, "candidate-contexts-v1.lock");
+    await mkdir(lockPath, { recursive: true });
+    if (owner !== null) {
+      await writeFile(resolve(lockPath, "owner.json"), owner, "utf8");
+    }
+    const old = new Date(Date.now() - 60_000);
+    await utimes(lockPath, old, old);
+    const store = new CandidateContextStore({
+      stateDirectory,
+      clock,
+      random: new CounterRandom(),
+      lockTimeoutMs: 200,
+      windowsAclVerifier: allowTestAcl,
+    });
+    const issued = await store.issue(issueInput);
+    assert.match(issued.contextId, /^hmrx1_/u);
+  }
+
+  const freshDirectory = resolve(directory, "fresh-orphan");
+  await mkdir(resolve(freshDirectory, "candidate-contexts-v1.lock"), { recursive: true });
+  const fresh = new CandidateContextStore({
+    stateDirectory: freshDirectory,
+    clock,
+    random: new CounterRandom(),
+    lockTimeoutMs: 30,
+    windowsAclVerifier: allowTestAcl,
+  });
+  await assert.rejects(
+    fresh.issue(issueInput),
+    (error: unknown) => isToolError(error, "INTERNAL_ERROR", /lock timed out/i),
+  );
+});
+
+test("Windows state preparation invokes an injected ACL verifier and propagates rejection", async (context) => {
+  if (process.platform !== "win32") {
+    context.skip("Windows ACL contract");
+    return;
+  }
+  const { directory } = await fixture(context);
+  let verifiedPath: string | undefined;
+  const verifier: WindowsAclVerifier = {
+    async verify(path) {
+      verifiedPath = path;
+      throw new Error("unsafe inherited ACL");
+    },
+  };
+  await assert.rejects(
+    ensurePrivateStateDirectory(resolve(directory, "acl-rejected"), { windowsAclVerifier: verifier }),
+    (error: unknown) => isToolError(error, "INTERNAL_ERROR", /ACL|private state path/i),
+  );
+  assert.equal(verifiedPath, resolve(directory, "acl-rejected"));
+});
+
+test("default Windows ACL adapter secures and verifies a newly created directory", async (context) => {
+  if (process.platform !== "win32") {
+    context.skip("Windows ACL integration contract");
+    return;
+  }
+  const { directory } = await fixture(context);
+  await ensurePrivateStateDirectory(resolve(directory, "acl-default"));
 });
 
 test("lost lock ownership fences an old writer before atomic replace", async (context) => {
@@ -520,6 +732,7 @@ test("lost lock ownership fences an old writer before atomic replace", async (co
         }
       },
     },
+    windowsAclVerifier: allowTestAcl,
   });
 
   await assert.rejects(
@@ -545,6 +758,7 @@ test("atomic persistence failure preserves the previous complete document", asyn
         }
       },
     },
+    windowsAclVerifier: allowTestAcl,
   });
 
   await assert.rejects(

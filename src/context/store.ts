@@ -20,7 +20,10 @@ import {
   type JsonValue,
 } from "../contracts/jcs.ts";
 import { parseStrictJson } from "../input/strict-json.ts";
-import { ensurePrivateStateDirectory } from "../platform/state-path.ts";
+import {
+  ensurePrivateStateDirectory,
+  type WindowsAclVerifier,
+} from "../platform/state-path.ts";
 import {
   CANDIDATE_CONTEXT_TTL_MS,
   CONTEXT_STORE_VERSION,
@@ -38,6 +41,7 @@ import {
 import {
   assertContextId,
   candidateTokenDigest,
+  contextIdDigest,
   issueCandidateToken,
   issueContextId,
   systemTokenRandomSource,
@@ -52,6 +56,7 @@ const MAX_STORE_BYTES = 16 * 1024 * 1024;
 const MAX_COLLISION_ATTEMPTS = 8;
 const RAW_CANDIDATE_TOKEN = /^hmrc1_[A-Za-z0-9_-]{43}$/u;
 const LOCK_LEASE_MS = 10_000;
+const INCOMPLETE_LOCK_GRACE_MS = 1_000;
 
 interface LockLease {
   readonly nonce: string;
@@ -74,6 +79,7 @@ export interface CandidateContextStoreOptions {
   readonly random?: ContextRandomSource;
   readonly lockTimeoutMs?: number;
   readonly faultInjector?: ContextStoreFaultInjector;
+  readonly windowsAclVerifier?: WindowsAclVerifier;
 }
 
 const systemClock: ContextClock = { now: () => Date.now() };
@@ -204,6 +210,22 @@ function assertTokenlessSnapshot(value: JsonValue): void {
   }
 }
 
+function containsRawBearer(value: JsonValue): boolean {
+  const pending: JsonValue[] = [value];
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (typeof current === "string" && /^(?:hmrc1_|hmrx1_)[A-Za-z0-9_-]{43}$/u.test(current)) {
+      return true;
+    }
+    if (Array.isArray(current)) {
+      pending.push(...current);
+    } else if (current !== null && typeof current === "object") {
+      pending.push(...Object.values(current));
+    }
+  }
+  return false;
+}
+
 function digestMatches(left: string, right: string): boolean {
   if (!SHA256.test(left) || !SHA256.test(right)) {
     return false;
@@ -212,34 +234,32 @@ function digestMatches(left: string, right: string): boolean {
 }
 
 function validateDocument(value: JsonValue): ContextStoreDocument {
+  if (containsRawBearer(value)) {
+    throw internalError("Candidate context store is corrupt");
+  }
   const root = record(value);
   if (root === undefined || !exactFields(root, ["storeVersion", "contexts"]) ||
       root.storeVersion !== CONTEXT_STORE_VERSION || !Array.isArray(root.contexts)) {
     throw internalError("Candidate context store is corrupt");
   }
-  const contextIds = new Set<string>();
+  const contextIdDigests = new Set<string>();
   const tokenDigests = new Set<string>();
   const contexts: PersistedContext[] = [];
   for (const contextValue of root.contexts) {
     const context = record(contextValue);
     if (context === undefined || !exactFields(context, [
-      "contextId", "createdAtMs", "expiresAtMs", "binding", "externalSnapshotDigest",
+      "contextIdDigest", "createdAtMs", "expiresAtMs", "binding", "externalSnapshotDigest",
       "snapshot", "candidates",
-    ]) || !nonEmpty(context.contextId) || !Number.isSafeInteger(context.createdAtMs) ||
+    ]) || !SHA256.test(context.contextIdDigest as string) || !Number.isSafeInteger(context.createdAtMs) ||
         !Number.isSafeInteger(context.expiresAtMs) ||
         (context.expiresAtMs as number) - (context.createdAtMs as number) !== CANDIDATE_CONTEXT_TTL_MS ||
         !SHA256.test(context.externalSnapshotDigest as string) || !Array.isArray(context.candidates)) {
       throw internalError("Candidate context store is corrupt");
     }
-    try {
-      assertContextId(context.contextId);
-    } catch {
+    if (contextIdDigests.has(context.contextIdDigest as string)) {
       throw internalError("Candidate context store is corrupt");
     }
-    if (contextIds.has(context.contextId)) {
-      throw internalError("Candidate context store is corrupt");
-    }
-    contextIds.add(context.contextId);
+    contextIdDigests.add(context.contextIdDigest as string);
     let binding: ContextBinding;
     try {
       binding = normalizeBinding(context.binding as unknown as ContextBinding);
@@ -280,7 +300,7 @@ function validateDocument(value: JsonValue): ContextStoreDocument {
       });
     }
     contexts.push({
-      contextId: context.contextId,
+      contextIdDigest: context.contextIdDigest as string,
       createdAtMs: context.createdAtMs as number,
       expiresAtMs: context.expiresAtMs as number,
       binding,
@@ -299,6 +319,7 @@ export class CandidateContextStore {
   private readonly random: ContextRandomSource;
   private readonly lockTimeoutMs: number;
   private readonly faultInjector: ContextStoreFaultInjector | undefined;
+  private readonly windowsAclVerifier: WindowsAclVerifier | undefined;
 
   constructor(options: CandidateContextStoreOptions) {
     this.path = resolve(options.stateDirectory, STORE_NAME);
@@ -307,6 +328,7 @@ export class CandidateContextStore {
     this.random = options.random ?? systemTokenRandomSource;
     this.lockTimeoutMs = options.lockTimeoutMs ?? 2_000;
     this.faultInjector = options.faultInjector;
+    this.windowsAclVerifier = options.windowsAclVerifier;
     if (!Number.isSafeInteger(this.lockTimeoutMs) || this.lockTimeoutMs < 1) {
       throw new TypeError("lockTimeoutMs must be a positive integer");
     }
@@ -342,12 +364,16 @@ export class CandidateContextStore {
   }
 
   private async acquireLock(): Promise<LockLease> {
-    await ensurePrivateStateDirectory(resolve(this.path, ".."));
+    await ensurePrivateStateDirectory(resolve(this.path, ".."), {
+      ...(this.windowsAclVerifier === undefined ? {} : { windowsAclVerifier: this.windowsAclVerifier }),
+    });
     const started = Date.now();
     for (;;) {
       const nonce = randomBytes(24).toString("base64url");
+      let createdLockDirectory = false;
       try {
         await mkdir(this.lockPath, { mode: 0o700 });
+        createdLockDirectory = true;
         await writeFile(this.lockOwnerPath(), JSON.stringify({
           lockVersion: 1,
           nonce,
@@ -363,8 +389,17 @@ export class CandidateContextStore {
           },
         };
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+        const errorCode = (error as NodeJS.ErrnoException).code;
+        if (createdLockDirectory) {
           await rm(this.lockPath, { recursive: true, force: true }).catch(() => undefined);
+          throw internalError("Candidate context lock cannot be acquired");
+        }
+        if (errorCode !== "EEXIST") {
+          if (process.platform === "win32" && ["EACCES", "ENOENT", "EPERM"].includes(errorCode ?? "") &&
+              Date.now() - started < this.lockTimeoutMs) {
+            await sleep(5);
+            continue;
+          }
           throw internalError("Candidate context lock cannot be acquired");
         }
         let lockInfo;
@@ -391,6 +426,20 @@ export class CandidateContextStore {
             throw internalError("Expired candidate context lock cannot be safely recovered");
           }
         }
+        if (owner === undefined && Date.now() - lockInfo.mtimeMs >= INCOMPLETE_LOCK_GRACE_MS) {
+          const stalePath = `${this.lockPath}.stale.${process.pid}.${nonce}`;
+          try {
+            await rename(this.lockPath, stalePath);
+            await rm(stalePath, { recursive: true, force: true });
+            continue;
+          } catch (takeoverError) {
+            if (["ENOENT", "EEXIST", "EPERM"].includes((takeoverError as NodeJS.ErrnoException).code ?? "")) {
+              await sleep(5);
+              continue;
+            }
+            throw internalError("Incomplete candidate context lock cannot be safely recovered");
+          }
+        }
         if (Date.now() - started >= this.lockTimeoutMs) {
           throw internalError("Candidate context lock timed out");
         }
@@ -400,7 +449,7 @@ export class CandidateContextStore {
   }
 
   private async quarantine(): Promise<void> {
-    const name = `${basename(this.path)}.corrupt.${String(this.clock.now())}.${process.pid}`;
+    const name = `${basename(this.path)}.corrupt.${String(Date.now())}.${process.pid}`;
     try {
       await rename(this.path, resolve(this.path, "..", name));
     } catch {
@@ -433,7 +482,14 @@ export class CandidateContextStore {
     }
   }
 
+  private assertDocumentHasNoRawBearer(document: ContextStoreDocument): void {
+    if (containsRawBearer(document as unknown as JsonValue)) {
+      throw contextInputError("Candidate context document contains a raw bearer value", "context");
+    }
+  }
+
   private async writeDocument(document: ContextStoreDocument, lease: LockLease): Promise<void> {
+    this.assertDocumentHasNoRawBearer(document);
     const serialized = `${canonicalizeJson(document)}\n`;
     const temporaryPath = `${this.path}.tmp.${process.pid}.${Date.now().toString(36)}`;
     let handle;
@@ -470,7 +526,8 @@ export class CandidateContextStore {
   private uniqueContextId(document: ContextStoreDocument): string {
     for (let attempt = 0; attempt < MAX_COLLISION_ATTEMPTS; attempt += 1) {
       const contextId = issueContextId(this.random);
-      if (!document.contexts.some((context) => context.contextId === contextId)) {
+      const digest = contextIdDigest(contextId);
+      if (!document.contexts.some((context) => digestMatches(context.contextIdDigest, digest))) {
         return contextId;
       }
     }
@@ -489,6 +546,28 @@ export class CandidateContextStore {
     throw internalError("Secure random candidate token collision limit exceeded");
   }
 
+  private now(): number {
+    const now = this.clock.now();
+    if (!Number.isSafeInteger(now) || now < 0) {
+      throw internalError("Candidate context clock is invalid");
+    }
+    return now;
+  }
+
+  private selectionError(kind: CandidateKind, reason: string): ToolError<"LABEL_ERROR" | "INPUT_ERROR"> {
+    if (kind === "label") {
+      return new ToolError("LABEL_ERROR", reason, {
+        field: "mergeRequest.labelCandidateTokens",
+        expected: "an unexpired label candidate from the matching context",
+        actual: "label candidate validation failed",
+        safeNextStep: "Run context again and select a current label candidate.",
+      });
+    }
+    return contextInputError(reason, kind === "assignee"
+      ? "mergeRequest.assigneeCandidateToken"
+      : "review.reviewerCandidateTokens");
+  }
+
   async issue(inputValue: IssueContextInput): Promise<IssuedContext> {
     const input: IssueContextInput = {
       binding: normalizeBinding(inputValue.binding),
@@ -498,10 +577,7 @@ export class CandidateContextStore {
     assertTokenlessSnapshot(input.snapshot);
     return this.locked(async (lease) => {
       const document = await this.readDocument();
-      const now = this.clock.now();
-      if (!Number.isSafeInteger(now) || now < 0) {
-        throw internalError("Candidate context clock is invalid");
-      }
+      const now = this.now();
       const active = document.contexts.filter((context) => context.expiresAtMs > now);
       const activeDocument: ContextStoreDocument = { storeVersion: CONTEXT_STORE_VERSION, contexts: active };
       const contextId = this.uniqueContextId(activeDocument);
@@ -513,7 +589,7 @@ export class CandidateContextStore {
       });
       const externalSnapshotDigest = sha256CanonicalJson(input.snapshot);
       const persisted: PersistedContext = {
-        contextId,
+        contextIdDigest: contextIdDigest(contextId),
         createdAtMs: now,
         expiresAtMs: now + CANDIDATE_CONTEXT_TTL_MS,
         binding: input.binding,
@@ -539,18 +615,23 @@ export class CandidateContextStore {
 
   async resolve(input: ResolveContextInput): Promise<ResolvedContext> {
     assertContextId(input.contextId);
+    const requestedContextDigest = contextIdDigest(input.contextId);
     const expectedBinding = normalizeBinding(input.expectedBinding);
-    const selections = input.selections.map((selection) => ({
-      kind: selection.kind,
-      digest: candidateTokenDigest(selection.token),
-    }));
+    const selections = input.selections.map((selection) => {
+      try {
+        return { kind: selection.kind, digest: candidateTokenDigest(selection.token) };
+      } catch {
+        throw this.selectionError(selection.kind, "Invalid candidate token");
+      }
+    });
     if (new Set(selections.map((selection) => selection.digest)).size !== selections.length) {
       throw contextInputError("Candidate selection contains duplicates", "candidateTokens");
     }
     return this.locked(async (lease) => {
       const document = await this.readDocument();
-      const now = this.clock.now();
-      const index = document.contexts.findIndex((context) => context.contextId === input.contextId);
+      const now = this.now();
+      const index = document.contexts.findIndex((context) =>
+        digestMatches(context.contextIdDigest, requestedContextDigest));
       if (index < 0) {
         const active = document.contexts.filter((context) => context.expiresAtMs > now);
         if (active.length !== document.contexts.length) {
@@ -579,13 +660,13 @@ export class CandidateContextStore {
       for (const selection of selections) {
         const candidate = context.candidates.find((entry) => digestMatches(entry.tokenDigest, selection.digest));
         if (candidate === undefined) {
-          throw contextInputError("Unknown candidate token", "candidateTokens");
+          throw this.selectionError(selection.kind, "Unknown candidate token");
         }
         if (candidate.kind !== selection.kind) {
-          throw contextInputError("Candidate kind does not match the request", "candidateTokens");
+          throw this.selectionError(selection.kind, "Candidate kind does not match the request");
         }
         if (candidate.consumedAtMs !== null) {
-          throw contextInputError("Candidate token has already been consumed", "candidateTokens");
+          throw this.selectionError(selection.kind, "Candidate token has already been consumed");
         }
         resolved.push(candidate);
       }
@@ -603,7 +684,7 @@ export class CandidateContextStore {
         }, lease);
       }
       return {
-        contextId: context.contextId,
+        contextId: input.contextId,
         createdAtMs: context.createdAtMs,
         expiresAtMs: context.expiresAtMs,
         binding: context.binding,
@@ -617,7 +698,7 @@ export class CandidateContextStore {
   async cleanup(): Promise<number> {
     return this.locked(async (lease) => {
       const document = await this.readDocument();
-      const now = this.clock.now();
+      const now = this.now();
       const active = document.contexts.filter((context) => context.expiresAtMs > now);
       const removed = document.contexts.length - active.length;
       if (removed > 0) {

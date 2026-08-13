@@ -104,7 +104,7 @@ export interface PersistedCandidate {
 }
 
 export interface PersistedContext {
-  readonly contextId: string;
+  readonly contextIdDigest: string;
   readonly createdAtMs: number;
   readonly expiresAtMs: number;
   readonly binding: ContextBinding;

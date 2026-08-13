@@ -74,3 +74,8 @@ export function candidateTokenDigest(token: string): string {
   assertCandidateToken(token);
   return createHash("sha256").update(token, "ascii").digest("hex");
 }
+
+export function contextIdDigest(contextId: string): string {
+  assertContextId(contextId);
+  return createHash("sha256").update(contextId, "ascii").digest("hex");
+}
