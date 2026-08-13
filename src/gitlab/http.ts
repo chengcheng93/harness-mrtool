@@ -51,6 +51,53 @@ export interface GitLabJsonResponse {
   readonly status: number;
 }
 
+export type GitLabRequestFailureKind =
+  | "auth"
+  | "http"
+  | "network"
+  | "timeout"
+  | "response";
+
+const gitLabRequestErrors = new WeakSet<object>();
+
+export class GitLabRequestError extends ToolError<"AUTH_ERROR" | "GITLAB_ERROR"> {
+  readonly kind: GitLabRequestFailureKind;
+  readonly status: number | null;
+  readonly requestId: string | null;
+
+  constructor(
+    kind: GitLabRequestFailureKind,
+    status: number | null,
+    requestId: string | null,
+  ) {
+    const code = kind === "auth" ? "AUTH_ERROR" : "GITLAB_ERROR";
+    super(code, code === "AUTH_ERROR"
+      ? "GitLab rejected the credential or permission"
+      : "GitLab request failed", {
+      field: "gitlab",
+      expected: "an authenticated, bounded GitLab API response",
+      actual: status === null
+        ? `remote ${kind}`
+        : requestId === null
+          ? `HTTP ${String(status)}`
+          : `HTTP ${String(status)}; request-id ${requestId}`,
+      safeNextStep: code === "AUTH_ERROR"
+        ? "Refresh the GitLab credential and verify the required project permission."
+        : "Retry the read-only operation or inspect the GitLab request ID with an administrator.",
+    });
+    this.name = "GitLabRequestError";
+    this.kind = kind;
+    this.status = status;
+    this.requestId = requestId;
+    gitLabRequestErrors.add(this);
+  }
+}
+
+export function isGitLabRequestError(error: unknown): error is GitLabRequestError {
+  return (typeof error === "object" || typeof error === "function") &&
+    error !== null && gitLabRequestErrors.has(error);
+}
+
 function gitLabError(
   code: "AUTH_ERROR" | "GITLAB_ERROR",
   message: string,
@@ -258,11 +305,11 @@ export class GitLabHttpClient {
     try {
       token = await this.tokenProvider();
     } catch {
-      throw gitLabError("AUTH_ERROR", "GitLab credential is unavailable", "credential provider failed");
+      throw new GitLabRequestError("auth", null, null);
     }
     if (typeof token !== "string" || token === "" || token !== token.trim() ||
         token.length > MAX_TOKEN_LENGTH || /[\r\n\u0000]/u.test(token)) {
-      throw gitLabError("AUTH_ERROR", "GitLab credential is invalid", "invalid credential shape");
+      throw new GitLabRequestError("auth", null, null);
     }
     this.rememberCredential(token);
     const encodedBody = body === null ? null : new TextEncoder().encode(JSON.stringify(body));
@@ -281,35 +328,38 @@ export class GitLabHttpClient {
         timeoutMs: this.timeoutMs,
         maxResponseBytes: this.maxResponseBytes,
       });
-    } catch {
-      throw gitLabError("GITLAB_ERROR", "GitLab request failed", "network, timeout, or response limit failure");
+    } catch (error) {
+      const name = typeof error === "object" && error !== null && "name" in error
+        ? String(error.name)
+        : "";
+      throw new GitLabRequestError(name === "AbortError" ? "timeout" : "network", null, null);
     }
     if (!Number.isSafeInteger(response.status) || response.status < 100 || response.status > 599 ||
         !(response.body instanceof Uint8Array) || response.body.byteLength > this.maxResponseBytes ||
         response.headers === null || typeof response.headers !== "object" || Array.isArray(response.headers)) {
-      throw gitLabError("GITLAB_ERROR", "GitLab response exceeded the configured limit", "response limit failure");
+      throw new GitLabRequestError("response", null, null);
     }
     const headers = normalizeHeaders(response.headers, (value) => this.reflectsCredential(value));
     const requestId = headers["x-request-id"] === undefined
       ? null
       : this.sanitizeRequestId(headers["x-request-id"]);
     if (response.status === 401 || response.status === 403) {
-      throw gitLabError("AUTH_ERROR", "GitLab rejected the credential or permission", `HTTP ${String(response.status)}`, requestId);
+      throw new GitLabRequestError("auth", response.status, requestId);
     }
     if (response.status < 200 || response.status >= 300) {
-      throw gitLabError("GITLAB_ERROR", "GitLab API returned an error", `HTTP ${String(response.status)}`, requestId);
+      throw new GitLabRequestError("http", response.status, requestId);
     }
     let text: string;
     try {
       text = new TextDecoder("utf-8", { fatal: true }).decode(response.body);
     } catch {
-      throw gitLabError("GITLAB_ERROR", "GitLab returned invalid UTF-8", "invalid response bytes", requestId);
+      throw new GitLabRequestError("response", response.status, requestId);
     }
     let data: JsonValue;
     try {
       data = parseStrictResponseJson(text);
     } catch {
-      throw gitLabError("GITLAB_ERROR", "GitLab returned invalid JSON", "malformed response", requestId);
+      throw new GitLabRequestError("response", response.status, requestId);
     }
     return Object.freeze({ data, headers, requestId, status: response.status });
   }

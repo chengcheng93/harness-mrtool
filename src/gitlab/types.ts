@@ -80,3 +80,41 @@ export interface GitLabCapabilities {
 export interface GitLabRequestAudit {
   readonly requestIds: readonly string[];
 }
+
+export interface GitLabProjectIdentity {
+  readonly id: string;
+  readonly fullPath: string;
+}
+
+export interface GitLabValueReceipt<T> {
+  readonly value: T;
+  readonly requestId: string | null;
+}
+
+export interface GitLabMutationReceipt {
+  readonly requestId: string | null;
+}
+
+export interface GitLabCreateMergeRequestInput {
+  readonly title: string;
+  readonly description: string;
+  readonly sourceProjectId: number;
+  readonly sourceBranch: string;
+  readonly targetProjectId: number;
+  readonly targetBranch: string;
+  readonly squash: boolean;
+  readonly removeSourceBranch: boolean;
+}
+
+export type GitLabUpdateMergeRequestInput =
+  | {
+      readonly kind: "managed-fields";
+      readonly title: string;
+      readonly targetBranch: string;
+      readonly assigneeIds: readonly number[];
+      readonly reviewerIds: readonly number[];
+      readonly squash: boolean;
+      readonly removeSourceBranch: boolean;
+    }
+  | { readonly kind: "description"; readonly description: string }
+  | { readonly kind: "title"; readonly title: string };

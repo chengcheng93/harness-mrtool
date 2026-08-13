@@ -276,7 +276,7 @@ class FakeMergeRequestRemote implements MergeRequestRemote {
     if (this.unknownCreate === "applied") {
       throw new UnknownRemoteOutcomeError("create outcome is unknown");
     }
-    return valueReceipt(this.current, "req-create");
+    return valueReceipt({ iid: this.current.iid }, "req-create");
   }
 
   async findOpen(input: CreateDraftInput) {

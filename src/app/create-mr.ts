@@ -83,7 +83,7 @@ export interface ManagedFieldsInput {
 }
 
 export interface MergeRequestRemote {
-  createDraft(input: CreateDraftInput): Promise<RemoteValueReceipt<RemoteMergeRequest>>;
+  createDraft(input: CreateDraftInput): Promise<RemoteValueReceipt<{ readonly iid: number }>>;
   findOpen(input: CreateDraftInput): Promise<RemoteValueReceipt<readonly RemoteMergeRequest[]>>;
   addLabels(iid: number, labelIds: readonly string[]): Promise<RemoteMutationReceipt>;
   removeLabels(iid: number, labelIds: readonly string[]): Promise<RemoteMutationReceipt>;
