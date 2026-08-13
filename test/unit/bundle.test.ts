@@ -428,6 +428,49 @@ test("loader rejects opened-file identity, truncation, and growth races", async 
   }
 });
 
+test("loader closes every opened handle and rejects a close failure", async (context) => {
+  const bundlePath = await createValidBundleFixture(context);
+  const manifestPath = resolve(bundlePath, "bundle-manifest.json");
+  const closedPaths = new Set<string>();
+  const closeFailureIo: TemplateBundleIo = {
+    ...nodeTemplateBundleIo,
+    openFile: async (path) => {
+      const handle = await nodeTemplateBundleIo.openFile(path);
+      return {
+        ...handle,
+        close: async () => {
+          closedPaths.add(path);
+          await handle.close();
+          if (path === manifestPath) throw new Error("simulated close failure");
+        },
+      };
+    },
+  };
+
+  await assertTemplateError(
+    () => loadTemplateBundle(bundlePath, closeFailureIo),
+    /handle|closed safely/i,
+  );
+  assert.deepEqual([...closedPaths], [manifestPath]);
+
+  const successfulCloses = new Set<string>();
+  const successIo: TemplateBundleIo = {
+    ...nodeTemplateBundleIo,
+    openFile: async (path) => {
+      const handle = await nodeTemplateBundleIo.openFile(path);
+      return {
+        ...handle,
+        close: async () => {
+          successfulCloses.add(path);
+          await handle.close();
+        },
+      };
+    },
+  };
+  await loadTemplateBundle(bundlePath, successIo);
+  assert.equal(successfulCloses.size, 10);
+});
+
 test("loader rejects oversized manifest before reading it", async (context) => {
   const bundlePath = await createValidBundleFixture(context);
   const manifestPath = resolve(bundlePath, "bundle-manifest.json");

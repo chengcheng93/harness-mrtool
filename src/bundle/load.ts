@@ -382,10 +382,12 @@ async function readBounded(
   } catch {
     throw templateError("bundle file could not be read");
   }
+  let bytes: Uint8Array | undefined;
+  let failure: unknown;
   try {
     const before = await handle.stat();
     assertSameRegularFile(expectedMetadata, before);
-    const bytes = new Uint8Array(expectedSize);
+    bytes = new Uint8Array(expectedSize);
     let offset = 0;
     while (offset < bytes.byteLength) {
       const result = await handle.read(bytes, offset, bytes.byteLength - offset, offset);
@@ -404,19 +406,23 @@ async function readBounded(
       throw templateError("bundle file size changed while loading");
     }
     assertSameRegularFile(expectedMetadata, await handle.stat());
-    return bytes;
   } catch (error) {
-    if (isToolError(error, "TEMPLATE_ERROR")) {
-      throw error;
-    }
-    throw templateError("bundle file could not be read safely");
-  } finally {
-    try {
-      await handle.close();
-    } catch {
-      // The validated bytes are unusable if their handle cannot be closed cleanly.
-    }
+    failure = isToolError(error, "TEMPLATE_ERROR")
+      ? error
+      : templateError("bundle file could not be read safely");
   }
+  try {
+    await handle.close();
+  } catch {
+    failure ??= templateError("bundle file handle could not be closed safely");
+  }
+  if (failure !== undefined) {
+    throw failure;
+  }
+  if (bytes === undefined) {
+    throw templateError("bundle file could not be read safely");
+  }
+  return bytes;
 }
 
 function assertSameRegularFile(
