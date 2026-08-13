@@ -7,10 +7,12 @@ import test from "node:test";
 import { runProcess } from "../helpers/process.ts";
 import { assertArtifactIsFresh } from "../helpers/sea-artifact.ts";
 
+// The build helper is JavaScript so it can run before TypeScript is compiled.
+// @ts-expect-error The build helper intentionally has no declaration file.
+import { EXPECTED_SEA_SELF_TEST_STDOUT } from "../../scripts/sea-verification.mjs";
+
 const repositoryRoot = resolve(import.meta.dirname, "../..");
 const executablePath = resolve(repositoryRoot, "dist/harness-mrtool.exe");
-const expectedOutput =
-  '{"ok":true,"code":"OK","sea":true,"version":"0.1.0-dev"}';
 
 function filesUnder(directory: string): string[] {
   return readdirSync(directory, { recursive: true, withFileTypes: true })
@@ -39,6 +41,7 @@ test("SEA executable runs self-test from an empty working directory", (context) 
     ...filesUnder(resolve(repositoryRoot, "src")),
     resolve(repositoryRoot, "scripts/build.mjs"),
     resolve(repositoryRoot, "scripts/build-sea.mjs"),
+    resolve(repositoryRoot, "scripts/sea-verification.mjs"),
     resolve(repositoryRoot, "sea-config.json"),
     resolve(repositoryRoot, "package.json"),
     resolve(repositoryRoot, "package-lock.json"),
@@ -59,9 +62,9 @@ test("SEA executable runs self-test from an empty working directory", (context) 
   assert.equal(result.status, 0, diagnostic);
   assert.equal(result.stderr, "", diagnostic);
   assert.ok(
-    result.stdout === expectedOutput ||
-      result.stdout === `${expectedOutput}\n` ||
-      result.stdout === `${expectedOutput}\r\n`,
+    result.stdout === EXPECTED_SEA_SELF_TEST_STDOUT ||
+      result.stdout === `${EXPECTED_SEA_SELF_TEST_STDOUT}\n` ||
+      result.stdout === `${EXPECTED_SEA_SELF_TEST_STDOUT}\r\n`,
     `stdout must contain exactly one JSON document:\n${diagnostic}`,
   );
   assert.deepEqual(JSON.parse(result.stdout), {

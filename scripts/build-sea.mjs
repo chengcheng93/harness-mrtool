@@ -5,6 +5,10 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { assertExactNodeVersion, buildApplication } from "./build.mjs";
+import {
+  finalizeSeaExecutable,
+  verifySeaExecutable,
+} from "./sea-verification.mjs";
 
 const require = createRequire(import.meta.url);
 const { inject } = require("postject");
@@ -43,8 +47,13 @@ export async function buildSeaExecutable() {
   await buildApplication();
   runBlobGeneration();
   await copyFile(process.execPath, executablePath);
-  await inject(executablePath, "NODE_SEA_BLOB", await readFile(blobPath), {
-    sentinelFuse,
+  await finalizeSeaExecutable(executablePath, {
+    injectBlob: async () =>
+      inject(executablePath, "NODE_SEA_BLOB", await readFile(blobPath), {
+        sentinelFuse,
+      }),
+    removeArtifact: (path) => rm(path, { force: true }),
+    verifyExecutable: verifySeaExecutable,
   });
 }
 
