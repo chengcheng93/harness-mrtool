@@ -247,3 +247,69 @@ test("turns an invalid handler result into one failure document before output st
   const output = JSON.parse(captured.chunks[0]!) as Record<string, unknown>;
   assert.equal(output.code, "INTERNAL_ERROR");
 });
+
+test("authorizes context bearers from the parsed command instead of the handler", async () => {
+  const context = `hmrx1_${"B".repeat(43)}`;
+  const candidate = `hmrc1_${"A".repeat(43)}`;
+  const captured = immediateSink();
+  const result = await executeCliJson(
+    ["context", "--output", "json"],
+    {
+      cliVersion: "0.1.0-dev",
+      stdout: captured.sink,
+      handlers: {
+        context: () => ({
+          output: {
+            data: {
+              command: "context",
+              contextId: context,
+              labelCandidates: [{ token: candidate }],
+              userCandidates: [],
+            },
+          },
+        }),
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(captured.chunks[0]!.includes(context), true);
+  assert.equal(captured.chunks[0]!.includes(candidate), true);
+
+  const forged = immediateSink();
+  const forgedResult = await executeCliJson(
+    ["version", "--output", "json"],
+    {
+      cliVersion: "0.1.0-dev",
+      stdout: forged.sink,
+      handlers: {
+        version: () => ({ output: { data: { contextId: context } } }),
+      },
+    },
+  );
+  assert.equal(forgedResult.exitCode, 7);
+  assert.equal(forged.chunks[0]!.includes(context), false);
+});
+
+test("turns null, undefined, and accessor handler results into one failure document", async () => {
+  for (const handler of [
+    () => undefined as never,
+    () => null as never,
+    () => Object.defineProperty({}, "context", {
+      enumerable: true,
+      get() { throw new Error("accessor executed"); },
+    }) as never,
+  ]) {
+    const captured = immediateSink();
+    const result = await executeCliJson(
+      ["version", "--output", "json"],
+      {
+        cliVersion: "0.1.0-dev",
+        stdout: captured.sink,
+        handlers: { version: handler },
+      },
+    );
+    assert.equal(result.exitCode, 7);
+    assert.equal(captured.chunks.length, 1);
+    assert.equal((JSON.parse(captured.chunks[0]!) as { code: string }).code, "INTERNAL_ERROR");
+  }
+});

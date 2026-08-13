@@ -116,9 +116,26 @@ test("unknown failures become non-reflective INTERNAL_ERROR output", async () =>
   assert.equal((sink.chunks[0] ?? "").includes(credential), false);
 });
 
-test("candidate and context bearers never cross the stdout boundary", async () => {
+test("candidate and context bearers cross stdout only in authorized context fields", async () => {
   const candidate = `hmrc1_${"A".repeat(43)}`;
   const context = `hmrx1_${"B".repeat(43)}`;
+
+  const contextSink = new DelayedSink();
+  const contextResult = await new CliJsonOutput(
+    { cliVersion: "0.1.0-dev" },
+    contextSink,
+    { contextBearers: true },
+  ).success({
+    data: {
+      command: "context",
+      contextId: context,
+      labelCandidates: [{ token: candidate, name: "type::bug" }],
+      userCandidates: [{ token: candidate, username: "reviewer" }],
+    },
+  });
+  assert.equal(contextResult.exitCode, 0);
+  assert.equal(contextSink.chunks[0]?.includes(candidate), true);
+  assert.equal(contextSink.chunks[0]?.includes(context), true);
 
   const successSink = new DelayedSink();
   await assert.rejects(
@@ -143,6 +160,49 @@ test("candidate and context bearers never cross the stdout boundary", async () =
   assert.equal(serialized.includes(candidate), false);
   assert.equal(serialized.includes(context), false);
   assert.equal((JSON.parse(serialized) as { code: string }).code, "INTERNAL_ERROR");
+
+  for (const data of [
+    { contextId: candidate },
+    { contextId: context, nested: candidate },
+    { contextId: context, labelCandidates: [{ token: `prefix ${candidate}` }] },
+    { contextId: context, userCandidates: [{ name: candidate }] },
+  ]) {
+    const sink = new DelayedSink();
+    await assert.rejects(
+      new CliJsonOutput(
+        { cliVersion: "0.1.0-dev" },
+        sink,
+        { contextBearers: true },
+      ).success({ data }),
+      /bearer/i,
+    );
+    assert.deepEqual(sink.chunks, []);
+  }
+});
+
+test("classified ToolErrors containing secret shapes are downgraded before serialization", async () => {
+  const secrets = [
+    "glpat-handler-secret-canary",
+    "github_pat_abcdefghijklmnopqrstuvwxyz0123456789",
+    "Authorization: Bearer top-secret-value",
+    "https://oauth2:password-canary@gitlab.example.test/team/project.git",
+    "-----BEGIN PRIVATE KEY-----",
+  ];
+  for (const secret of secrets) {
+    const sink = new DelayedSink();
+    const result = await new CliJsonOutput({ cliVersion: "0.1.0-dev" }, sink).failure(
+      new ToolError("AUTH_ERROR", `Authentication rejected: ${secret}`, {
+        field: "credential",
+        expected: secret,
+        actual: { reflected: secret },
+        safeNextStep: `Replace ${secret} and retry.`,
+      }),
+    );
+    assert.equal(result.exitCode, 7);
+    const serialized = sink.chunks[0] ?? "";
+    assert.equal(serialized.includes(secret), false);
+    assert.equal((JSON.parse(serialized) as { code: string }).code, "INTERNAL_ERROR");
+  }
 });
 
 test("a ToolError mutated after construction falls back to one safe INTERNAL_ERROR document", async () => {

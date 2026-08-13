@@ -18,6 +18,21 @@ import {
 } from "../app/transaction-journal.ts";
 
 const RAW_CONTEXT_BEARER = /(?:hmrc1_|hmrx1_)[A-Za-z0-9_-]{43}/u;
+const EXACT_CONTEXT_BEARER = /^hmrx1_[A-Za-z0-9_-]{43}$/u;
+const EXACT_CANDIDATE_BEARER = /^hmrc1_[A-Za-z0-9_-]{43}$/u;
+const SECRET_SHAPES = [
+  /glpat-[A-Za-z0-9_-]{8,}/iu,
+  /github_pat_[A-Za-z0-9_]{8,}/iu,
+  /gh[pousr]_[A-Za-z0-9]{8,}/iu,
+  /authorization\s*:\s*(?:bearer|basic)\s+[^\s"']+/iu,
+  /\bbearer\s+[A-Za-z0-9._~+\/-]{8,}/iu,
+  /[a-z][a-z0-9+.-]*:\/\/[^\s\/:@]+:[^\s\/@]+@/iu,
+  /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/u,
+] as const;
+
+export interface CliOutputPolicy {
+  readonly contextBearers?: boolean;
+}
 
 export interface CliOutputSink {
   write(chunk: string, callback: (error?: Error | null) => void): boolean;
@@ -36,9 +51,47 @@ function internalFailure(): ToolError<"INTERNAL_ERROR"> {
   });
 }
 
-function assertNoRawContextBearer(serialized: string): void {
-  if (RAW_CONTEXT_BEARER.test(serialized)) {
-    throw new TypeError("CLI output contains a raw candidate or context bearer");
+function allowedContextBearer(path: readonly (string | number)[], value: string): boolean {
+  if (path.length === 2 && path[0] === "data" && path[1] === "contextId") {
+    return EXACT_CONTEXT_BEARER.test(value);
+  }
+  if (
+    path.length === 4 &&
+    path[0] === "data" &&
+    (path[1] === "labelCandidates" || path[1] === "userCandidates") &&
+    typeof path[2] === "number" &&
+    path[3] === "token"
+  ) {
+    return EXACT_CANDIDATE_BEARER.test(value);
+  }
+  return false;
+}
+
+function assertSafeOutputValue(
+  value: unknown,
+  policy: CliOutputPolicy,
+  path: readonly (string | number)[] = [],
+): void {
+  if (typeof value === "string") {
+    for (const pattern of SECRET_SHAPES) {
+      pattern.lastIndex = 0;
+      if (pattern.test(value)) throw new TypeError("CLI output contains a secret-shaped value");
+    }
+    RAW_CONTEXT_BEARER.lastIndex = 0;
+    if (RAW_CONTEXT_BEARER.test(value) &&
+        !(policy.contextBearers === true && allowedContextBearer(path, value))) {
+      throw new TypeError("CLI output contains a raw candidate or context bearer");
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((child, index) => assertSafeOutputValue(child, policy, [...path, index]));
+    return;
+  }
+  if (value !== null && typeof value === "object") {
+    for (const [key, child] of Object.entries(value)) {
+      assertSafeOutputValue(child, policy, [...path, key]);
+    }
   }
 }
 
@@ -89,6 +142,7 @@ export class CliJsonOutput {
   constructor(
     private readonly context: OutputContext,
     private readonly sink: CliOutputSink,
+    private readonly policy: CliOutputPolicy = {},
   ) {}
 
   hasStarted(): boolean {
@@ -96,8 +150,13 @@ export class CliJsonOutput {
   }
 
   async success(options: SuccessOptions = {}): Promise<CliOutputResult> {
-    const serialized = serializeOutput(createSuccessOutput(this.context, options));
-    assertNoRawContextBearer(serialized);
+    const envelope = createSuccessOutput(this.context, options);
+    if (this.policy.contextBearers === true &&
+        (envelope.data === null || envelope.data.command !== "context")) {
+      throw new TypeError("Context bearer output requires the context command envelope");
+    }
+    assertSafeOutputValue(envelope, this.policy);
+    const serialized = serializeOutput(envelope);
     await this.emit(serialized);
     return Object.freeze({ exitCode: 0 });
   }
@@ -118,7 +177,7 @@ export class CliJsonOutput {
         ...(audit.remoteWrite === undefined ? {} : { remoteWrite: audit.remoteWrite }),
       };
       serialized = serializeOutput(createFailureOutput(context, normalized, audit.data ?? null));
-      assertNoRawContextBearer(serialized);
+      assertSafeOutputValue(JSON.parse(serialized) as unknown, {});
       outputCode = normalized.code;
       remoteWriteState = audit.remoteWrite?.state ?? context.remoteWrite?.state ?? "not-attempted";
     } catch {
@@ -127,7 +186,7 @@ export class CliJsonOutput {
         cliVersion: this.context.cliVersion,
         validation: { valid: false, issues: [validationIssue(fallback)] },
       }, fallback));
-      assertNoRawContextBearer(serialized);
+      assertSafeOutputValue(JSON.parse(serialized) as unknown, {});
       outputCode = fallback.code;
     }
     await this.emit(serialized);
