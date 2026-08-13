@@ -98,6 +98,16 @@ test("canonical JSON rejects cycles, special objects, and class instances", () =
   }
 });
 
+test("canonical JSON rejects array subclasses and mutated array prototypes", () => {
+  class Values extends Array<number> {}
+  const mutatedPrototype = [1, 2];
+  Object.setPrototypeOf(mutatedPrototype, { custom: true });
+
+  for (const value of [new Values(1, 2), mutatedPrototype]) {
+    assert.throws(() => canonicalizeJson(value), /valid JSON/i);
+  }
+});
+
 test("canonical JSON rejects getters without invoking them", () => {
   let invoked = false;
   const value = {};

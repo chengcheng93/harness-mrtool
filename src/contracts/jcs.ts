@@ -60,6 +60,9 @@ export function copyJsonValue(
   nextAncestors.add(value);
 
   if (Array.isArray(value)) {
+    if (Object.getPrototypeOf(value) !== Array.prototype) {
+      invalidJson(path, "array must have Array.prototype");
+    }
     return copyJsonArray(value, path, nextAncestors);
   }
 
