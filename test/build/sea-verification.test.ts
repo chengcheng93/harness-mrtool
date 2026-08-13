@@ -3,7 +3,7 @@ import test from "node:test";
 
 // The SEA build helper is JavaScript so it can run before TypeScript is compiled.
 // @ts-expect-error The build helper intentionally has no declaration file.
-import { expectedSeaContractProbeStdout, expectedSeaSelfTestStdout, finalizeSeaExecutable, verifySeaExecutable } from "../../scripts/sea-verification.mjs";
+import { expectedSeaContractProbeStdout, expectedSeaRendererProbeStdout, expectedSeaSelfTestStdout, finalizeSeaExecutable, verifySeaExecutable } from "../../scripts/sea-verification.mjs";
 
 const expectedStdout = expectedSeaSelfTestStdout("0.1.0-dev");
 const expectedProbeStdout = JSON.stringify({
@@ -16,9 +16,21 @@ const expectedProbeStdout = JSON.stringify({
   requestValidAccepted: true,
   requestInvalidRejected: true,
 });
+const expectedRendererProbeStdout = JSON.stringify({
+  ok: true,
+  code: "RENDERER_PROBE_OK",
+  sea: true,
+  version: "0.1.0-dev",
+  titleAccepted: true,
+  descriptionAccepted: true,
+  markerVerified: true,
+  projectTemplateAccepted: true,
+  tamperRejected: true,
+});
 
 test("pins the embedded request and output contract probe result", () => {
   assert.equal(expectedSeaContractProbeStdout("0.1.0-dev"), expectedProbeStdout);
+  assert.equal(expectedSeaRendererProbeStdout("0.1.0-dev"), expectedRendererProbeStdout);
 });
 
 test("rejects an injected executable whose self-test violates the contract", async () => {
@@ -86,6 +98,13 @@ test("accepts only the exact self-test JSON with an optional trailing newline", 
                 stderr: "",
                 stdout: expectedProbeStdout,
               }
+            : arguments_.includes("--renderer-probe")
+              ? {
+                  error: undefined,
+                  status: 0,
+                  stderr: "",
+                  stdout: expectedRendererProbeStdout,
+                }
             : {
                 error: undefined,
                 status: 0,
@@ -117,19 +136,47 @@ test("runs the embedded output contract probe after self-test", async () => {
           stderr: "",
           stdout: arguments_.includes("--contract-probe")
             ? expectedProbeStdout
-            : expectedStdout,
+            : arguments_.includes("--renderer-probe")
+              ? expectedRendererProbeStdout
+              : expectedStdout,
         };
       },
       systemRoot: "C:\\Windows",
       expectedStdout,
       expectedProbeStdout,
+      expectedRendererProbeStdout,
     }),
   );
 
   assert.deepEqual(invocations, [
     ["self-test", "--output", "json"],
     ["self-test", "--contract-probe", "--output", "json"],
+    ["self-test", "--renderer-probe", "--output", "json"],
   ]);
+});
+
+test("rejects an executable whose embedded renderer probe fails", async () => {
+  await assert.rejects(
+    verifySeaExecutable("C:\\release\\harness-mrtool.exe", {
+      createEmptyWorkingDirectory: async () => "C:\\empty-self-test-cwd",
+      removeWorkingDirectory: async () => undefined,
+      runProcess: (_executable: string, arguments_: readonly string[]) => ({
+        error: undefined,
+        status: arguments_.includes("--renderer-probe") ? 7 : 0,
+        stderr: "",
+        stdout: arguments_.includes("--contract-probe")
+          ? expectedProbeStdout
+          : arguments_.includes("--renderer-probe")
+            ? '{"ok":false,"code":"RENDERER_PROBE_FAILED"}'
+            : expectedStdout,
+      }),
+      systemRoot: "C:\\Windows",
+      expectedStdout,
+      expectedProbeStdout,
+      expectedRendererProbeStdout,
+    }),
+    /SEA renderer probe failed/u,
+  );
 });
 
 test("rejects an executable whose embedded output contract probe fails", async () => {

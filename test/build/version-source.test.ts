@@ -9,12 +9,22 @@ import { createApplicationBuildOptions } from "../../scripts/build.mjs";
 
 const repositoryRoot = resolve(import.meta.dirname, "../..");
 
-test("build injects the package version as a compile-time constant", () => {
+test("build injects the package version and verified Bundle as compile-time constants", () => {
   const options = createApplicationBuildOptions("9.8.7-test");
 
-  assert.deepEqual(options.define, {
-    __HARNESS_MRTOOL_VERSION__: '"9.8.7-test"',
-  });
+  assert.equal(options.define.__HARNESS_MRTOOL_VERSION__, '"9.8.7-test"');
+  const embeddedBundle = JSON.parse(
+    options.define.__HARNESS_MRTOOL_BOOTSTRAP_BUNDLE__,
+  ) as {
+    readonly manifest: {
+      readonly bundleId: string;
+      readonly version: string;
+      readonly files: readonly unknown[];
+    };
+  };
+  assert.equal(embeddedBundle.manifest.bundleId, "harness-mr-default");
+  assert.equal(embeddedBundle.manifest.version, "1.0.0");
+  assert.equal(embeddedBundle.manifest.files.length, 9);
 });
 
 test("runtime source does not hardcode the package version", () => {

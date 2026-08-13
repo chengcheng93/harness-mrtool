@@ -1,0 +1,53 @@
+{
+  "snapshotVersion": 1,
+  "targetProject": { "id": "project:100", "path": "luban/luban-studio" },
+  "sourceProject": { "id": "project:100", "path": "luban/luban-studio" },
+  "targetRefSha": "1111111111111111111111111111111111111111",
+  "mergeBaseSha": "1111111111111111111111111111111111111111",
+  "sourceHeadSha": "3333333333333333333333333333333333333333",
+  "issue": {
+    "kind": "linked",
+    "readStatus": "available",
+    "iid": 51,
+    "milestone": "2026-09 DVT Prototype",
+    "assignees": [
+      { "id": "user:10", "username": "alice", "displayName": "Alice Zhang" }
+    ],
+    "dueDate": "2026-08-07",
+    "labels": [
+      { "id": "issue-label:1", "name": "type::feature" },
+      { "id": "issue-label:2", "name": "priority::p1" }
+    ]
+  },
+  "labelCandidates": [
+    { "id": "label:priority", "name": "priority::p1" },
+    { "id": "label:status", "name": "status::review" },
+    { "id": "label:type", "name": "type::bug" },
+    { "id": "label:week", "name": "week::2026-w32-0803-0809" }
+  ],
+  "userCandidates": [
+    { "id": "user:10", "username": "alice", "displayName": "Alice Zhang" },
+    { "id": "user:20", "username": "bob", "displayName": "Bob Chen" },
+    { "id": "user:30", "username": "author", "displayName": "Author User" }
+  ],
+  "mergeRequest": {
+    "iid": 88,
+    "authorUserId": "user:30",
+    "lifecycle": "ready",
+    "labelIds": ["label:priority", "label:status", "label:type", "label:week"],
+    "assigneeUserId": "user:10",
+    "reviewerUserIds": ["user:20"]
+  },
+  "localChecks": {
+    "commitConvention": { "status": "passed", "evidence": "All commits match the configured convention." },
+    "secretScan": { "status": "not-run", "evidence": "Secret scan is not configured for this repository." },
+    "repositoryHygiene": { "status": "passed", "evidence": "Repository hygiene checks completed successfully." }
+  },
+  "metadataRead": { "status": "available", "evidence": "Issue and merge request metadata were read successfully." },
+  "ci": { "status": "pending" },
+  "review": {
+    "approvedByUserIds": [],
+    "qualifiedReviewerUserIds": ["user:20"],
+    "unresolvedDiscussions": 0
+  }
+}

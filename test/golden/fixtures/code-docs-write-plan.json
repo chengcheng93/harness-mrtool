@@ -1,0 +1,9 @@
+{
+  "writePlanVersion": 1,
+  "title": "[fix][luban-studio] Preserve WebEngine-compatible CSS output",
+  "labelIds": ["label:priority", "label:status", "label:type", "label:week"],
+  "assigneeUserId": "user:10",
+  "reviewerUserIds": ["user:20"],
+  "removeSourceBranch": true,
+  "squash": true
+}

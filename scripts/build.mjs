@@ -10,6 +10,12 @@ const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const sourcePath = resolve(repositoryRoot, "src/main.ts");
 const outputPath = resolve(repositoryRoot, "dist/main.cjs");
 const packagePath = resolve(repositoryRoot, "package.json");
+const templateBundlePath = resolve(repositoryRoot, "template-bundle");
+
+// Node 24 strips the erasable TypeScript syntax in the production loader. Loading the
+// Bundle here keeps the on-disk validation path as the single source for SEA bootstrap data.
+const { loadTemplateBundle } = await import("../src/bundle/load.ts");
+const bootstrapTemplateBundle = await loadTemplateBundle(templateBundlePath);
 
 export function assertExactNodeVersion(actualVersion = process.versions.node) {
   if (actualVersion !== REQUIRED_NODE_VERSION) {
@@ -42,6 +48,7 @@ export function createApplicationBuildOptions(version) {
     logLevel: "info",
     define: {
       __HARNESS_MRTOOL_VERSION__: JSON.stringify(version),
+      __HARNESS_MRTOOL_BOOTSTRAP_BUNDLE__: JSON.stringify(bootstrapTemplateBundle),
     },
   };
 }

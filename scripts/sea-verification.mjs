@@ -22,6 +22,20 @@ export function expectedSeaContractProbeStdout(version) {
   });
 }
 
+export function expectedSeaRendererProbeStdout(version) {
+  return JSON.stringify({
+    ok: true,
+    code: "RENDERER_PROBE_OK",
+    sea: true,
+    version,
+    titleAccepted: true,
+    descriptionAccepted: true,
+    markerVerified: true,
+    projectTemplateAccepted: true,
+    tamperRejected: true,
+  });
+}
+
 function defaultRunProcess(executable, arguments_, options) {
   const result = spawnSync(executable, arguments_, {
     ...options,
@@ -77,6 +91,9 @@ export async function verifySeaExecutable(
   const expectedProbeStdout =
     dependencies.expectedProbeStdout ??
     expectedSeaContractProbeStdout(readPackageVersion());
+  const expectedRendererProbeStdout =
+    dependencies.expectedRendererProbeStdout ??
+    expectedSeaRendererProbeStdout(readPackageVersion());
   const workingDirectory = await createEmptyWorkingDirectory();
 
   try {
@@ -115,6 +132,26 @@ export async function verifySeaExecutable(
     ) {
       throw new Error(
         `SEA output contract probe failed:\n${diagnosticFor(probeResult)}`,
+      );
+    }
+
+    const rendererProbeResult = runProcess(
+      executablePath,
+      ["self-test", "--renderer-probe", "--output", "json"],
+      {
+        cwd: workingDirectory,
+        env: { NO_COLOR: "1", SystemRoot: systemRoot },
+      },
+    );
+
+    if (
+      rendererProbeResult.error !== undefined ||
+      rendererProbeResult.status !== 0 ||
+      rendererProbeResult.stderr !== "" ||
+      !stdoutMatchesContract(rendererProbeResult.stdout, expectedRendererProbeStdout)
+    ) {
+      throw new Error(
+        `SEA renderer probe failed:\n${diagnosticFor(rendererProbeResult)}`,
       );
     }
   } finally {

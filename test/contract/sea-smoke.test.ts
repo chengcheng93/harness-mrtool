@@ -115,3 +115,38 @@ test("SEA executable runs the embedded output contract probe", (context) => {
   });
   assert.equal(result.stdout.trimEnd().split("\n").length, 1, diagnostic);
 });
+
+test("SEA executable runs the embedded deterministic renderer probe", (context) => {
+  verifySeaBuildReceipt(
+    repositoryRoot,
+    executablePath,
+    collectSeaBuildInputs(repositoryRoot),
+    receiptPath,
+  );
+  const emptyWorkingDirectory = mkdtempSync(join(tmpdir(), "harness-mrtool-sea-renderer-"));
+  context.after(() => rmSync(emptyWorkingDirectory, { recursive: true, force: true }));
+  const result = runProcess(
+    executablePath,
+    ["self-test", "--renderer-probe", "--output", "json"],
+    {
+      cwd: emptyWorkingDirectory,
+      env: { NO_COLOR: "1", SystemRoot: process.env.SystemRoot ?? "C:\\Windows" },
+    },
+  );
+  const diagnostic = processDiagnostic(result);
+  assert.equal(result.error, undefined, diagnostic);
+  assert.equal(result.status, 0, diagnostic);
+  assert.equal(result.stderr, "", diagnostic);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    ok: true,
+    code: "RENDERER_PROBE_OK",
+    sea: true,
+    version: packageVersion,
+    titleAccepted: true,
+    descriptionAccepted: true,
+    markerVerified: true,
+    projectTemplateAccepted: true,
+    tamperRejected: true,
+  });
+  assert.equal(result.stdout.trimEnd().split("\n").length, 1, diagnostic);
+});
