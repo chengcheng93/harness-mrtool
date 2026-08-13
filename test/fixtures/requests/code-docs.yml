@@ -1,0 +1,46 @@
+schemaVersion: 1
+contextId: " context:fixture-01 "
+intent: " ready "
+profileIds:
+  - " code "
+  - "docs "
+targetBranch: " develop "
+title:
+  type: " fix "
+  module: " luban-studio "
+  titleSummary: " Preserve e\u0301 and \u4e2d\u6587 text "
+changes:
+  summary:
+    - "  First line\r\nSecond line  "
+motivation:
+  background:
+    - Debug renderer failed.
+workItem:
+  relation: " related "
+  iid: 51
+impact:
+  areaIds:
+    - " app "
+    - qa
+  nature: " non-functional "
+verification:
+  items:
+    - id: " unit-tests "
+      state: " checked "
+      result: " 274 tests passed "
+      evidence: "  artifact\r\nlog  "
+documentation: {}
+risk:
+  level: " medium "
+review:
+  reviewerCandidateTokens:
+    - " reviewer-token:02 "
+    - reviewer-token:01
+  reviewerFocus:
+    - Preserve AST semantics.
+mergeRequest:
+  labelCandidateTokens:
+    - " label-token:week "
+    - label-token:type
+  removeSourceBranch: true
+  squash: true

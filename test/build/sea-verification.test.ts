@@ -3,7 +3,7 @@ import test from "node:test";
 
 // The SEA build helper is JavaScript so it can run before TypeScript is compiled.
 // @ts-expect-error The build helper intentionally has no declaration file.
-import { expectedSeaSelfTestStdout, finalizeSeaExecutable, verifySeaExecutable } from "../../scripts/sea-verification.mjs";
+import { expectedSeaContractProbeStdout, expectedSeaSelfTestStdout, finalizeSeaExecutable, verifySeaExecutable } from "../../scripts/sea-verification.mjs";
 
 const expectedStdout = expectedSeaSelfTestStdout("0.1.0-dev");
 const expectedProbeStdout = JSON.stringify({
@@ -13,6 +13,12 @@ const expectedProbeStdout = JSON.stringify({
   version: "0.1.0-dev",
   validOutputAccepted: true,
   invalidOutputRejected: true,
+  requestValidAccepted: true,
+  requestInvalidRejected: true,
+});
+
+test("pins the embedded request and output contract probe result", () => {
+  assert.equal(expectedSeaContractProbeStdout("0.1.0-dev"), expectedProbeStdout);
 });
 
 test("rejects an injected executable whose self-test violates the contract", async () => {

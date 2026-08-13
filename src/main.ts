@@ -4,6 +4,7 @@ import {
   createSuccessOutput,
   serializeOutput,
 } from "./contracts/output.ts";
+import { normalizeAndValidateRequest } from "./input/normalize.ts";
 import { normalizeRuntimeArguments } from "./runtime-arguments.ts";
 
 declare const __HARNESS_MRTOOL_VERSION__: string;
@@ -16,6 +17,8 @@ interface JsonResult {
   readonly message?: string;
   readonly validOutputAccepted?: boolean;
   readonly invalidOutputRejected?: boolean;
+  readonly requestValidAccepted?: boolean;
+  readonly requestInvalidRejected?: boolean;
 }
 
 function writeJson(result: JsonResult): void {
@@ -34,6 +37,8 @@ function fail(message: string, output: string | undefined): void {
 function runContractProbe(): void {
   let validOutputAccepted = false;
   let invalidOutputRejected = false;
+  let requestValidAccepted = false;
+  let requestInvalidRejected = false;
 
   try {
     const serialized = serializeOutput(
@@ -61,11 +66,39 @@ function runContractProbe(): void {
     } catch (error) {
       invalidOutputRejected = error instanceof TypeError;
     }
+
+    const requestProbe = {
+      schemaVersion: 1,
+      contextId: "context:contract-probe",
+      intent: "draft",
+      profileIds: ["general"],
+      targetBranch: "develop",
+      title: { type: "chore", module: "mrtool", titleSummary: "Probe request contract" },
+      changes: { summary: ["Probe the embedded request schema"] },
+      motivation: { background: ["The SEA must include request validation"] },
+      workItem: { relation: "none", noIssueReason: "This is an internal binary probe" },
+      impact: { areaIds: ["devops"], nature: "non-functional" },
+      verification: {
+        items: [{ id: "self-test", state: "checked", evidence: "Embedded probe execution" }],
+      },
+      documentation: {},
+      risk: { level: "low" },
+      review: {},
+      mergeRequest: { removeSourceBranch: false, squash: false },
+    };
+    requestValidAccepted =
+      normalizeAndValidateRequest(requestProbe).contextId === "context:contract-probe";
+    try {
+      normalizeAndValidateRequest({ ...requestProbe, unsupportedField: true });
+    } catch {
+      requestInvalidRejected = true;
+    }
   } catch {
     validOutputAccepted = false;
   }
 
-  if (!validOutputAccepted || !invalidOutputRejected) {
+  if (!validOutputAccepted || !invalidOutputRejected ||
+      !requestValidAccepted || !requestInvalidRejected) {
     writeJson({
       ok: false,
       code: "CONTRACT_PROBE_FAILED",
@@ -82,6 +115,8 @@ function runContractProbe(): void {
     version: __HARNESS_MRTOOL_VERSION__,
     validOutputAccepted,
     invalidOutputRejected,
+    requestValidAccepted,
+    requestInvalidRejected,
   });
 }
 

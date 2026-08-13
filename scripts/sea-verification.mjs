@@ -17,6 +17,8 @@ export function expectedSeaContractProbeStdout(version) {
     version,
     validOutputAccepted: true,
     invalidOutputRejected: true,
+    requestValidAccepted: true,
+    requestInvalidRejected: true,
   });
 }
 

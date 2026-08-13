@@ -110,6 +110,8 @@ test("SEA executable runs the embedded output contract probe", (context) => {
     version: packageVersion,
     validOutputAccepted: true,
     invalidOutputRejected: true,
+    requestValidAccepted: true,
+    requestInvalidRejected: true,
   });
   assert.equal(result.stdout.trimEnd().split("\n").length, 1, diagnostic);
 });
