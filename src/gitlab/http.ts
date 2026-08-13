@@ -1,3 +1,5 @@
+import { createHash, timingSafeEqual } from "node:crypto";
+
 import { ToolError } from "../contracts/errors.ts";
 import { copyJsonValue, type JsonValue } from "../contracts/jcs.ts";
 import {
@@ -146,16 +148,15 @@ export const nodeGitLabHttpTransport: GitLabHttpTransport = Object.freeze({
 
 function normalizeHeaders(
   headers: Readonly<Record<string, string>>,
-  credential: string,
+  reflectsCredential: (value: string) => boolean,
 ): Readonly<Record<string, string>> {
   const result: Record<string, string> = Object.create(null) as Record<string, string>;
-  const normalizedCredential = credential.toLowerCase();
   for (const [name, value] of Object.entries(headers)) {
     if (typeof value !== "string" || /[\r\n\u0000]/u.test(name) || /[\r\n\u0000]/u.test(value)) {
       throw gitLabError("GITLAB_ERROR", "GitLab returned invalid response headers", "invalid response header");
     }
     const normalizedName = name.toLowerCase();
-    if (normalizedName.includes(normalizedCredential) || value.toLowerCase().includes(normalizedCredential)) {
+    if (reflectsCredential(normalizedName) || reflectsCredential(value)) {
       continue;
     }
     result[normalizedName] = value;
@@ -198,6 +199,7 @@ export class GitLabHttpClient {
   private readonly transport: GitLabHttpTransport;
   private readonly timeoutMs: number;
   private readonly maxResponseBytes: number;
+  private readonly credentialDigests = new Map<number, Buffer[]>();
 
   constructor(options: GitLabHttpClientOptions) {
     this.origin = normalizeGitLabOrigin(options.origin, options.allowInsecureLoopback ?? false);
@@ -209,6 +211,33 @@ export class GitLabHttpClient {
         !Number.isSafeInteger(this.maxResponseBytes) || this.maxResponseBytes < 1) {
       throw new TypeError("GitLab HTTP limits must be positive safe integers");
     }
+  }
+
+  private rememberCredential(credential: string): void {
+    const normalized = credential.toLowerCase();
+    const digest = createHash("sha256").update(normalized, "utf8").digest();
+    const digests = this.credentialDigests.get(normalized.length) ?? [];
+    if (!digests.some((known) => timingSafeEqual(known, digest))) digests.push(digest);
+    this.credentialDigests.set(normalized.length, digests);
+  }
+
+  private reflectsCredential(value: string): boolean {
+    const normalized = value.toLowerCase();
+    for (const [length, digests] of this.credentialDigests) {
+      if (length > normalized.length) continue;
+      for (let offset = 0; offset <= normalized.length - length; offset += 1) {
+        const digest = createHash("sha256")
+          .update(normalized.slice(offset, offset + length), "utf8")
+          .digest();
+        if (digests.some((known) => timingSafeEqual(known, digest))) return true;
+      }
+    }
+    return false;
+  }
+
+  sanitizeRequestId(value: string): string | null {
+    const normalized = value.trim();
+    return normalized === "" || this.reflectsCredential(normalized) ? null : normalized;
   }
 
   async requestJson(
@@ -235,6 +264,7 @@ export class GitLabHttpClient {
         token.length > MAX_TOKEN_LENGTH || /[\r\n\u0000]/u.test(token)) {
       throw gitLabError("AUTH_ERROR", "GitLab credential is invalid", "invalid credential shape");
     }
+    this.rememberCredential(token);
     const encodedBody = body === null ? null : new TextEncoder().encode(JSON.stringify(body));
     let response: GitLabHttpResponse;
     try {
@@ -259,8 +289,10 @@ export class GitLabHttpClient {
         response.headers === null || typeof response.headers !== "object" || Array.isArray(response.headers)) {
       throw gitLabError("GITLAB_ERROR", "GitLab response exceeded the configured limit", "response limit failure");
     }
-    const headers = normalizeHeaders(response.headers, token);
-    const requestId = headers["x-request-id"]?.trim() || null;
+    const headers = normalizeHeaders(response.headers, (value) => this.reflectsCredential(value));
+    const requestId = headers["x-request-id"] === undefined
+      ? null
+      : this.sanitizeRequestId(headers["x-request-id"]);
     if (response.status === 401 || response.status === 403) {
       throw gitLabError("AUTH_ERROR", "GitLab rejected the credential or permission", `HTTP ${String(response.status)}`, requestId);
     }

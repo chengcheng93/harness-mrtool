@@ -61,6 +61,33 @@ function bundleManifestHash(bundle: Awaited<ReturnType<typeof loadTemplateBundle
   return sha256Utf8(`${canonicalizeJson(bundle.manifest)}\n`);
 }
 
+function projectBody(
+  id = 7,
+  fullPath = "group/project",
+): Record<string, unknown> {
+  return {
+    id,
+    path_with_namespace: fullPath,
+    default_branch: "develop",
+    web_url: `https://gitlab.example.test/${fullPath}`,
+  };
+}
+
+function reviewFenceBody(
+  sha: string,
+  detailedMergeStatus = "mergeable",
+  overrides: Readonly<Record<string, unknown>> = {},
+): Record<string, unknown> {
+  return {
+    id: 120,
+    project_id: 7,
+    iid: 12,
+    sha,
+    detailed_merge_status: detailedMergeStatus,
+    ...overrides,
+  };
+}
+
 test("redacts transport failures and never exposes the token", async () => {
   const api = new GitLabClient({
     origin: "https://gitlab.example.test",
@@ -138,7 +165,7 @@ test("rejects malformed credential and response-header runtime values with stabl
 
 test("bounds response size before strict JSON parsing", async () => {
   const fake = new FakeGitLab();
-  fake.enqueue("GET", "/api/v4/projects/group%2Fproject", { body: {
+  fake.enqueue("GET", "/api/v4/projects/7", { body: {
     id: 7, path_with_namespace: `group/${"x".repeat(2_200_000)}`,
     default_branch: "develop", web_url: "https://gitlab.example.test/group/project",
   } });
@@ -148,7 +175,7 @@ test("bounds response size before strict JSON parsing", async () => {
     transport: fake,
     maxResponseBytes: 3 * 1024 * 1024,
   });
-  const project = await api.getProject("group/project");
+  const project = await api.getProject("7");
   assert.equal(project.fullPath.length, 2_200_006);
 });
 
@@ -162,6 +189,14 @@ test("rejects a numeric project lookup whose response has another ID", async () 
   } });
 
   await assert.rejects(client(fake).getProject("7"), (error: unknown) =>
+    typeof error === "object" && error !== null && "code" in error && error.code === "GITLAB_ERROR");
+});
+
+test("rejects a path project lookup whose response has another full path", async () => {
+  const fake = new FakeGitLab();
+  fake.enqueue("GET", "/api/v4/projects/group%2Fproject", { body: projectBody(8, "other/project") });
+
+  await assert.rejects(client(fake).getProject("group/project"), (error: unknown) =>
     typeof error === "object" && error !== null && "code" in error && error.code === "GITLAB_ERROR");
 });
 
@@ -339,6 +374,40 @@ test("rejects a paginated REST response that skips a page", async () => {
   assert.equal(fake.requests.length, 1);
 });
 
+test("uses a same-origin consecutive Link relation when x-next-page is unavailable", async () => {
+  const fake = new FakeGitLab();
+  fake.enqueue("GET", "/api/v4/projects/7/groups?with_shared=false&per_page=100&page=1", {
+    headers: {
+      link: '<https://gitlab.example.test/api/v4/projects/7/groups?with_shared=false&per_page=100&page=2>; rel="next"',
+    },
+    body: [{ id: 11, full_path: "group" }],
+  });
+  fake.enqueue("GET", "/api/v4/projects/7/groups?with_shared=false&per_page=100&page=2", {
+    headers: { "x-next-page": "" },
+    body: [{ id: 12, full_path: "parent" }],
+  });
+
+  assert.deepEqual(await client(fake).listAncestorGroups("7"), [
+    { id: "11", fullPath: "group" },
+    { id: "12", fullPath: "parent" },
+  ]);
+  assert.equal(fake.requests.length, 2);
+});
+
+test("rejects a cross-origin Link continuation without following it", async () => {
+  const fake = new FakeGitLab();
+  fake.enqueue("GET", "/api/v4/projects/7/groups?with_shared=false&per_page=100&page=1", {
+    headers: {
+      link: '<https://attacker.example.test/api/v4/projects/7/groups?with_shared=false&per_page=100&page=2>; rel="next"',
+    },
+    body: [{ id: 11, full_path: "group" }],
+  });
+
+  await assert.rejects(client(fake).listAncestorGroups("7"), (error: unknown) =>
+    typeof error === "object" && error !== null && "code" in error && error.code === "GITLAB_ERROR");
+  assert.equal(fake.requests.length, 1);
+});
+
 test("doctor capability probe requires label ID ADD and REMOVE", async () => {
   const fake = new FakeGitLab();
   fake.enqueue("GET", "/api/v4/version", { body: { version: "19.2.1", revision: "abc" } });
@@ -368,12 +437,17 @@ test("doctor capability probe requires label ID ADD and REMOVE", async () => {
 
 test("label mutation sends only global IDs and never a label name", async () => {
   const fake = new FakeGitLab();
+  fake.enqueue("GET", "/api/v4/projects/group%2Fproject", { body: projectBody() });
   fake.enqueue("POST", "/api/graphql", { body: { data: {
-    mergeRequestSetLabels: { errors: [], mergeRequest: { iid: "12" } },
+    mergeRequestSetLabels: { errors: [], mergeRequest: {
+      iid: "12",
+      targetProject: { id: "gid://gitlab/Project/7", fullPath: "group/project" },
+    } },
   } } });
   await client(fake).mutateLabels("group/project", 12, ["gid://gitlab/ProjectLabel/3"], "ADD");
-  const body = fake.requests[0]?.body as { query: string; variables: unknown };
+  const body = fake.requests[1]?.body as { query: string; variables: unknown };
   assert.match(body.query, /mergeRequestSetLabels/u);
+  assert.match(body.query, /targetProject\s*\{\s*id\s+fullPath\s*\}/u);
   assert.doesNotMatch(JSON.stringify(body.variables), /type::|priority::|status::|week::/u);
   assert.deepEqual(body.variables, {
     input: { projectPath: "group/project", iid: "12", labelIds: ["gid://gitlab/ProjectLabel/3"], operationMode: "ADD" },
@@ -393,12 +467,49 @@ test("rejects Issue and label-mutation responses for a different IID", async () 
     typeof error === "object" && error !== null && "code" in error && error.code === "GITLAB_ERROR");
 
   const mutation = new FakeGitLab();
+  mutation.enqueue("GET", "/api/v4/projects/group%2Fproject", { body: projectBody() });
   mutation.enqueue("POST", "/api/graphql", { body: { data: {
-    mergeRequestSetLabels: { errors: [], mergeRequest: { iid: "13" } },
+    mergeRequestSetLabels: { errors: [], mergeRequest: {
+      iid: "13",
+      targetProject: { id: "gid://gitlab/Project/7", fullPath: "group/project" },
+    } },
   } } });
   await assert.rejects(
     client(mutation).mutateLabels("group/project", 12, ["gid://gitlab/ProjectLabel/3"], "ADD"),
     (error: unknown) => typeof error === "object" && error !== null && "code" in error && error.code === "GITLAB_ERROR",
+  );
+});
+
+test("rejects label mutation operation modes other than explicit ADD or REMOVE before transport", async () => {
+  for (const operationMode of ["REPLACE", undefined] as const) {
+    const fake = new FakeGitLab();
+    await assert.rejects(
+      client(fake).mutateLabels(
+        "group/project",
+        12,
+        ["gid://gitlab/ProjectLabel/3"],
+        operationMode as never,
+      ),
+      TypeError,
+    );
+    assert.equal(fake.requests.length, 0);
+  }
+});
+
+test("rejects a label mutation response bound to another target project", async () => {
+  const fake = new FakeGitLab();
+  fake.enqueue("GET", "/api/v4/projects/group%2Fproject", { body: projectBody() });
+  fake.enqueue("POST", "/api/graphql", { body: { data: {
+    mergeRequestSetLabels: { errors: [], mergeRequest: {
+      iid: "12",
+      targetProject: { id: "gid://gitlab/Project/8", fullPath: "other/project" },
+    } },
+  } } });
+
+  await assert.rejects(
+    client(fake).mutateLabels("group/project", 12, ["gid://gitlab/ProjectLabel/3"], "ADD"),
+    (error: unknown) => typeof error === "object" && error !== null &&
+      "code" in error && error.code === "GITLAB_ERROR",
   );
 });
 
@@ -461,11 +572,37 @@ test("redacts a credential reflected through request IDs from successful audit a
   assert.doesNotMatch(inspect(error, { depth: 10 }), new RegExp(token, "iu"));
 });
 
+test("redacts request IDs that reflect any credential seen before or after rotation", async () => {
+  const credentials = ["old-rotation-token", "future-rotation-token"];
+  let credentialIndex = 0;
+  const fake = new FakeGitLab();
+  fake.enqueue("GET", "/api/v4/projects/7", {
+    headers: { "x-request-id": "safe-first-request-id" },
+    body: projectBody(),
+  });
+  fake.enqueue("GET", "/api/v4/projects/7", {
+    headers: { "x-request-id": "prefix-old-rotation-token-suffix" },
+    body: projectBody(),
+  });
+  const api = new GitLabClient({
+    origin: "https://gitlab.example.test",
+    tokenProvider: async () => credentials[credentialIndex++] as string,
+    transport: fake,
+  });
+
+  await api.getProject("7");
+  await api.getProject("7");
+  assert.deepEqual(api.audit().requestIds, ["safe-first-request-id"]);
+  assert.doesNotMatch(JSON.stringify(api.audit()), /old-rotation-token|future-rotation-token/u);
+});
+
 test("review state uses approvals rather than treating a completed review as approval", async () => {
+  const sourceSha = "b".repeat(40);
   const fake = new FakeGitLab();
   fake.enqueue("GET", "/api/v4/projects/group%2Fproject", { body: {
     id: 7, path_with_namespace: "group/project", default_branch: "develop", web_url: "https://gitlab.example.test/group/project",
   } });
+  fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12", { body: reviewFenceBody(sourceSha) });
   fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12/approvals", { body: {
     id: 120,
     iid: 12,
@@ -484,7 +621,9 @@ test("review state uses approvals rather than treating a completed review as app
     }] }],
   });
 
-  assert.deepEqual(await client(fake).getReviewState("group/project", 12), {
+  fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12", { body: reviewFenceBody(sourceSha) });
+
+  assert.deepEqual(await client(fake).getReviewState("group/project", 12, sourceSha), {
     approvedUserIds: ["41"],
     unresolvedDiscussions: 1,
   });
@@ -492,6 +631,7 @@ test("review state uses approvals rather than treating a completed review as app
 });
 
 test("rejects review state whose approvals or discussions belong to another resource", async () => {
+  const sourceSha = "b".repeat(40);
   for (const variant of ["approval-project", "approval-iid", "discussion-project", "discussion-mr"] as const) {
     const fake = new FakeGitLab();
     fake.enqueue("GET", "/api/v4/projects/7", { body: {
@@ -500,6 +640,7 @@ test("rejects review state whose approvals or discussions belong to another reso
       default_branch: "develop",
       web_url: "https://gitlab.example.test/group/project",
     } });
+    fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12", { body: reviewFenceBody(sourceSha) });
     fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12/approvals", { body: {
       id: 120,
       iid: variant === "approval-iid" ? 13 : 12,
@@ -517,13 +658,17 @@ test("rejects review state whose approvals or discussions belong to another reso
         resolved: false,
       }] }],
     });
+    if (variant === "discussion-project" || variant === "discussion-mr") {
+      fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12", { body: reviewFenceBody(sourceSha) });
+    }
 
-    await assert.rejects(client(fake).getReviewState("7", 12), (error: unknown) =>
+    await assert.rejects(client(fake).getReviewState("7", 12, sourceSha), (error: unknown) =>
       typeof error === "object" && error !== null && "code" in error && error.code === "GITLAB_ERROR");
   }
 });
 
 test("rejects review discussion state with unknown resolution booleans", async () => {
+  const sourceSha = "b".repeat(40);
   const identity = { project_id: 7, noteable_id: 120, noteable_iid: 12, noteable_type: "MergeRequest" };
   for (const notes of [
     [{ ...identity, resolvable: "true", resolved: false }],
@@ -541,6 +686,7 @@ test("rejects review discussion state with unknown resolution booleans", async (
       default_branch: "develop",
       web_url: "https://gitlab.example.test/group/project",
     } });
+    fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12", { body: reviewFenceBody(sourceSha) });
     fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12/approvals", { body: {
       id: 120,
       iid: 12,
@@ -552,9 +698,61 @@ test("rejects review discussion state with unknown resolution booleans", async (
       body: [{ notes }],
     });
 
-    await assert.rejects(client(fake).getReviewState("7", 12), (error: unknown) =>
+    await assert.rejects(client(fake).getReviewState("7", 12, sourceSha), (error: unknown) =>
       typeof error === "object" && error !== null && "code" in error && error.code === "GITLAB_ERROR");
   }
+});
+
+test("rejects a review discussion with no notes", async () => {
+  const sourceSha = "b".repeat(40);
+  const fake = new FakeGitLab();
+  fake.enqueue("GET", "/api/v4/projects/7", { body: projectBody() });
+  fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12", { body: reviewFenceBody(sourceSha) });
+  fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12/approvals", { body: {
+    id: 120, iid: 12, project_id: 7, approved_by: [],
+  } });
+  fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12/discussions?per_page=100&page=1", {
+    headers: { "x-next-page": "" }, body: [{ notes: [] }],
+  });
+
+  await assert.rejects(client(fake).getReviewState("7", 12, sourceSha), (error: unknown) =>
+    typeof error === "object" && error !== null && "code" in error && error.code === "GITLAB_ERROR");
+});
+
+test("rejects review state while GitLab is checking or synchronizing approvals", async () => {
+  const sourceSha = "b".repeat(40);
+  for (const detailedMergeStatus of ["checking", "approvals_syncing"] as const) {
+    const fake = new FakeGitLab();
+    fake.enqueue("GET", "/api/v4/projects/7", { body: projectBody() });
+    fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12", {
+      body: reviewFenceBody(sourceSha, detailedMergeStatus),
+    });
+
+    await assert.rejects(client(fake).getReviewState("7", 12, sourceSha), (error: unknown) =>
+      typeof error === "object" && error !== null && "code" in error && error.code === "GITLAB_ERROR");
+    assert.equal(fake.requests.length, 2);
+  }
+});
+
+test("rejects review state when the MR source SHA changes during review discovery", async () => {
+  const sourceSha = "b".repeat(40);
+  const fake = new FakeGitLab();
+  fake.enqueue("GET", "/api/v4/projects/7", { body: projectBody() });
+  fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12", { body: reviewFenceBody(sourceSha) });
+  fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12/approvals", { body: {
+    id: 120, iid: 12, project_id: 7, approved_by: [],
+  } });
+  fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12/discussions?per_page=100&page=1", {
+    headers: { "x-next-page": "" },
+    body: [{ notes: [{
+      project_id: 7, noteable_id: 120, noteable_iid: 12, noteable_type: "MergeRequest",
+      resolvable: false, resolved: false,
+    }] }],
+  });
+  fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12", { body: reviewFenceBody("c".repeat(40)) });
+
+  await assert.rejects(client(fake).getReviewState("7", 12, sourceSha), (error: unknown) =>
+    typeof error === "object" && error !== null && "code" in error && error.code === "GITLAB_ERROR");
 });
 
 test("reads exact applied label IDs and the live target branch head", async () => {
@@ -590,6 +788,34 @@ test("reads exact applied label IDs and the live target branch head", async () =
   assert.deepEqual((await api.getMergeRequest("group/project", 12)).labels, [
     { restId: 3, name: "status::doing", archived: false },
   ]);
+});
+
+test("rejects a head pipeline whose SHA does not equal the MR source SHA", async () => {
+  const fake = new FakeGitLab();
+  fake.enqueue("GET", "/api/v4/projects/7", { body: projectBody() });
+  fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12?with_labels_details=true", { body: {
+    iid: 12,
+    web_url: "https://gitlab.example.test/group/project/-/merge_requests/12",
+    title: "[fix][app] Fix labels",
+    description: "",
+    draft: false,
+    state: "opened",
+    source_project_id: 7,
+    source_branch: "fix/51-labels",
+    target_project_id: 7,
+    target_branch: "develop",
+    sha: "b".repeat(40),
+    author: { id: 40, username: "author", name: "Author", state: "active" },
+    assignees: [],
+    reviewers: [],
+    labels: [],
+    squash: true,
+    should_remove_source_branch: true,
+    head_pipeline: { status: "success", sha: "c".repeat(40) },
+  } });
+
+  await assert.rejects(client(fake).getMergeRequest("7", 12), (error: unknown) =>
+    typeof error === "object" && error !== null && "code" in error && error.code === "GITLAB_ERROR");
 });
 
 test("rejects an applied label ID repeated with conflicting names", async () => {

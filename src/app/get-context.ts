@@ -316,7 +316,7 @@ export async function getContext(options: GetContextOptions): Promise<Discovered
   }
   const review = mr === null
     ? { approvedUserIds: Object.freeze([]) as readonly string[], unresolvedDiscussions: 0 }
-    : await options.gitlab.getReviewState(project.id, mr.iid);
+    : await options.gitlab.getReviewState(project.id, mr.iid, mr.sha);
   const policyView = policy(options.bundle);
   const categorized = inventory.effective.flatMap((label) => {
     const category = categoryFor(label, policyView.categories);

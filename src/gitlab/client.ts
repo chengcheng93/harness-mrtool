@@ -92,6 +92,108 @@ function query(path: string, values: Readonly<Record<string, string>>): string {
   return `${path}?${params.toString()}`;
 }
 
+function splitLinkHeader(value: string): readonly string[] {
+  const result: string[] = [];
+  let start = 0;
+  let inTarget = false;
+  let inQuote = false;
+  let escaped = false;
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+    if (escaped) {
+      escaped = false;
+    } else if (inQuote && character === "\\") {
+      escaped = true;
+    } else if (!inQuote && character === "<") {
+      if (inTarget) throw apiError("pagination", "malformed Link header");
+      inTarget = true;
+    } else if (!inQuote && character === ">") {
+      if (!inTarget) throw apiError("pagination", "malformed Link header");
+      inTarget = false;
+    } else if (!inTarget && character === '"') {
+      inQuote = !inQuote;
+    } else if (!inTarget && !inQuote && character === ",") {
+      result.push(value.slice(start, index).trim());
+      start = index + 1;
+    }
+  }
+  if (inTarget || inQuote || escaped) throw apiError("pagination", "malformed Link header");
+  result.push(value.slice(start).trim());
+  if (result.some((part) => part === "")) throw apiError("pagination", "malformed Link header");
+  return result;
+}
+
+function linkParameters(value: string): ReadonlyMap<string, string> {
+  const result = new Map<string, string>();
+  for (const raw of value.split(";").slice(1)) {
+    const parameter = raw.trim();
+    const equals = parameter.indexOf("=");
+    if (equals < 1) throw apiError("pagination", "malformed Link parameter");
+    const name = parameter.slice(0, equals).trim().toLowerCase();
+    const encodedValue = parameter.slice(equals + 1).trim();
+    if (!/^[!#$%&'*+.^_`|~0-9a-z-]+$/u.test(name) || result.has(name)) {
+      throw apiError("pagination", "malformed Link parameter");
+    }
+    let decodedValue: string;
+    if (encodedValue.startsWith('"')) {
+      if (!encodedValue.endsWith('"') || encodedValue.length < 2) {
+        throw apiError("pagination", "malformed Link parameter");
+      }
+      decodedValue = encodedValue.slice(1, -1).replace(/\\([\\"])/gu, "$1");
+      if (/\\/u.test(decodedValue)) throw apiError("pagination", "malformed Link parameter");
+    } else {
+      if (!/^[!#$%&'*+.^_`|~0-9a-z:/?@\[\]-]+$/iu.test(encodedValue)) {
+        throw apiError("pagination", "malformed Link parameter");
+      }
+      decodedValue = encodedValue;
+    }
+    result.set(name, decodedValue);
+  }
+  return result;
+}
+
+function sortedQueryEntries(value: URL): readonly string[] {
+  return [...value.searchParams]
+    .map(([name, entry]) => `${encodeURIComponent(name)}=${encodeURIComponent(entry)}`)
+    .sort(ordinal);
+}
+
+function nextPageFromLink(
+  header: string,
+  current: URL,
+  expectedPage: number,
+): number | null {
+  let nextTarget: string | null = null;
+  for (const part of splitLinkHeader(header)) {
+    const targetEnd = part.indexOf(">");
+    if (!part.startsWith("<") || targetEnd < 2 || part.slice(targetEnd + 1).trim().startsWith(";") === false) {
+      throw apiError("pagination", "malformed Link header");
+    }
+    const parameters = linkParameters(part.slice(targetEnd + 1));
+    const relations = (parameters.get("rel") ?? "").split(/\s+/u).filter(Boolean);
+    if (!relations.includes("next")) continue;
+    if (nextTarget !== null) throw apiError("pagination", "multiple next Link relations");
+    nextTarget = part.slice(1, targetEnd);
+  }
+  if (nextTarget === null) return null;
+
+  let parsed: URL;
+  try {
+    parsed = new URL(nextTarget, current);
+  } catch {
+    throw apiError("pagination", "invalid next Link URL");
+  }
+  const expected = new URL(current);
+  expected.searchParams.set("page", String(expectedPage));
+  if (parsed.origin !== current.origin || parsed.username !== "" || parsed.password !== "" || parsed.hash !== "" ||
+      parsed.pathname !== expected.pathname || parsed.searchParams.getAll("page").length !== 1 ||
+      parsed.searchParams.get("page") !== String(expectedPage) ||
+      JSON.stringify(sortedQueryEntries(parsed)) !== JSON.stringify(sortedQueryEntries(expected))) {
+    throw apiError("pagination", "untrusted next Link URL");
+  }
+  return expectedPage;
+}
+
 function user(value: JsonValue, subject: string, accessLevel: number | null = null): GitLabUser {
   const record = object(value, subject);
   const state = string(record.state, `${subject}.state`);
@@ -145,11 +247,15 @@ function expectedGlobalId(label: RestLabel): string {
   return `gid://gitlab/${label.scopeKind === "project" ? "ProjectLabel" : "GroupLabel"}/${String(label.restId)}`;
 }
 
-function pipelineStatus(value: JsonValue | undefined): GitLabMergeRequest["pipelineStatus"] {
+function pipelineStatus(value: JsonValue | undefined, expectedSha: string): GitLabMergeRequest["pipelineStatus"] {
   if (value === null || value === undefined) {
     return "unavailable";
   }
-  const raw = string(object(value, "merge request pipeline").status, "merge request pipeline status");
+  const record = object(value, "merge request pipeline");
+  if (string(record.sha, "merge request pipeline sha") !== expectedSha) {
+    throw apiError("merge request pipeline", "pipeline SHA mismatch");
+  }
+  const raw = string(record.status, "merge request pipeline status");
   if (raw === "success") return "passed";
   if (raw === "pending" || raw === "created" || raw === "waiting_for_resource" || raw === "preparing") return "pending";
   if (raw === "running") return "running";
@@ -191,7 +297,11 @@ export class GitLabClient {
   }
 
   audit(): GitLabRequestAudit {
-    return Object.freeze({ requestIds: Object.freeze([...this.requestIds].sort(ordinal)) });
+    const requestIds = [...this.requestIds]
+      .map((requestId) => this.http.sanitizeRequestId(requestId))
+      .filter((requestId): requestId is string => requestId !== null)
+      .sort(ordinal);
+    return Object.freeze({ requestIds: Object.freeze(requestIds) });
   }
 
   private async get(endpoint: string): Promise<GitLabJsonResponse> {
@@ -218,15 +328,29 @@ export class GitLabClient {
       if (seen.has(page)) throw apiError("pagination", "pagination cycle");
       seen.add(page);
       const separator = endpoint.includes("?") ? "&" : "?";
-      const response = await this.get(`${endpoint}${separator}per_page=100&page=${String(page)}`);
+      const pageEndpoint = `${endpoint}${separator}per_page=100&page=${String(page)}`;
+      const response = await this.get(pageEndpoint);
       result.push(...array(response.data, "paginated response"));
       const nextHeader = response.headers["x-next-page"];
-      if (nextHeader === undefined) throw apiError("pagination", "missing next-page header");
+      const linkHeader = response.headers.link;
+      const linkNext = linkHeader === undefined
+        ? undefined
+        : nextPageFromLink(linkHeader, new URL(pageEndpoint, this.origin), page + 1);
+      if (nextHeader === undefined) {
+        if (linkNext === undefined) throw apiError("pagination", "missing continuation metadata");
+        if (linkNext === null) return Object.freeze(result);
+        page = linkNext;
+        continue;
+      }
       const nextRaw = nextHeader.trim();
-      if (nextRaw === "") return Object.freeze(result);
+      if (nextRaw === "") {
+        if (linkNext !== undefined && linkNext !== null) throw apiError("pagination", "conflicting continuation metadata");
+        return Object.freeze(result);
+      }
       if (!/^\d+$/u.test(nextRaw)) throw apiError("pagination", "invalid next page");
       const next = Number(nextRaw);
       if (!Number.isSafeInteger(next) || next !== page + 1) throw apiError("pagination", "non-consecutive next page");
+      if (linkNext !== undefined && linkNext !== next) throw apiError("pagination", "conflicting continuation metadata");
       page = next;
     }
     throw apiError("pagination", "page limit exceeded");
@@ -236,12 +360,13 @@ export class GitLabClient {
     const response = await this.get(`/api/v4/projects/${encodeId(project)}`);
     const record = object(response.data, "project");
     const id = String(integer(record.id, "project.id"));
-    if (/^[1-9]\d*$/u.test(project) && id !== project) {
-      throw apiError("project", "project ID mismatch");
+    const fullPath = string(record.path_with_namespace, "project.path_with_namespace");
+    if (/^[1-9]\d*$/u.test(project) ? id !== project : fullPath !== project) {
+      throw apiError("project", "project identity mismatch");
     }
     return Object.freeze({
       id,
-      fullPath: string(record.path_with_namespace, "project.path_with_namespace"),
+      fullPath,
       defaultBranch: string(record.default_branch, "project.default_branch"),
       webUrl: string(record.web_url, "project.web_url"),
     });
@@ -432,18 +557,47 @@ export class GitLabClient {
       labels: appliedLabels(record.labels, "merge request"),
       squash: boolean(record.squash, "merge request.squash"),
       shouldRemoveSourceBranch: boolean(record.should_remove_source_branch, "merge request.should_remove_source_branch"),
-      pipelineStatus: pipelineStatus(record.head_pipeline),
+      pipelineStatus: pipelineStatus(record.head_pipeline, sha),
     });
   }
 
-  async getReviewState(projectReference: string, iid: number): Promise<GitLabReviewState> {
+  private async reviewFence(
+    project: GitLabProject,
+    iid: number,
+    expectedSha: string,
+    expectedMergeRequestId: number | null,
+  ): Promise<number> {
+    const record = object((await this.get(
+      `/api/v4/projects/${encodeId(project.id)}/merge_requests/${String(iid)}`,
+    )).data, "merge request review fence");
+    const mergeRequestId = integer(record.id, "merge request review fence.id");
+    const detailedMergeStatus = string(
+      record.detailed_merge_status,
+      "merge request review fence.detailed_merge_status",
+    );
+    if (integer(record.project_id, "merge request review fence.project_id") !== Number(project.id) ||
+        integer(record.iid, "merge request review fence.iid") !== iid ||
+        string(record.sha, "merge request review fence.sha") !== expectedSha ||
+        (expectedMergeRequestId !== null && mergeRequestId !== expectedMergeRequestId)) {
+      throw apiError("merge request review fence", "project, MR, or source SHA mismatch");
+    }
+    if (detailedMergeStatus === "checking" || detailedMergeStatus === "approvals_syncing") {
+      throw apiError("merge request review fence", "approval state is still synchronizing");
+    }
+    return mergeRequestId;
+  }
+
+  async getReviewState(projectReference: string, iid: number, expectedSha: string): Promise<GitLabReviewState> {
     if (!Number.isSafeInteger(iid) || iid < 1) throw new TypeError("MR IID must be positive");
+    if (!OBJECT_ID.test(expectedSha)) throw new TypeError("Expected MR source SHA must be a Git object ID");
     const project = await this.getProject(projectReference);
+    const fencedMergeRequestId = await this.reviewFence(project, iid, expectedSha, null);
     const approvals = object((await this.get(
       `/api/v4/projects/${encodeId(project.id)}/merge_requests/${String(iid)}/approvals`,
     )).data, "merge request approvals");
     const mergeRequestId = integer(approvals.id, "merge request approvals.id");
-    if (integer(approvals.project_id, "merge request approvals.project_id") !== Number(project.id) ||
+    if (mergeRequestId !== fencedMergeRequestId ||
+        integer(approvals.project_id, "merge request approvals.project_id") !== Number(project.id) ||
         integer(approvals.iid, "merge request approvals.iid") !== iid) {
       throw apiError("merge request approvals", "project or MR identity mismatch");
     }
@@ -456,6 +610,7 @@ export class GitLabClient {
     for (const value of discussions) {
       const record = object(value, "merge request discussion");
       const notes = array(record.notes, "discussion notes");
+      if (notes.length === 0) throw apiError("merge request discussion", "discussion has no notes");
       let discussionUnresolved = false;
       for (const note of notes) {
         const noteRecord = object(note, "discussion note");
@@ -472,6 +627,7 @@ export class GitLabClient {
       }
       if (discussionUnresolved) unresolved += 1;
     }
+    await this.reviewFence(project, iid, expectedSha, mergeRequestId);
     return Object.freeze({
       approvedUserIds: Object.freeze([...new Set(approved)].sort(ordinal)),
       unresolvedDiscussions: unresolved,
@@ -509,20 +665,28 @@ export class GitLabClient {
     labelIds: readonly string[],
     operationMode: "ADD" | "REMOVE",
   ): Promise<void> {
+    if (operationMode !== "ADD" && operationMode !== "REMOVE") {
+      throw new TypeError("Label mutation operation must be ADD or REMOVE");
+    }
     if (!Number.isSafeInteger(iid) || iid < 1 || labelIds.length === 0 ||
         new Set(labelIds).size !== labelIds.length || labelIds.some((id) => !/^gid:\/\/gitlab\/(?:Project|Group)Label\/\d+$/u.test(id))) {
       throw new TypeError("Label mutation requires unique GitLab global label IDs");
     }
+    const project = await this.getProject(projectPath);
     const data = await this.graphql(SET_LABELS_MUTATION, {
-      input: { projectPath, iid: String(iid), labelIds: [...labelIds], operationMode },
+      input: { projectPath: project.fullPath, iid: String(iid), labelIds: [...labelIds], operationMode },
     });
     const mutation = object(data.mergeRequestSetLabels, "mergeRequestSetLabels mutation");
     const errors = array(mutation.errors, "mergeRequestSetLabels errors").map((value) => string(value, "mutation error"));
-    const returnedIid = mutation.mergeRequest === null
-      ? null
-      : string(object(mutation.mergeRequest, "mutated merge request").iid, "mutated merge request.iid");
-    if (errors.length > 0 || returnedIid !== String(iid)) {
+    if (errors.length > 0 || mutation.mergeRequest === null) {
       throw apiError("label mutation", "GitLab rejected the ID mutation");
+    }
+    const mergeRequest = object(mutation.mergeRequest, "mutated merge request");
+    const targetProject = object(mergeRequest.targetProject, "mutated merge request target project");
+    if (string(mergeRequest.iid, "mutated merge request.iid") !== String(iid) ||
+        string(targetProject.id, "mutated merge request target project.id") !== `gid://gitlab/Project/${project.id}` ||
+        string(targetProject.fullPath, "mutated merge request target project.fullPath") !== project.fullPath) {
+      throw apiError("label mutation", "mutation target identity mismatch");
     }
   }
 }

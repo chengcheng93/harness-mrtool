@@ -24,6 +24,9 @@ export const CAPABILITIES_QUERY = `query HarnessMrtoolCapabilities {
 export const SET_LABELS_MUTATION = `mutation HarnessMrtoolSetLabels($input: MergeRequestSetLabelsInput!) {
   mergeRequestSetLabels(input: $input) {
     errors
-    mergeRequest { iid }
+    mergeRequest {
+      iid
+      targetProject { id fullPath }
+    }
   }
 }`;
