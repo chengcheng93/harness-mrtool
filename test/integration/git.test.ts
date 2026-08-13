@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
-import { chmod, copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
-import { isAbsolute, resolve } from "node:path";
+import {
+  chmod,
+  copyFile,
+  mkdir,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import { delimiter, isAbsolute, resolve } from "node:path";
 import test, { type TestContext } from "node:test";
+import { pathToFileURL } from "node:url";
 
 import { isToolError } from "../../src/contracts/errors.ts";
 import { readCanonicalChangeSet } from "../../src/git/change-set.ts";
@@ -12,6 +21,7 @@ import {
 } from "../../src/git/repository.ts";
 import {
   GitRunner,
+  type GitRunnerOptions,
   nodeProcessRunner,
   type ProcessRequest,
   type ProcessResult,
@@ -100,16 +110,17 @@ test("GitRunner always invokes git with an argv array and shell disabled", async
       };
     },
   };
+  const trustedExecutable = await realpath(process.execPath);
   const runner = new GitRunner("C:\\fixture", processRunner, {
     environment: { GIT_ATTR_NOSYSTEM: "0", GIT_TERMINAL_PROMPT: "1" },
-    gitExecutable: resolve(process.cwd(), "trusted-git.exe"),
+    gitExecutable: trustedExecutable,
   });
 
   const result = await runner.run(["--version"]);
 
   assert.equal(result.stdout.toString("utf8"), "git version fixture\n");
   assert.equal(requests.length, 1);
-  assert.equal(requests[0]?.executable, resolve(process.cwd(), "trusted-git.exe"));
+  assert.equal(requests[0]?.executable, trustedExecutable);
   assert.equal(isAbsolute(requests[0]?.executable ?? ""), true);
   assert.deepEqual(requests[0]?.arguments, ["--version"]);
   assert.equal(requests[0]?.shell, false);
@@ -130,7 +141,13 @@ test("GitRunner does not execute a repository-local git.exe on Windows", {
   );
   const processRunner = new RecordingProcessRunner();
 
-  const result = await new GitRunner(fixture.worktreePath, processRunner).run(["--version"]);
+  const result = await new GitRunner(fixture.worktreePath, processRunner, {
+    environment: {
+      PATH: fixture.worktreePath,
+      ProgramFiles: fixture.worktreePath,
+      ProgramW6432: fixture.worktreePath,
+    },
+  }).run(["--version"]);
 
   assert.equal(result.exitCode, 0);
   assert.match(result.stdout.toString("utf8"), /^git version /u);
@@ -138,6 +155,55 @@ test("GitRunner does not execute a repository-local git.exe on Windows", {
   assert.notEqual(
     processRunner.requests[0]?.executable.toLowerCase(),
     resolve(fixture.worktreePath, "git.exe").toLowerCase(),
+  );
+});
+
+test("GitRunner ignores arbitrary absolute PATH entries outside its trusted roots", async (t) => {
+  const fixture = await fixtureFor(t);
+  const untrustedRoot = resolve(fixture.root, "untrusted-git");
+  const trustedRoot = resolve(fixture.root, "trusted-git");
+  await mkdir(untrustedRoot);
+  await mkdir(trustedRoot);
+  const executableName = process.platform === "win32" ? "git.exe" : "git";
+  const untrustedExecutable = resolve(untrustedRoot, executableName);
+  const trustedExecutable = resolve(trustedRoot, executableName);
+  await copyFile(process.execPath, untrustedExecutable);
+  await copyFile(process.execPath, trustedExecutable);
+  if (process.platform !== "win32") {
+    await chmod(untrustedExecutable, 0o755);
+    await chmod(trustedExecutable, 0o755);
+  }
+  const processRunner = new RecordingProcessRunner();
+  const options = {
+    environment: { PATH: [untrustedRoot, process.env.PATH ?? ""].join(delimiter) },
+    trustedGitRoots: [trustedRoot],
+  } satisfies GitRunnerOptions;
+
+  await new GitRunner(fixture.worktreePath, processRunner, options).run(["--version"]);
+
+  assert.equal(processRunner.requests[0]?.executable, await realpath(trustedExecutable));
+  assert.notEqual(processRunner.requests[0]?.executable, await realpath(untrustedExecutable));
+});
+
+test("repository discovery preserves an explicitly trusted Git executable", async (t) => {
+  const fixture = await fixtureFor(t);
+  const resolver = new RecordingProcessRunner();
+  await new GitRunner(fixture.worktreePath, resolver).run(["--version"]);
+  const trustedExecutable = resolver.requests[0]?.executable;
+  assert.notEqual(trustedExecutable, undefined);
+  const processRunner = new RecordingProcessRunner();
+
+  await discoverRepository({
+    cwd: fixture.worktreePath,
+    gitRunnerOptions: { gitExecutable: trustedExecutable as string },
+    processRunner,
+    targetBranch: "main",
+  });
+
+  assert.equal(processRunner.requests.length > 0, true);
+  assert.equal(
+    processRunner.requests.every((request) => request.executable === trustedExecutable),
+    true,
   );
 });
 
@@ -280,7 +346,7 @@ test("canonical ChangeSet parses NUL diff records for A/M/D/R, binary, and submo
   );
 });
 
-test("canonical ChangeSet rejects repository-local attribute overrides", async (t) => {
+test("canonical ChangeSet isolates repository-local attribute overrides", async (t) => {
   await t.test("non-empty info attributes", async (t) => {
     const fixture = await fixtureFor(t);
     await fixture.commitFile("src/added.ts", "export const added = true;\n", "add source");
@@ -290,9 +356,11 @@ test("canonical ChangeSet rejects repository-local attribute overrides", async (
     });
     await fixture.write(".git/info/attributes", "*.ts binary\n");
 
-    await assert.rejects(
-      readCanonicalChangeSet(repository),
-      (error: unknown) => isToolError(error, "REPOSITORY_ERROR", /attributes/i),
+    const changeSet = await readCanonicalChangeSet(repository);
+
+    assert.deepEqual(
+      changeSet.items.find((item) => item.status === "added" && item.newPath === "src/added.ts"),
+      { status: "added", newPath: "src/added.ts", binary: false, submodule: false },
     );
   });
 
@@ -310,9 +378,11 @@ test("canonical ChangeSet rejects repository-local attribute overrides", async (
       targetBranch: "main",
     });
 
-    await assert.rejects(
-      readCanonicalChangeSet(repository),
-      (error: unknown) => isToolError(error, "REPOSITORY_ERROR", /attributes/i),
+    const changeSet = await readCanonicalChangeSet(repository);
+
+    assert.deepEqual(
+      changeSet.items.find((item) => item.status === "added" && item.newPath === "src/added.ts"),
+      { status: "added", newPath: "src/added.ts", binary: false, submodule: false },
     );
   });
 });
@@ -365,6 +435,52 @@ test("canonical ChangeSet ignores repository-local replacement objects", async (
 
   const actual = await readCanonicalChangeSet(repository);
 
+  assert.deepEqual(actual, expected);
+});
+
+test("canonical ChangeSet is isolated from transient repository attributes", async (t) => {
+  const fixture = await fixtureFor(t);
+  await fixture.commitFile("src/race.ts", "export const race = true;\n", "race");
+  const discovered = await discoverRepository({
+    cwd: fixture.worktreePath,
+    targetBranch: "main",
+  });
+  const expected = await readCanonicalChangeSet(discovered);
+  const attributesPath = resolve(fixture.worktreePath, ".git", "info", "attributes");
+  let diffStarted = 0;
+  let diffCompleted = 0;
+  let attributesReadyResolve: (() => void) | undefined;
+  const attributesReady = new Promise<void>((resolveReady) => {
+    attributesReadyResolve = resolveReady;
+  });
+  const processRunner: ProcessRunner = {
+    async run(request) {
+      if (!request.arguments.includes("diff")) {
+        return nodeProcessRunner.run(request);
+      }
+      diffStarted += 1;
+      if (diffStarted === 1) {
+        await writeFile(attributesPath, "*.ts binary\n");
+        attributesReadyResolve?.();
+      } else {
+        await attributesReady;
+      }
+      const result = await nodeProcessRunner.run(request);
+      diffCompleted += 1;
+      if (diffCompleted === 2) {
+        await rm(attributesPath);
+      }
+      return result;
+    },
+  };
+  const repository = {
+    ...discovered,
+    runner: new GitRunner(fixture.worktreePath, processRunner),
+  };
+
+  const actual = await readCanonicalChangeSet(repository);
+
+  assert.equal(diffStarted, 2);
   assert.deepEqual(actual, expected);
 });
 
@@ -593,11 +709,31 @@ test("behind source ref pushes exactly planned HEAD to the selected branch", asy
     "--recurse-submodules=no",
     "--no-verify",
     "--",
-    "origin",
+    repository.sourcePushUrl,
     `${localHead}:refs/heads/feature/task7`,
   ]);
   assert.equal(pushes[0]?.arguments.some((argument) => argument.includes("force")), false);
   assert.equal(pushes[0]?.arguments.includes("--tags"), false);
+  const pushIndex = processRunner.requests.indexOf(pushes[0] as ProcessRequest);
+  const remoteBefore = processRunner.requests
+    .slice(0, pushIndex)
+    .findLast((request) => request.arguments[0] === "ls-remote");
+  const remoteAfter = processRunner.requests
+    .slice(pushIndex + 1)
+    .find((request) => request.arguments[0] === "ls-remote");
+  assert.notEqual(remoteBefore, undefined);
+  assert.notEqual(remoteAfter, undefined);
+  for (const request of [remoteBefore, pushes[0], remoteAfter]) {
+    assert.equal(request?.arguments.includes(repository.sourcePushUrl), true);
+    assert.equal(request?.arguments.includes(repository.sourceRemote), false);
+    assert.equal(request?.environment.GIT_DIR, pushes[0]?.environment.GIT_DIR);
+    assert.equal(request?.environment.GIT_NO_REPLACE_OBJECTS, "1");
+  }
+  assert.equal(
+    processRunner.requests.every((request) =>
+      request.environment.GIT_NO_REPLACE_OBJECTS === "1"),
+    true,
+  );
 });
 
 test("push execution disables repository pre-push hooks", async (t) => {
@@ -785,6 +921,89 @@ test("push execution rejects a push URL changed after planning before writing", 
     (error: unknown) => isToolError(error, "REPOSITORY_ERROR", /fetch|push|identit/i),
   );
   assert.equal(processRunner.requests.some(isPushRequest), false);
+});
+
+test("push execution cannot be redirected at the process spawn boundary", async (t) => {
+  const fixture = await fixtureFor(t);
+  const localHead = await fixture.commitFile(
+    "src/local.ts",
+    "export const local = true;\n",
+    "local",
+  );
+  const originalRemotePath = fixture.remotePath;
+  const redirectedRemotePath = resolve(fixture.root, "redirected-remote.git");
+  await fixture.git(["init", "--bare", "--initial-branch=main", redirectedRemotePath]);
+  let redirected = false;
+  const processRunner: ProcessRunner = {
+    async run(request) {
+      if (!redirected && isPushRequest(request)) {
+        redirected = true;
+        await fixture.git(["remote", "set-url", "origin", redirectedRemotePath]);
+      }
+      return nodeProcessRunner.run(request);
+    },
+  };
+  const repository = await discoverRepository({
+    cwd: fixture.worktreePath,
+    processRunner,
+    targetBranch: "main",
+  });
+  const plan = await planSourceBranchPush(repository, { allowPush: true });
+
+  await assert.rejects(
+    executeSourceBranchPush(repository, plan, { authorized: true }),
+    (error: unknown) => isToolError(error, "CONCURRENT_UPDATE", /repository|remote|changed/i),
+  );
+
+  await fixture.git(["remote", "set-url", "origin", originalRemotePath]);
+  assert.equal(await fixture.remoteHead(), localHead);
+  await fixture.git(["remote", "set-url", "origin", redirectedRemotePath]);
+  assert.equal(await fixture.remoteHead(), null);
+});
+
+test("push exact endpoint cannot be rewritten by concurrent Git config", async (t) => {
+  const fixture = await fixtureFor(t);
+  const localHead = await fixture.commitFile(
+    "src/local.ts",
+    "export const local = true;\n",
+    "local",
+  );
+  const originalRemotePath = fixture.remotePath;
+  const originalEndpoint = pathToFileURL(originalRemotePath).href;
+  const redirectedRemotePath = resolve(fixture.root, "rewritten-remote.git");
+  const redirectedEndpoint = pathToFileURL(redirectedRemotePath).href;
+  await fixture.git(["init", "--bare", "--initial-branch=main", redirectedRemotePath]);
+  await fixture.git(["remote", "set-url", "origin", originalEndpoint]);
+  let redirected = false;
+  const processRunner: ProcessRunner = {
+    async run(request) {
+      if (!redirected && isPushRequest(request)) {
+        redirected = true;
+        await fixture.git([
+          "config",
+          `url.${redirectedEndpoint}.pushInsteadOf`,
+          originalEndpoint,
+        ]);
+      }
+      return nodeProcessRunner.run(request);
+    },
+  };
+  const repository = await discoverRepository({
+    cwd: fixture.worktreePath,
+    processRunner,
+    targetBranch: "main",
+  });
+  const plan = await planSourceBranchPush(repository, { allowPush: true });
+
+  await assert.rejects(
+    executeSourceBranchPush(repository, plan, { authorized: true }),
+    (error: unknown) => isToolError(error, "CONCURRENT_UPDATE", /repository|remote|changed/i),
+  );
+
+  await fixture.git(["config", "--unset-all", `url.${redirectedEndpoint}.pushInsteadOf`]);
+  assert.equal(await fixture.remoteHead(), localHead);
+  await fixture.git(["remote", "set-url", "origin", redirectedRemotePath]);
+  assert.equal(await fixture.remoteHead(), null);
 });
 
 test("push execution cannot be redirected after plan validation", async (t) => {

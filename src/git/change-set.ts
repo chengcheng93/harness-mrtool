@@ -1,5 +1,6 @@
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { mkdir, mkdtemp, realpath, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import type { DiffItem } from "../bundle/detect-profile.ts";
 import { ToolError } from "../contracts/errors.ts";
@@ -35,89 +36,87 @@ function changeSetError(message: string): ToolError<"REPOSITORY_ERROR"> {
   });
 }
 
-async function assertDeterministicAttributes(
+interface IsolatedGitView {
+  readonly dispose: () => Promise<void>;
+  readonly environment: Readonly<Record<string, string | undefined>>;
+}
+
+function isolatedConfigEnvironment(
+  temporaryRoot: string,
+): Readonly<Record<string, string | undefined>> {
+  const nullDevice = process.platform === "win32" ? "NUL" : "/dev/null";
+  return Object.freeze({
+    GIT_ALTERNATE_OBJECT_DIRECTORIES: undefined,
+    GIT_COMMON_DIR: undefined,
+    GIT_CONFIG: undefined,
+    GIT_CONFIG_COUNT: "0",
+    GIT_CONFIG_GLOBAL: nullDevice,
+    GIT_CONFIG_PARAMETERS: undefined,
+    GIT_CONFIG_SYSTEM: nullDevice,
+    GIT_DIR: undefined,
+    GIT_INDEX_FILE: undefined,
+    GIT_OBJECT_DIRECTORY: undefined,
+    GIT_WORK_TREE: undefined,
+    XDG_CONFIG_HOME: join(temporaryRoot, "xdg"),
+  });
+}
+
+async function createIsolatedGitView(
   repository: RepositorySnapshot,
-): Promise<void> {
-  let configuredAttributes;
-  try {
-    configuredAttributes = await repository.runner.run([
-      "config",
-      "--null",
-      "--get-all",
-      "core.attributesFile",
-    ]);
-  } catch (error) {
-    throw new ToolError(
-      "REPOSITORY_ERROR",
-      "Cannot read canonical ChangeSet: Git attribute configuration is unavailable",
-      {
-        field: "changeSet.attributes",
-        expected: "no configured core.attributesFile",
-        actual: "Git process failure",
-        safeNextStep: "Inspect Git attribute configuration and retry.",
-      },
-      error,
-    );
+): Promise<IsolatedGitView> {
+  const objectDirectory = await realpath(await readGitText(
+    repository.runner,
+    ["rev-parse", "--path-format=absolute", "--git-path", "objects"],
+    "repository object directory",
+  ));
+  if (!(await stat(objectDirectory)).isDirectory()) {
+    throw changeSetError("repository object directory is not a directory");
   }
-  if (configuredAttributes.timedOut ||
-      ![0, 1].includes(configuredAttributes.exitCode ?? -1)) {
-    throw changeSetError("Git attribute configuration could not be read");
-  }
-  if (configuredAttributes.exitCode === 0) {
-    throw new ToolError(
-      "REPOSITORY_ERROR",
-      "Cannot read canonical ChangeSet: core.attributesFile may alter committed diff classification",
-      {
-        field: "changeSet.attributes",
-        expected: "core.attributesFile unset",
-        actual: "configured",
-        safeNextStep: "Unset core.attributesFile for this invocation and retry.",
-      },
-    );
-  }
-  if (configuredAttributes.stdout.length !== 0) {
-    throw changeSetError("Git returned malformed attribute configuration output");
+  const objectFormat = await readGitText(
+    repository.runner,
+    ["rev-parse", "--show-object-format"],
+    "repository object format",
+  );
+  if (objectFormat !== "sha1" && objectFormat !== "sha256") {
+    throw changeSetError("repository object format is unsupported");
   }
 
-  const infoAttributesPath = resolve(
-    repository.root,
-    await readGitText(
-      repository.runner,
-      ["rev-parse", "--git-path", "info/attributes"],
-      "repository attribute override path",
-    ),
-  );
-  let infoAttributes: Buffer;
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "harness-mrtool-change-set-"));
+  const gitDirectory = join(temporaryRoot, "git");
+  const templateDirectory = join(temporaryRoot, "template");
+  const baseEnvironment = isolatedConfigEnvironment(temporaryRoot);
   try {
-    infoAttributes = await readFile(infoAttributesPath);
+    await Promise.all([
+      mkdir(templateDirectory),
+      mkdir(join(temporaryRoot, "xdg")),
+    ]);
+    await runGitChecked(
+      repository.runner,
+      [
+        "init",
+        "--bare",
+        "--quiet",
+        `--object-format=${objectFormat}`,
+        `--template=${templateDirectory}`,
+        gitDirectory,
+      ],
+      "isolated ChangeSet repository",
+      baseEnvironment,
+    );
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return;
-    }
-    throw new ToolError(
-      "REPOSITORY_ERROR",
-      "Cannot read canonical ChangeSet: repository attribute overrides are unreadable",
-      {
-        field: "changeSet.attributes",
-        expected: "an absent or empty info/attributes file",
-        actual: "unreadable",
-        safeNextStep: "Inspect .git/info/attributes permissions and retry.",
-      },
-      error,
-    );
+    await rm(temporaryRoot, { force: true, recursive: true });
+    throw error;
   }
-  if (infoAttributes.length !== 0) {
-    throw new ToolError(
-      "REPOSITORY_ERROR",
-      "Cannot read canonical ChangeSet: info/attributes may alter committed diff classification",
-      {
-        field: "changeSet.attributes",
-        expected: "an absent or empty info/attributes file",
-        actual: "non-empty",
-        safeNextStep: "Remove repository-local attribute overrides and retry.",
-      },
-    );
-  }
+  return Object.freeze({
+    async dispose(): Promise<void> {
+      await rm(temporaryRoot, { force: true, recursive: true });
+    },
+    environment: Object.freeze({
+      ...baseEnvironment,
+      GIT_DIR: gitDirectory,
+      GIT_OBJECT_DIRECTORY: objectDirectory,
+    }),
+  });
 }
 
 function decodePath(value: Buffer): string {
@@ -304,63 +303,67 @@ function compareItems(left: DiffItem, right: DiffItem): number {
 export async function readCanonicalChangeSet(
   repository: RepositorySnapshot,
 ): Promise<CanonicalChangeSet> {
-  await assertDeterministicAttributes(repository);
-  const mergeBases = (await readGitText(
-    repository.runner,
-    ["merge-base", "--all", repository.targetRefSha, repository.sourceHeadSha],
-    "merge base",
-  )).split(/\r?\n/u).filter((value) => value !== "");
-  if (mergeBases.length !== 1 || mergeBases[0] === undefined) {
-    throw changeSetError("repository history does not have one unique merge base");
-  }
-  const mergeBaseSha = assertObjectId(mergeBases[0], "merge base");
-  const commonArguments = [
-    `--attr-source=${repository.sourceHeadSha}`,
-    "-c",
-    `core.attributesFile=${process.platform === "win32" ? "NUL" : "/dev/null"}`,
-    "-c",
-    "diff.renames=true",
-    "-c",
-    "diff.renameLimit=0",
-    "diff",
-    "--no-ext-diff",
-    "--no-textconv",
-    "--find-renames=50%",
-    "--ignore-submodules=none",
-  ] as const;
-  const [raw, numstat] = await Promise.all([
-    runGitChecked(
+  const isolated = await createIsolatedGitView(repository);
+  try {
+    const mergeBases = (await readGitText(
       repository.runner,
-      [...commonArguments, "--raw", "-z", "--no-abbrev", mergeBaseSha, repository.sourceHeadSha, "--"],
-      "raw committed diff",
-    ),
-    runGitChecked(
-      repository.runner,
-      [...commonArguments, "--numstat", "-z", mergeBaseSha, repository.sourceHeadSha, "--"],
-      "numstat committed diff",
-    ),
-  ]);
-  await assertDeterministicAttributes(repository);
-  const rawRecords = parseRawDiff(raw);
-  const binaryByPath = parseNumstat(numstat);
-  const items = rawRecords.map((record) => {
-    const key = record.status === "R"
-      ? numstatKey(record.oldPath, record.newPath)
-      : numstatKey(record.oldPath ?? record.newPath, record.oldPath ?? record.newPath);
-    const binary = binaryByPath.get(key);
-    if (binary === undefined) {
-      throw changeSetError("raw and numstat diff records do not match");
+      ["merge-base", "--all", repository.targetRefSha, repository.sourceHeadSha],
+      "merge base",
+      isolated.environment,
+    )).split(/\r?\n/u).filter((value) => value !== "");
+    if (mergeBases.length !== 1 || mergeBases[0] === undefined) {
+      throw changeSetError("repository history does not have one unique merge base");
     }
-    binaryByPath.delete(key);
-    return itemFor(record, binary);
-  }).sort(compareItems);
-  if (binaryByPath.size !== 0) {
-    throw changeSetError("numstat contains records absent from raw diff");
+    const mergeBaseSha = assertObjectId(mergeBases[0], "merge base");
+    const commonArguments = [
+      `--attr-source=${repository.sourceHeadSha}`,
+      "-c",
+      "diff.renames=true",
+      "-c",
+      "diff.renameLimit=0",
+      "diff",
+      "--no-ext-diff",
+      "--no-textconv",
+      "--find-renames=50%",
+      "--ignore-submodules=none",
+    ] as const;
+    const [raw, numstat] = await Promise.all([
+      runGitChecked(
+        repository.runner,
+        [...commonArguments, "--raw", "-z", "--no-abbrev", mergeBaseSha, repository.sourceHeadSha, "--"],
+        "raw committed diff",
+        isolated.environment,
+      ),
+      runGitChecked(
+        repository.runner,
+        [...commonArguments, "--numstat", "-z", mergeBaseSha, repository.sourceHeadSha, "--"],
+        "numstat committed diff",
+        isolated.environment,
+      ),
+    ]);
+    const rawRecords = parseRawDiff(raw);
+    const binaryByPath = parseNumstat(numstat);
+    const items = rawRecords.map((record) => {
+      const key = record.status === "R"
+        ? numstatKey(record.oldPath, record.newPath)
+        : numstatKey(record.oldPath ?? record.newPath, record.oldPath ?? record.newPath);
+      const binary = binaryByPath.get(key);
+      if (binary === undefined) {
+        throw changeSetError("raw and numstat diff records do not match");
+      }
+      binaryByPath.delete(key);
+      return itemFor(record, binary);
+    }).sort(compareItems);
+    if (binaryByPath.size !== 0) {
+      throw changeSetError("numstat contains records absent from raw diff");
+    }
+    return Object.freeze({
+      items: Object.freeze(items),
+      mergeBaseSha,
+      sourceHeadSha: repository.sourceHeadSha,
+      targetRefSha: repository.targetRefSha,
+    });
+  } finally {
+    await isolated.dispose();
   }
-  return Object.freeze({
-    items: Object.freeze(items),
-    mergeBaseSha,
-    sourceHeadSha: repository.sourceHeadSha,
-    targetRefSha: repository.targetRefSha,
-  });
 }

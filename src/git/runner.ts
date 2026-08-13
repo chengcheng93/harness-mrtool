@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { access, realpath, stat } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
-import { delimiter, isAbsolute, resolve } from "node:path";
+import { isAbsolute, relative, resolve } from "node:path";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
@@ -109,50 +109,63 @@ export interface GitRunnerOptions {
   readonly environment?: Readonly<Record<string, string | undefined>>;
   readonly gitExecutable?: string;
   readonly maxOutputBytes?: number;
+  readonly trustedGitRoots?: readonly string[];
   readonly timeoutMs?: number;
 }
 
-function environmentPath(
-  environment: Readonly<Record<string, string | undefined>>,
-): string | undefined {
-  if (process.platform !== "win32") return environment.PATH;
-  return Object.entries(environment)
-    .filter(([key]) => key.toLowerCase() === "path")
-    .at(-1)?.[1];
-}
-
-function validateInjectedExecutable(value: string): string {
+function validateAbsolutePath(value: string, subject: string): string {
   if (!isAbsolute(value) || value.includes("\u0000") || /[\r\n]/u.test(value)) {
-    throw new TypeError("Git executable must be an absolute path");
+    throw new TypeError(`${subject} must be an absolute path`);
   }
   return resolve(value);
 }
 
-async function resolveGitExecutable(
-  environment: Readonly<Record<string, string | undefined>>,
-): Promise<string> {
-  const pathValue = environmentPath(environment);
-  if (pathValue === undefined || pathValue === "") {
-    throw new Error("Git executable could not be resolved from PATH");
+async function validateExecutable(value: string): Promise<string> {
+  const canonical = await realpath(validateAbsolutePath(value, "Git executable"));
+  const metadata = await stat(canonical);
+  if (!metadata.isFile()) {
+    throw new TypeError("Git executable must identify a regular file");
   }
+  await access(canonical, process.platform === "win32" ? fsConstants.F_OK : fsConstants.X_OK);
+  return canonical;
+}
+
+function defaultTrustedGitRoots(): readonly string[] {
+  if (process.platform !== "win32") {
+    return Object.freeze([
+      "/usr/bin",
+      "/usr/local/bin",
+      ...(process.platform === "darwin" ? ["/opt/homebrew/bin", "/opt/local/bin"] : []),
+    ]);
+  }
+  return Object.freeze([
+    "C:\\Program Files\\Git\\cmd",
+    "C:\\Program Files\\Git\\bin",
+  ]);
+}
+
+function pathIsWithin(root: string, candidate: string): boolean {
+  const comparisonRoot = process.platform === "win32" ? root.toLowerCase() : root;
+  const comparisonCandidate = process.platform === "win32" ? candidate.toLowerCase() : candidate;
+  const remainder = relative(comparisonRoot, comparisonCandidate);
+  return remainder === "" || (!remainder.startsWith("..") && !isAbsolute(remainder));
+}
+
+async function resolveGitExecutable(trustedRoots: readonly string[]): Promise<string> {
   const executableName = process.platform === "win32" ? "git.exe" : "git";
-  for (const rawDirectory of pathValue.split(delimiter)) {
-    const unquoted = rawDirectory.length >= 2 && rawDirectory.startsWith('"') && rawDirectory.endsWith('"')
-      ? rawDirectory.slice(1, -1)
-      : rawDirectory;
-    if (!isAbsolute(unquoted)) continue;
-    const candidate = resolve(unquoted, executableName);
+  for (const rawRoot of trustedRoots) {
     try {
-      const canonical = await realpath(candidate);
-      const metadata = await stat(canonical);
-      if (!metadata.isFile()) continue;
-      await access(canonical, process.platform === "win32" ? fsConstants.F_OK : fsConstants.X_OK);
-      return canonical;
+      const requestedRoot = validateAbsolutePath(rawRoot, "Trusted Git root");
+      const canonicalRoot = await realpath(requestedRoot);
+      const canonicalExecutable = await validateExecutable(resolve(canonicalRoot, executableName));
+      if (pathIsWithin(canonicalRoot, canonicalExecutable)) {
+        return canonicalExecutable;
+      }
     } catch {
-      // Keep searching the explicit absolute PATH entries.
+      // Keep searching the explicitly trusted roots.
     }
   }
-  throw new Error("Git executable could not be resolved from absolute PATH entries");
+  throw new Error("Git executable could not be resolved from trusted installation roots");
 }
 
 export class GitRunner {
@@ -173,16 +186,19 @@ export class GitRunner {
 
   private executable(): Promise<string> {
     if (this.options.gitExecutable !== undefined) {
-      return Promise.resolve(validateInjectedExecutable(this.options.gitExecutable));
+      this.gitExecutableResolution ??= validateExecutable(this.options.gitExecutable);
+      return this.gitExecutableResolution;
     }
-    this.gitExecutableResolution ??= resolveGitExecutable({
-      ...process.env,
-      ...this.options.environment,
-    });
+    this.gitExecutableResolution ??= resolveGitExecutable(
+      this.options.trustedGitRoots ?? defaultTrustedGitRoots(),
+    );
     return this.gitExecutableResolution;
   }
 
-  async run(arguments_: readonly string[]): Promise<ProcessResult> {
+  async run(
+    arguments_: readonly string[],
+    environmentOverride: Readonly<Record<string, string | undefined>> = {},
+  ): Promise<ProcessResult> {
     if (arguments_.some((argument) => argument.includes("\u0000"))) {
       throw new TypeError("Git arguments must not contain NUL bytes");
     }
@@ -193,6 +209,7 @@ export class GitRunner {
       environment: {
         ...process.env,
         ...this.options.environment,
+        ...environmentOverride,
         GIT_ATTR_NOSYSTEM: "1",
         GIT_CONFIG_NOSYSTEM: "1",
         GIT_NO_REPLACE_OBJECTS: "1",

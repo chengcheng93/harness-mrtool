@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { ToolError } from "../contracts/errors.ts";
 import {
   GitRunner,
+  type GitRunnerOptions,
   type ProcessResult,
   type ProcessRunner,
 } from "./runner.ts";
@@ -43,11 +44,15 @@ export interface RepositorySnapshot {
   readonly sourceBranch: string;
   readonly sourceHeadSha: string;
   readonly sourceProject: GitLabProjectIdentity | null;
+  readonly sourceFetchUrl: string;
+  readonly sourcePushUrl: string;
   readonly sourceRemote: string;
   readonly sourceRemoteIdentity: RemoteEndpointIdentity;
   readonly sourceRemoteRef: string;
   readonly targetBranch: string;
   readonly targetProject: GitLabProjectIdentity | null;
+  readonly targetFetchUrl: string;
+  readonly targetPushUrl: string;
   readonly targetRef: string;
   readonly targetRefSha: string;
   readonly targetRemote: string;
@@ -57,6 +62,7 @@ export interface RepositorySnapshot {
 
 export interface DiscoverRepositoryOptions {
   readonly cwd: string;
+  readonly gitRunnerOptions?: GitRunnerOptions;
   readonly processRunner?: ProcessRunner;
   readonly sourceRemote?: string;
   readonly targetBranch: string;
@@ -98,10 +104,11 @@ export async function runGitChecked(
   runner: GitRunner,
   arguments_: readonly string[],
   subject: string,
+  environmentOverride: Readonly<Record<string, string | undefined>> = {},
 ): Promise<Buffer> {
   let result: ProcessResult;
   try {
-    result = await runner.run(arguments_);
+    result = await runner.run(arguments_, environmentOverride);
   } catch (error) {
     throw repositoryError(
       `Git failed while reading ${subject}`,
@@ -128,8 +135,12 @@ export async function readGitText(
   runner: GitRunner,
   arguments_: readonly string[],
   subject: string,
+  environmentOverride: Readonly<Record<string, string | undefined>> = {},
 ): Promise<string> {
-  return decodeText(await runGitChecked(runner, arguments_, subject), subject).trim();
+  return decodeText(
+    await runGitChecked(runner, arguments_, subject, environmentOverride),
+    subject,
+  ).trim();
 }
 
 export function assertObjectId(value: string, subject: string): string {
@@ -450,7 +461,11 @@ async function readRemoteIdentity(
   runner: GitRunner,
   root: string,
   remote: string,
-): Promise<RemoteEndpointIdentity> {
+): Promise<{
+  readonly fetchUrl: string;
+  readonly identity: RemoteEndpointIdentity;
+  readonly pushUrl: string;
+}> {
   const [fetchUrl, pushUrl] = await Promise.all([
     readRemoteUrl(runner, remote, false),
     readRemoteUrl(runner, remote, true),
@@ -466,20 +481,24 @@ async function readRemoteIdentity(
       "Select or configure a remote whose fetch and push URLs identify the same project.",
     );
   }
-  return fetchIdentity;
+  return Object.freeze({ fetchUrl, identity: fetchIdentity, pushUrl });
 }
 
 export async function discoverRepository(
   options: DiscoverRepositoryOptions,
 ): Promise<RepositorySnapshot> {
-  const initialRunner = new GitRunner(options.cwd, options.processRunner);
+  const initialRunner = new GitRunner(
+    options.cwd,
+    options.processRunner,
+    options.gitRunnerOptions,
+  );
   await validateBranch(initialRunner, options.targetBranch, "target branch");
   const root = resolve(await readGitText(
     initialRunner,
     ["rev-parse", "--show-toplevel"],
     "repository root",
   ));
-  const runner = new GitRunner(root, options.processRunner);
+  const runner = new GitRunner(root, options.processRunner, options.gitRunnerOptions);
   const sourceBranch = await readGitText(
     runner,
     ["symbolic-ref", "--quiet", "--short", "HEAD"],
@@ -494,10 +513,12 @@ export async function discoverRepository(
   const targetRemote = options.targetRemote ?? sourceRemote;
   validateRemote(targetRemote, "target remote");
   const configuredTarget = await resolveRemote(runner, targetRemote);
-  const sourceRemoteIdentity = await readRemoteIdentity(runner, root, sourceRemote);
-  const targetRemoteIdentity = configuredTarget === sourceRemote
-    ? sourceRemoteIdentity
+  const sourceRemoteConfiguration = await readRemoteIdentity(runner, root, sourceRemote);
+  const targetRemoteConfiguration = configuredTarget === sourceRemote
+    ? sourceRemoteConfiguration
     : await readRemoteIdentity(runner, root, configuredTarget);
+  const sourceRemoteIdentity = sourceRemoteConfiguration.identity;
+  const targetRemoteIdentity = targetRemoteConfiguration.identity;
   if (sourceRemoteIdentity.kind !== targetRemoteIdentity.kind) {
     throw repositoryError(
       "Source and target remotes do not provide one GitLab host identity",
@@ -537,13 +558,17 @@ export async function discoverRepository(
     root,
     runner,
     sourceBranch,
+    sourceFetchUrl: sourceRemoteConfiguration.fetchUrl,
     sourceHeadSha,
     sourceProject,
+    sourcePushUrl: sourceRemoteConfiguration.pushUrl,
     sourceRemote,
     sourceRemoteIdentity,
     sourceRemoteRef: `refs/heads/${sourceBranch}`,
     targetBranch: options.targetBranch,
+    targetFetchUrl: targetRemoteConfiguration.fetchUrl,
     targetProject,
+    targetPushUrl: targetRemoteConfiguration.pushUrl,
     targetRef,
     targetRefSha,
     targetRemote: configuredTarget,
@@ -570,13 +595,13 @@ export async function assertCleanWorktree(
 export async function assertRepositoryUnchanged(
   repository: RepositorySnapshot,
 ): Promise<void> {
-  const sourceIdentity = await readRemoteIdentity(
+  const sourceConfiguration = await readRemoteIdentity(
     repository.runner,
     repository.root,
     repository.sourceRemote,
   );
-  const targetIdentity = repository.targetRemote === repository.sourceRemote
-    ? sourceIdentity
+  const targetConfiguration = repository.targetRemote === repository.sourceRemote
+    ? sourceConfiguration
     : await readRemoteIdentity(repository.runner, repository.root, repository.targetRemote);
   const [branch, head, target] = await Promise.all([
     readGitText(repository.runner, ["symbolic-ref", "--quiet", "--short", "HEAD"], "source branch"),
@@ -591,8 +616,12 @@ export async function assertRepositoryUnchanged(
     branch !== repository.sourceBranch ||
     head !== repository.sourceHeadSha ||
     target !== repository.targetRefSha ||
-    sourceIdentity.key !== repository.sourceRemoteIdentity.key ||
-    targetIdentity.key !== repository.targetRemoteIdentity.key
+    sourceConfiguration.identity.key !== repository.sourceRemoteIdentity.key ||
+    sourceConfiguration.fetchUrl !== repository.sourceFetchUrl ||
+    sourceConfiguration.pushUrl !== repository.sourcePushUrl ||
+    targetConfiguration.identity.key !== repository.targetRemoteIdentity.key ||
+    targetConfiguration.fetchUrl !== repository.targetFetchUrl ||
+    targetConfiguration.pushUrl !== repository.targetPushUrl
   ) {
     throw repositoryError(
       "Repository state changed after discovery",
