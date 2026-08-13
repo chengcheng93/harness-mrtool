@@ -38,6 +38,7 @@ export function collectSeaBuildInputs(repositoryRoot) {
     ...filesUnder(resolve(repositoryRoot, "src")),
     resolve(repositoryRoot, "scripts/build.mjs"),
     resolve(repositoryRoot, "scripts/build-sea.mjs"),
+    resolve(repositoryRoot, "scripts/sea-build-orchestrator.mjs"),
     resolve(repositoryRoot, "scripts/sea-build-receipt.mjs"),
     resolve(repositoryRoot, "scripts/sea-verification.mjs"),
     resolve(repositoryRoot, "sea-config.json"),
@@ -55,19 +56,33 @@ export function createSeaBuildReceipt(
   artifactPath,
   buildInputPaths,
 ) {
-  const inputs = buildInputPaths
+  return createSeaBuildReceiptFromSnapshot(
+    repositoryRoot,
+    artifactPath,
+    createSeaBuildInputSnapshot(repositoryRoot, buildInputPaths),
+  );
+}
+
+export function createSeaBuildInputSnapshot(repositoryRoot, buildInputPaths) {
+  return buildInputPaths
     .map((path) => ({
       path: portableRelativePath(repositoryRoot, path),
       sha256: sha256(path),
     }))
     .sort((left, right) => left.path.localeCompare(right.path));
+}
 
+export function createSeaBuildReceiptFromSnapshot(
+  repositoryRoot,
+  artifactPath,
+  inputSnapshot,
+) {
   return {
     artifact: {
       path: portableRelativePath(repositoryRoot, artifactPath),
       sha256: sha256(artifactPath),
     },
-    inputs,
+    inputs: inputSnapshot,
     schemaVersion: 1,
   };
 }

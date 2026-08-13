@@ -5,11 +5,8 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { assertExactNodeVersion, buildApplication } from "./build.mjs";
-import {
-  collectSeaBuildInputs,
-  createSeaBuildReceipt,
-  writeSeaBuildReceipt,
-} from "./sea-build-receipt.mjs";
+import { orchestrateSeaBuild } from "./sea-build-orchestrator.mjs";
+import { collectSeaBuildInputs } from "./sea-build-receipt.mjs";
 import {
   finalizeSeaExecutable,
   verifySeaExecutable,
@@ -49,34 +46,26 @@ function runBlobGeneration() {
 
 export async function buildSeaExecutable() {
   assertExactNodeVersion();
-  await rm(distDirectory, { recursive: true, force: true });
-  await buildApplication();
-  runBlobGeneration();
-  await copyFile(process.execPath, executablePath);
-  try {
-    await finalizeSeaExecutable(executablePath, {
-      injectBlob: async () =>
-        inject(executablePath, "NODE_SEA_BLOB", await readFile(blobPath), {
-          sentinelFuse,
-        }),
-      removeArtifact: (path) => rm(path, { force: true }),
-      verifyExecutable: verifySeaExecutable,
-    });
-    writeSeaBuildReceipt(
-      receiptPath,
-      createSeaBuildReceipt(
-        repositoryRoot,
-        executablePath,
-        collectSeaBuildInputs(repositoryRoot),
-      ),
-    );
-  } catch (error) {
-    await Promise.all([
-      rm(executablePath, { force: true }),
-      rm(receiptPath, { force: true }),
-    ]);
-    throw error;
-  }
+  await orchestrateSeaBuild({
+    artifactPath: executablePath,
+    buildArtifact: async () => {
+      await rm(distDirectory, { recursive: true, force: true });
+      await buildApplication();
+      runBlobGeneration();
+      await copyFile(process.execPath, executablePath);
+      await finalizeSeaExecutable(executablePath, {
+        injectBlob: async () =>
+          inject(executablePath, "NODE_SEA_BLOB", await readFile(blobPath), {
+            sentinelFuse,
+          }),
+        removeArtifact: (path) => rm(path, { force: true }),
+        verifyExecutable: verifySeaExecutable,
+      });
+    },
+    collectBuildInputPaths: () => collectSeaBuildInputs(repositoryRoot),
+    receiptPath,
+    repositoryRoot,
+  });
 }
 
 await buildSeaExecutable();
