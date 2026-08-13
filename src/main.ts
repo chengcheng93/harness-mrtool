@@ -19,6 +19,7 @@ import { verifyDiagnosticMarker } from "./render/marker.ts";
 import { renderProjectTemplate } from "./render/project-template.ts";
 import { renderTitle } from "./render/title.ts";
 import { normalizeRuntimeArguments } from "./runtime-arguments.ts";
+import { executeCliJson, type CliCommandHandlers } from "./cli/execute.ts";
 
 declare const __HARNESS_MRTOOL_VERSION__: string;
 declare const __HARNESS_MRTOOL_BOOTSTRAP_BUNDLE__: unknown;
@@ -61,6 +62,21 @@ function fail(message: string, output: string | undefined): void {
     process.stderr.write(`${message}\n`);
   }
   process.exitCode = 2;
+}
+
+const publicCommandHandlers: CliCommandHandlers = {
+  version: () => ({
+    output: {
+      message: "Harness MR Tool version inspected",
+      data: { version: cliVersion, sea: isSea() },
+    },
+  }),
+};
+
+function requestsJsonOutput(arguments_: readonly string[]): boolean {
+  return arguments_.some((argument, index) =>
+    argument === "--output=json" ||
+    (argument === "--output" && arguments_[index + 1] === "json"));
 }
 
 function writeFailure(error: ToolError<FailureCode>): void {
@@ -351,6 +367,19 @@ async function main(arguments_: readonly string[]): Promise<void> {
   }
 
   if (command !== "self-test") {
+    if (requestsJsonOutput(arguments_)) {
+      const result = await executeCliJson(arguments_, {
+        cliVersion,
+        stdout: {
+          write(chunk, callback) {
+            return process.stdout.write(chunk, callback);
+          },
+        },
+        handlers: publicCommandHandlers,
+      });
+      process.exitCode = result.exitCode;
+      return;
+    }
     fail("Usage: harness-mrtool self-test --output json", output);
     return;
   }

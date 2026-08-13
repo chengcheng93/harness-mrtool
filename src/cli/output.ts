@@ -91,6 +91,10 @@ export class CliJsonOutput {
     private readonly sink: CliOutputSink,
   ) {}
 
+  hasStarted(): boolean {
+    return this.emitted;
+  }
+
   async success(options: SuccessOptions = {}): Promise<CliOutputResult> {
     const serialized = serializeOutput(createSuccessOutput(this.context, options));
     assertNoRawContextBearer(serialized);
