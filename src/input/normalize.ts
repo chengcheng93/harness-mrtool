@@ -374,18 +374,110 @@ function assertTitle(titleSummary: string): void {
 
 function containsConservativeV1TitleMarkup(title: string): boolean {
   if (/^\s{0,3}(?:#{1,6}\s|>|[-+]\s|\d{1,9}[.)]\s|\[[^\]\r\n]+\]:)/u.test(title) ||
-      /^\s{0,3}(?:-\s*){3,}$/u.test(title)) {
+      /^\s{0,3}(?:`{3,}|~{3,})/u.test(title) ||
+      /^\s{0,3}(?:(?:\*\s*){3,}|(?:_\s*){3,}|(?:-\s*){3,})$/u.test(title)) {
     return true;
   }
   return /!?\[[^\]\r\n]+\](?:\([^\r\n)]*\)|\[[^\]\r\n]*\])/u.test(title) ||
     /&(?:#[xX][0-9a-fA-F]+|#[0-9]+|[A-Za-z][A-Za-z0-9]+);/u.test(title) ||
     /<(?:[A-Za-z][A-Za-z0-9+.-]{1,31}:[^ <>\r\n]*|[^ <>@\r\n]+@[^ <>\r\n]+)>/u.test(title) ||
-    /<\/?[A-Za-z][^>\r\n]*>/u.test(title) ||
+    /<!--|<\?|<![A-Z]|<!\[CDATA\[/u.test(title) ||
+    /<\/?[A-Za-z][A-Za-z0-9-]*(?:\s+[^<>\r\n]*)?\s*\/?>/u.test(title) ||
     /\\[!"#$%&'()*+,./:;<=>?@[\]^_`{|}~-]/u.test(title) ||
-    /(^|[^\p{L}\p{N}])\*[^*\r\n]+\*(?!\*)/u.test(title) ||
-    /(^|[^\p{L}\p{N}])_[^_\r\n]+_(?![\p{L}\p{N}_])/u.test(title) ||
     /~~[^~\r\n]+~~/u.test(title) ||
-    /(`+)[^`\r\n]+\1/u.test(title);
+    hasMatchingCodeSpanRuns(title) ||
+    hasMatchingEmphasisRuns(title);
+}
+
+function hasMatchingCodeSpanRuns(title: string): boolean {
+  const runs: { readonly start: number; readonly end: number }[] = [];
+  for (let index = 0; index < title.length;) {
+    if (title[index] !== "`") {
+      index += 1;
+      continue;
+    }
+    const start = index;
+    while (title[index] === "`") {
+      index += 1;
+    }
+    runs.push({ start, end: index });
+  }
+  return runs.some((opener, index) => runs.slice(index + 1).some((closer) =>
+    closer.start > opener.end && closer.end - closer.start === opener.end - opener.start));
+}
+
+interface EmphasisDelimiterRun {
+  readonly marker: "*" | "_";
+  readonly length: number;
+  readonly canOpen: boolean;
+  readonly canClose: boolean;
+}
+
+function isCommonMarkWhitespace(value: string | undefined): boolean {
+  return value === undefined || /^[\t\n\f\r \p{Zs}]$/u.test(value);
+}
+
+function isCommonMarkPunctuation(value: string | undefined): boolean {
+  return value !== undefined && /^[\p{P}\p{S}]$/u.test(value);
+}
+
+function emphasisDelimiterRuns(title: string): EmphasisDelimiterRun[] {
+  const characters = [...title];
+  const runs: EmphasisDelimiterRun[] = [];
+  for (let index = 0; index < characters.length;) {
+    const marker = characters[index];
+    if (marker !== "*" && marker !== "_") {
+      index += 1;
+      continue;
+    }
+    const start = index;
+    while (characters[index] === marker) {
+      index += 1;
+    }
+    const before = characters[start - 1];
+    const after = characters[index];
+    const beforeWhitespace = isCommonMarkWhitespace(before);
+    const afterWhitespace = isCommonMarkWhitespace(after);
+    const beforePunctuation = isCommonMarkPunctuation(before);
+    const afterPunctuation = isCommonMarkPunctuation(after);
+    const leftFlanking = !afterWhitespace &&
+      (!afterPunctuation || beforeWhitespace || beforePunctuation);
+    const rightFlanking = !beforeWhitespace &&
+      (!beforePunctuation || afterWhitespace || afterPunctuation);
+    runs.push({
+      marker,
+      length: index - start,
+      canOpen: marker === "*"
+        ? leftFlanking
+        : leftFlanking && (!rightFlanking || beforePunctuation),
+      canClose: marker === "*"
+        ? rightFlanking
+        : rightFlanking && (!leftFlanking || afterPunctuation),
+    });
+  }
+  return runs;
+}
+
+function hasMatchingEmphasisRuns(title: string): boolean {
+  const runs = emphasisDelimiterRuns(title);
+  for (let openerIndex = 0; openerIndex < runs.length; openerIndex += 1) {
+    const opener = runs[openerIndex];
+    if (opener === undefined || !opener.canOpen) {
+      continue;
+    }
+    for (const closer of runs.slice(openerIndex + 1)) {
+      if (closer.marker !== opener.marker || !closer.canClose) {
+        continue;
+      }
+      const violatesRuleOfThree = (opener.canClose || closer.canOpen) &&
+        (opener.length + closer.length) % 3 === 0 &&
+        (opener.length % 3 !== 0 || closer.length % 3 !== 0);
+      if (!violatesRuleOfThree) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 function assertImpactAreas(request: Request): void {

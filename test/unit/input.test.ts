@@ -524,9 +524,16 @@ test("uses the conservative V1 plain-title rule and allows business punctuation"
   const markupTitles = [
     "Fix *thing*",
     "Fix _thing_",
+    "Fix **thing**",
+    "Fix __thing__",
+    "Fix ***thing***",
+    "Fix ___thing___",
+    "Fix foo*bar*baz",
+    "Fix foo***bar***baz",
     "Fix ~~thing~~",
     "Fix `thing`",
     "Fix <em>thing</em>",
+    "Fix <!-- hidden -->",
     "Fix <https://example.invalid>",
     "Fix \\*thing\\*",
     "Fix &amp; preserve behavior",
@@ -558,6 +565,9 @@ test("uses the conservative V1 plain-title rule and allows business punctuation"
     "Fix foo_bar mapping",
     "Compare x < y and y > z",
     "Use C:\\temp path",
+    "Compute 2 * 3 * 4",
+    "Use _ wildcard _ literally",
+    "Preserve foo**bar*baz literally",
   ]) {
     const request = validRequest();
     (request.title as Record<string, unknown>).titleSummary = titleSummary;

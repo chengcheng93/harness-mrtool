@@ -1201,6 +1201,7 @@ Profile 可以提出建议，例如 `fix -> type::bug` 或 `docs -> type::doc`�
 - 只用于 MR title；
 - 必须是 trim 后非空的单行文本；
 - 不得包含 Markdown、换行、`Draft:` 或 `[type][module]` 前缀；
+- 单行 Markdown 判定对 emphasis delimiter run 使用 CommonMark 的 Unicode whitespace/punctuation left/right-flanking、underscore intraword 和 rule-of-three 规则；HTML comment/tag/autolink、entity、反斜线转义、code span、link/image 和 block marker 也必须拒绝，但不能误拒绝没有形成 Markdown 的普通业务标点；
 - 由渲染器拼接完整 title。
 
 `title.type` 与 `title.module`：
