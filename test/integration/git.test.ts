@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdir, writeFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { chmod, copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { isAbsolute, resolve } from "node:path";
 import test, { type TestContext } from "node:test";
 
 import { isToolError } from "../../src/contracts/errors.ts";
@@ -39,6 +39,10 @@ class RecordingProcessRunner implements ProcessRunner {
   }
 }
 
+function isPushRequest(request: ProcessRequest): boolean {
+  return request.arguments[0] === "push" || request.arguments[2] === "push";
+}
+
 type PushFault = "post-read-fails" | "post-read-other" | "timeout-after-write";
 
 class FaultingPushRunner implements ProcessRunner {
@@ -75,7 +79,7 @@ class FaultingPushRunner implements ProcessRunner {
       }
     }
     const result = await nodeProcessRunner.run(request);
-    if (request.arguments[0] === "push" && this.fault === "timeout-after-write") {
+    if (isPushRequest(request) && this.fault === "timeout-after-write") {
       return { ...result, exitCode: null, timedOut: true };
     }
     return result;
@@ -98,17 +102,43 @@ test("GitRunner always invokes git with an argv array and shell disabled", async
   };
   const runner = new GitRunner("C:\\fixture", processRunner, {
     environment: { GIT_ATTR_NOSYSTEM: "0", GIT_TERMINAL_PROMPT: "1" },
+    gitExecutable: resolve(process.cwd(), "trusted-git.exe"),
   });
 
   const result = await runner.run(["--version"]);
 
   assert.equal(result.stdout.toString("utf8"), "git version fixture\n");
   assert.equal(requests.length, 1);
-  assert.equal(requests[0]?.executable, "git");
+  assert.equal(requests[0]?.executable, resolve(process.cwd(), "trusted-git.exe"));
+  assert.equal(isAbsolute(requests[0]?.executable ?? ""), true);
   assert.deepEqual(requests[0]?.arguments, ["--version"]);
   assert.equal(requests[0]?.shell, false);
   assert.equal(requests[0]?.environment.GIT_ATTR_NOSYSTEM, "1");
+  assert.equal(requests[0]?.environment.GIT_NO_REPLACE_OBJECTS, "1");
   assert.equal(requests[0]?.environment.GIT_TERMINAL_PROMPT, "0");
+});
+
+test("GitRunner does not execute a repository-local git.exe on Windows", {
+  skip: process.platform !== "win32",
+}, async (t) => {
+  const fixture = await fixtureFor(t);
+  const systemRoot = process.env.SystemRoot;
+  assert.notEqual(systemRoot, undefined);
+  await copyFile(
+    resolve(systemRoot as string, "System32", "where.exe"),
+    resolve(fixture.worktreePath, "git.exe"),
+  );
+  const processRunner = new RecordingProcessRunner();
+
+  const result = await new GitRunner(fixture.worktreePath, processRunner).run(["--version"]);
+
+  assert.equal(result.exitCode, 0);
+  assert.match(result.stdout.toString("utf8"), /^git version /u);
+  assert.equal(isAbsolute(processRunner.requests[0]?.executable ?? ""), true);
+  assert.notEqual(
+    processRunner.requests[0]?.executable.toLowerCase(),
+    resolve(fixture.worktreePath, "git.exe").toLowerCase(),
+  );
 });
 
 test("Git command failures are stable repository errors without stderr secrets", async () => {
@@ -310,6 +340,32 @@ test("canonical ChangeSet ignores default user attributes", async (t) => {
     changeSet.items.find((item) => item.status === "added" && item.newPath === "src/added.ts"),
     { status: "added", newPath: "src/added.ts", binary: false, submodule: false },
   );
+});
+
+test("canonical ChangeSet ignores repository-local replacement objects", async (t) => {
+  const fixture = await fixtureFor(t);
+  await fixture.commitFile("src/replaced.ts", "export const replaced = true;\n", "change");
+  const sourceSha = await fixture.head();
+  const targetSha = await fixture.targetHead();
+  const repository = await discoverRepository({
+    cwd: fixture.worktreePath,
+    targetBranch: "main",
+  });
+  const expected = await readCanonicalChangeSet(repository);
+  const targetTree = (await fixture.git(["rev-parse", `${targetSha}^{tree}`])).trim();
+  const replacement = (await fixture.git([
+    "commit-tree",
+    targetTree,
+    "-p",
+    targetSha,
+    "-m",
+    "replacement object",
+  ])).trim();
+  await fixture.git(["replace", sourceSha, replacement]);
+
+  const actual = await readCanonicalChangeSet(repository);
+
+  assert.deepEqual(actual, expected);
 });
 
 test("repository rejects fetch and push URLs for different GitLab projects", async (t) => {
@@ -525,19 +581,79 @@ test("behind source ref pushes exactly planned HEAD to the selected branch", asy
   assert.equal(result.afterSha, localHead);
   assert.equal(await fixture.remoteHead(), localHead);
   assert.equal(await fixture.remoteHead("main"), targetBefore);
-  const pushes = processRunner.requests.filter((request) => request.arguments[0] === "push");
+  const pushes = processRunner.requests.filter(isPushRequest);
   assert.equal(pushes.length, 1);
   assert.deepEqual(pushes[0]?.arguments, [
+    "-c",
+    "push.pushOption=",
     "push",
     "--porcelain",
     "--no-follow-tags",
+    "--no-push-option",
     "--recurse-submodules=no",
+    "--no-verify",
     "--",
     "origin",
     `${localHead}:refs/heads/feature/task7`,
   ]);
   assert.equal(pushes[0]?.arguments.some((argument) => argument.includes("force")), false);
   assert.equal(pushes[0]?.arguments.includes("--tags"), false);
+});
+
+test("push execution disables repository pre-push hooks", async (t) => {
+  const fixture = await fixtureFor(t);
+  const localHead = await fixture.commitFile(
+    "src/local.ts",
+    "export const local = true;\n",
+    "local",
+  );
+  await fixture.git(["branch", "unrelated", localHead]);
+  const hooksPath = resolve(fixture.root, "hooks");
+  await mkdir(hooksPath);
+  const hookPath = resolve(hooksPath, "pre-push");
+  await writeFile(
+    hookPath,
+    "#!/bin/sh\ngit push --no-verify origin refs/heads/unrelated:refs/heads/unrelated >/dev/null 2>&1\n",
+  );
+  await chmod(hookPath, 0o755);
+  await fixture.git(["config", "core.hooksPath", hooksPath]);
+  const repository = await discoverRepository({
+    cwd: fixture.worktreePath,
+    targetBranch: "main",
+  });
+  const plan = await planSourceBranchPush(repository, { allowPush: true });
+
+  const result = await executeSourceBranchPush(repository, plan, { authorized: true });
+
+  assert.equal(result.kind, "pushed");
+  assert.equal(await fixture.remoteHead(), localHead);
+  assert.equal(await fixture.remoteHead("unrelated"), null);
+});
+
+test("push execution clears configured GitLab push options", async (t) => {
+  const fixture = await fixtureFor(t);
+  await fixture.commitFile("src/local.ts", "export const local = true;\n", "local");
+  await fixture.git(["config", "push.pushOption", "merge_request.create"]);
+  await fixture.git(["--git-dir", fixture.remotePath, "config", "receive.advertisePushOptions", "true"]);
+  const receiveHook = resolve(fixture.remotePath, "hooks", "pre-receive");
+  await writeFile(
+    receiveHook,
+    "#!/bin/sh\nprintf '%s\\n' \"$GIT_PUSH_OPTION_COUNT\" \"${GIT_PUSH_OPTION_0-}\" > received-options.txt\n",
+  );
+  await chmod(receiveHook, 0o755);
+  const repository = await discoverRepository({
+    cwd: fixture.worktreePath,
+    targetBranch: "main",
+  });
+  const plan = await planSourceBranchPush(repository, { allowPush: true });
+
+  const result = await executeSourceBranchPush(repository, plan, { authorized: true });
+
+  assert.equal(result.kind, "pushed");
+  assert.equal(
+    await readFile(resolve(fixture.remotePath, "received-options.txt"), "utf8"),
+    "0\n\n",
+  );
 });
 
 test("remote ahead and diverged source refs are blocked without a push command", async (t) => {
@@ -558,7 +674,7 @@ test("remote ahead and diverged source refs are blocked without a push command",
       planSourceBranchPush(repository, { allowPush: true }),
       (error: unknown) => isToolError(error, "REPOSITORY_ERROR", /ahead/i),
     );
-    assert.equal(processRunner.requests.some((request) => request.arguments[0] === "push"), false);
+    assert.equal(processRunner.requests.some(isPushRequest), false);
   });
 
   await t.test("diverged", async (t) => {
@@ -581,7 +697,7 @@ test("remote ahead and diverged source refs are blocked without a push command",
     );
     const serialized = JSON.stringify(processRunner.requests.map((request) => request.arguments));
     assert.equal(serialized.includes("--force"), false);
-    assert.equal(processRunner.requests.some((request) => request.arguments[0] === "push"), false);
+    assert.equal(processRunner.requests.some(isPushRequest), false);
   });
 });
 
@@ -668,7 +784,7 @@ test("push execution rejects a push URL changed after planning before writing", 
     executeSourceBranchPush(repository, plan, { authorized: true }),
     (error: unknown) => isToolError(error, "REPOSITORY_ERROR", /fetch|push|identit/i),
   );
-  assert.equal(processRunner.requests.some((request) => request.arguments[0] === "push"), false);
+  assert.equal(processRunner.requests.some(isPushRequest), false);
 });
 
 test("push execution cannot be redirected after plan validation", async (t) => {

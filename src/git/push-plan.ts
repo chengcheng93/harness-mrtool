@@ -200,10 +200,14 @@ async function isAncestor(
 
 function commandFor(repository: RepositorySnapshot): readonly string[] {
   return Object.freeze([
+    "-c",
+    "push.pushOption=",
     "push",
     "--porcelain",
     "--no-follow-tags",
+    "--no-push-option",
     "--recurse-submodules=no",
+    "--no-verify",
     "--",
     repository.sourceRemote,
     `${repository.sourceHeadSha}:${repository.sourceRemoteRef}`,
