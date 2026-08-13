@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { once } from "node:events";
 import {
   lstat,
   mkdir,
+  appendFile,
   readFile,
   readdir,
+  rename,
   rm,
   symlink,
   utimes,
@@ -28,6 +32,7 @@ import {
 import { candidateTokenDigest } from "../../src/context/tokens.ts";
 import {
   ensurePrivateStateDirectory,
+  resolveWindowsPowerShellPath,
   type WindowsAclVerifier,
 } from "../../src/platform/state-path.ts";
 
@@ -380,6 +385,8 @@ test("rejects candidate or context bearer values anywhere in the document before
     for (const input of [
       { ...issueInput, candidates: [{ ...labelCandidate, description: `prefix ${bearer} suffix` }] },
       { ...issueInput, snapshot: { ...snapshot, note: `prefix ${bearer} suffix` } },
+      { ...issueInput, snapshot: { ...snapshot, note: `prefix ${bearer}A suffix` } },
+      { ...issueInput, snapshot: { ...snapshot, [bearer]: "bearer used as an object key" } },
     ]) {
       await assert.rejects(
         store.issue(input),
@@ -393,7 +400,7 @@ test("rejects candidate or context bearer values anywhere in the document before
 
   const nearMatches = [
     `hmrc1_${"A".repeat(42)}`,
-    `hmrx1_${"A".repeat(44)}`,
+    `hmrx1_${"A".repeat(42)}!`,
   ];
   await store.issue({
     ...issueInput,
@@ -404,6 +411,27 @@ test("rejects candidate or context bearer values anywhere in the document before
       description: `prefix ${description} suffix`,
     })),
   });
+});
+
+test("Windows ACL executable is resolved only from a canonical trusted SystemRoot", () => {
+  assert.equal(
+    resolveWindowsPowerShellPath({ SystemRoot: "C:\\Windows" }),
+    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+  );
+  for (const systemRoot of [
+    "Windows",
+    ".\\Windows",
+    "C:\\Windows\\..\\attacker",
+    "\\\\server\\share\\Windows",
+    "\\\\?\\C:\\Windows",
+    "C:\\Windows\\",
+  ]) {
+    assert.throws(
+      () => resolveWindowsPowerShellPath({ SystemRoot: systemRoot }),
+      (error: unknown) => isToolError(error, "INTERNAL_ERROR", /SystemRoot|state path/i),
+      systemRoot,
+    );
+  }
 });
 
 test("rejects a symbolic-link store instead of following it", async (context) => {
@@ -670,14 +698,14 @@ test("candidate digest collisions retry and then fail at the bounded limit", asy
   );
 });
 
-test("takes over an expired lock without accepting a live lock", async (context) => {
+test("takes over a lock whose recorded owner process is dead", async (context) => {
   const { directory, clock } = await fixture(context);
   const lockPath = resolve(directory, "candidate-contexts-v1.lock");
   await mkdir(lockPath);
   await writeFile(resolve(lockPath, "owner.json"), JSON.stringify({
     lockVersion: 1,
     nonce: "stale-owner",
-    expiresAtMs: Date.now() - 1,
+    pid: 2_147_483_647,
   }), "utf8");
   const store = new CandidateContextStore({
     stateDirectory: directory,
@@ -690,6 +718,121 @@ test("takes over an expired lock without accepting a live lock", async (context)
   const issued = await store.issue(issueInput);
   assert.match(issued.contextId, /^hmrx1_/u);
   assert.equal((await readdir(directory)).some((entry) => entry.includes("lock.stale")), false);
+});
+
+test("never takes over an old lock while its owner process is alive", async (context) => {
+  const { directory, clock } = await fixture(context);
+  const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], {
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  context.after(() => child.kill());
+  assert.ok(child.pid);
+  const lockPath = resolve(directory, "candidate-contexts-v1.lock");
+  await mkdir(lockPath);
+  await writeFile(resolve(lockPath, "owner.json"), JSON.stringify({
+    lockVersion: 1,
+    nonce: "live-cross-process-owner",
+    pid: child.pid,
+  }), "utf8");
+  const old = new Date(Date.now() - 60_000);
+  await utimes(lockPath, old, old);
+
+  const store = new CandidateContextStore({
+    stateDirectory: directory,
+    clock,
+    random: new CounterRandom(),
+    lockTimeoutMs: 50,
+    windowsAclVerifier: allowTestAcl,
+  });
+  await assert.rejects(
+    store.issue(issueInput),
+    (error: unknown) => isToolError(error, "INTERNAL_ERROR", /lock timed out/i),
+  );
+});
+
+test("takes over a lock only after its owner process is proven dead", async (context) => {
+  const { directory, clock } = await fixture(context);
+  const child = spawn(process.execPath, ["-e", "process.exit(0)"], {
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  assert.ok(child.pid);
+  const deadPid = child.pid;
+  await once(child, "exit");
+  const lockPath = resolve(directory, "candidate-contexts-v1.lock");
+  await mkdir(lockPath);
+  await writeFile(resolve(lockPath, "owner.json"), JSON.stringify({
+    lockVersion: 1,
+    nonce: "dead-cross-process-owner",
+    pid: deadPid,
+  }), "utf8");
+
+  const store = new CandidateContextStore({
+    stateDirectory: directory,
+    clock,
+    random: new CounterRandom(),
+    lockTimeoutMs: 500,
+    windowsAclVerifier: allowTestAcl,
+  });
+  const issued = await store.issue(issueInput);
+  assert.match(issued.contextId, /^hmrx1_/u);
+});
+
+test("release deletes only its atomically isolated lock directory", async (context) => {
+  const { directory, clock } = await fixture(context);
+  const lockPath = resolve(directory, "candidate-contexts-v1.lock");
+  const replacementOwner = {
+    lockVersion: 1,
+    nonce: "replacement-owner",
+    pid: process.pid,
+  };
+  const store = new CandidateContextStore({
+    stateDirectory: directory,
+    clock,
+    random: new CounterRandom(),
+    faultInjector: {
+      async hit(point: string) {
+        if (point === "after-lock-release-rename") {
+          await mkdir(lockPath);
+          await writeFile(resolve(lockPath, "owner.json"), JSON.stringify(replacementOwner), "utf8");
+        }
+      },
+    },
+    windowsAclVerifier: allowTestAcl,
+  });
+
+  await store.issue(issueInput);
+  assert.deepEqual(JSON.parse(await readFile(resolve(lockPath, "owner.json"), "utf8")), replacementOwner);
+});
+
+test("failed lock initialization never recursively deletes a replacement stable lock", async (context) => {
+  const { directory, clock } = await fixture(context);
+  const lockPath = resolve(directory, "candidate-contexts-v1.lock");
+  const abandonedPath = resolve(directory, "abandoned-lock");
+  const replacementOwner = { lockVersion: 1, nonce: "replacement-owner", pid: process.pid };
+  const store = new CandidateContextStore({
+    stateDirectory: directory,
+    clock,
+    random: new CounterRandom(),
+    faultInjector: {
+      async hit(point: string) {
+        if (point === "after-lock-directory-create") {
+          await rename(lockPath, abandonedPath);
+          await mkdir(lockPath);
+          await writeFile(resolve(lockPath, "owner.json"), JSON.stringify(replacementOwner), "utf8");
+          throw new Error("injected owner creation failure");
+        }
+      },
+    },
+    windowsAclVerifier: allowTestAcl,
+  });
+
+  await assert.rejects(
+    store.issue(issueInput),
+    (error: unknown) => isToolError(error, "INTERNAL_ERROR", /lock/i),
+  );
+  assert.deepEqual(JSON.parse(await readFile(resolve(lockPath, "owner.json"), "utf8")), replacementOwner);
 });
 
 test("recovers old ownerless and malformed locks but does not steal a fresh ownerless lock", async (context) => {
@@ -727,6 +870,37 @@ test("recovers old ownerless and malformed locks but does not steal a fresh owne
     fresh.issue(issueInput),
     (error: unknown) => isToolError(error, "INTERNAL_ERROR", /lock timed out/i),
   );
+});
+
+test("ownerless takeover restores a live owner that appears before atomic isolation", async (context) => {
+  const { directory, clock } = await fixture(context);
+  const lockPath = resolve(directory, "candidate-contexts-v1.lock");
+  await mkdir(lockPath);
+  const old = new Date(Date.now() - 60_000);
+  await utimes(lockPath, old, old);
+  const liveOwner = { lockVersion: 1, nonce: "late-live-owner", pid: process.pid };
+  let injected = false;
+  const store = new CandidateContextStore({
+    stateDirectory: directory,
+    clock,
+    random: new CounterRandom(),
+    lockTimeoutMs: 50,
+    faultInjector: {
+      async hit(point: string) {
+        if (point === "before-incomplete-lock-isolation" && !injected) {
+          injected = true;
+          await writeFile(resolve(lockPath, "owner.json"), JSON.stringify(liveOwner), "utf8");
+        }
+      },
+    },
+    windowsAclVerifier: allowTestAcl,
+  });
+
+  await assert.rejects(
+    store.issue(issueInput),
+    (error: unknown) => isToolError(error, "INTERNAL_ERROR", /lock timed out/i),
+  );
+  assert.deepEqual(JSON.parse(await readFile(resolve(lockPath, "owner.json"), "utf8")), liveOwner);
 });
 
 test("Windows state preparation invokes an injected ACL verifier and propagates rejection", async (context) => {
@@ -773,7 +947,7 @@ test("lost lock ownership fences an old writer before atomic replace", async (co
           await writeFile(resolve(lockPath, "owner.json"), JSON.stringify({
             lockVersion: 1,
             nonce: "replacement-owner",
-            expiresAtMs: Date.now() + 10_000,
+            pid: process.pid,
           }), "utf8");
         }
       },
@@ -813,4 +987,129 @@ test("atomic persistence failure preserves the previous complete document", asyn
   );
   assert.equal(await readFile(storePath, "utf8"), before);
   assert.equal((await readdir(directory)).some((entry) => entry.includes(".tmp.")), false);
+});
+
+test("rejects a document above the read limit before replacing the previous store", async (context) => {
+  const { directory, clock, store } = await fixture(context);
+  await store.issue(issueInput);
+  const storePath = resolve(directory, "candidate-contexts-v1.json");
+  const before = await readFile(storePath, "utf8");
+  const oversized = new CandidateContextStore({
+    stateDirectory: directory,
+    clock,
+    random: new CounterRandom(),
+    windowsAclVerifier: allowTestAcl,
+  });
+  const label = issueInput.candidates.find((candidate) => candidate.kind === "label")!;
+
+  await assert.rejects(
+    oversized.issue({
+      ...issueInput,
+      candidates: [{ ...label, description: "X".repeat(17 * 1024 * 1024) }],
+    }),
+    (error: unknown) => isToolError(error, "INTERNAL_ERROR", /size|large|persist/i),
+  );
+  assert.equal(await readFile(storePath, "utf8"), before);
+  assert.equal((await readdir(directory)).some((entry) => entry.includes(".tmp.")), false);
+});
+
+test("rejects a state directory reached through an ancestor reparse point", async (context) => {
+  const { directory } = await fixture(context);
+  const target = resolve(directory, "ancestor-target");
+  const linked = resolve(directory, "ancestor-link");
+  await mkdir(target);
+  try {
+    await symlink(target, linked, process.platform === "win32" ? "junction" : "dir");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EPERM") {
+      context.skip("Windows account cannot create directory junctions");
+      return;
+    }
+    throw error;
+  }
+  await assert.rejects(
+    ensurePrivateStateDirectory(resolve(linked, "nested-state"), { windowsAclVerifier: allowTestAcl }),
+    (error: unknown) => isToolError(error, "INTERNAL_ERROR", /ancestor|reparse|symbolic/i),
+  );
+});
+
+test("bounded single-handle reads reject growth after opening the store", async (context) => {
+  const { directory, clock, store } = await fixture(context);
+  await store.issue(issueInput);
+  const storePath = resolve(directory, "candidate-contexts-v1.json");
+  let injected = false;
+  const racing = new CandidateContextStore({
+    stateDirectory: directory,
+    clock,
+    random: new CounterRandom(),
+    faultInjector: {
+      async hit(point: string) {
+        if (point === "after-store-open") {
+          injected = true;
+          await appendFile(storePath, " ".repeat(17 * 1024 * 1024), "utf8");
+        }
+      },
+    },
+    windowsAclVerifier: allowTestAcl,
+  });
+
+  await assert.rejects(
+    racing.cleanup(),
+    (error: unknown) => isToolError(error, "INTERNAL_ERROR", /corrupt|read|identity|size/i),
+  );
+  assert.equal(injected, true);
+  assert.equal((await readdir(directory)).some((entry) => entry.includes(".corrupt.")), true);
+});
+
+test("quarantine restores a replacement whose identity differs from the opened store", async (context) => {
+  const { directory, clock, store } = await fixture(context);
+  await store.issue(issueInput);
+  const storePath = resolve(directory, "candidate-contexts-v1.json");
+  const openedPath = resolve(directory, "opened-corrupt.json");
+  const replacement = '{"replacement":true}\n';
+  const racing = new CandidateContextStore({
+    stateDirectory: directory,
+    clock,
+    random: new CounterRandom(),
+    faultInjector: {
+      async hit(point: string) {
+        if (point === "after-store-open") {
+          await appendFile(storePath, " ", "utf8");
+        }
+        if (point === "before-store-quarantine") {
+          await rename(storePath, openedPath);
+          await writeFile(storePath, replacement, "utf8");
+        }
+      },
+    },
+    windowsAclVerifier: allowTestAcl,
+  });
+
+  await assert.rejects(
+    racing.cleanup(),
+    (error: unknown) => isToolError(error, "INTERNAL_ERROR", /corrupt|quarantine|changed/i),
+  );
+  assert.equal(await readFile(storePath, "utf8"), replacement);
+});
+
+test("POSIX atomic replacement syncs the parent directory", async (context) => {
+  if (process.platform === "win32") {
+    context.skip("POSIX directory fsync contract");
+    return;
+  }
+  const { directory, clock } = await fixture(context);
+  let parentSynced = false;
+  const store = new CandidateContextStore({
+    stateDirectory: directory,
+    clock,
+    random: new CounterRandom(),
+    faultInjector: {
+      hit(point: string) {
+        if (point === "after-parent-sync") parentSynced = true;
+      },
+    },
+    windowsAclVerifier: allowTestAcl,
+  });
+  await store.issue(issueInput);
+  assert.equal(parentSynced, true);
 });

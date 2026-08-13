@@ -4,12 +4,13 @@ import {
   lstat,
   mkdir,
   open,
-  readFile,
   rename,
   rm,
   writeFile,
 } from "node:fs/promises";
 import { basename, resolve } from "node:path";
+import type { BigIntStats } from "node:fs";
+import type { FileHandle } from "node:fs/promises";
 
 import { ToolError } from "../contracts/errors.ts";
 import {
@@ -54,17 +55,21 @@ const SHA256 = /^[a-f0-9]{64}$/u;
 const SHA = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u;
 const MAX_STORE_BYTES = 16 * 1024 * 1024;
 const MAX_COLLISION_ATTEMPTS = 8;
-const RAW_BEARER = /(?:hmrc1_|hmrx1_)[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])/u;
-const LOCK_LEASE_MS = 10_000;
+const RAW_BEARER = /(?:hmrc1_|hmrx1_)[A-Za-z0-9_-]{43}/u;
 const INCOMPLETE_LOCK_GRACE_MS = 1_000;
 
 interface LockLease {
   readonly nonce: string;
+  readonly pid: number;
   release(): Promise<void>;
 }
 
 export interface ContextStoreFaultInjector {
-  hit(point: "before-replace"): Promise<void> | void;
+  hit(
+    point: "after-lock-directory-create" | "before-replace" | "after-lock-release-rename" |
+      "before-incomplete-lock-isolation" | "after-store-open" | "before-store-quarantine" |
+      "after-parent-sync",
+  ): Promise<void> | void;
 }
 
 export interface ContextClock {
@@ -205,7 +210,7 @@ function assertTokenlessSnapshot(value: JsonValue): void {
     if (Array.isArray(current)) {
       pending.push(...current);
     } else if (current !== null && typeof current === "object") {
-      pending.push(...Object.values(current));
+      pending.push(...Object.keys(current), ...Object.values(current));
     }
   }
 }
@@ -220,7 +225,7 @@ function containsRawBearer(value: JsonValue): boolean {
     if (Array.isArray(current)) {
       pending.push(...current);
     } else if (current !== null && typeof current === "object") {
-      pending.push(...Object.values(current));
+      pending.push(...Object.keys(current), ...Object.values(current));
     }
   }
   return false;
@@ -338,27 +343,72 @@ export class CandidateContextStore {
     return resolve(this.lockPath, "owner.json");
   }
 
-  private async readLockOwner(): Promise<{ readonly nonce: string; readonly expiresAtMs: number } | undefined> {
+  private async readLockOwnerAt(lockPath: string): Promise<{ readonly nonce: string; readonly pid: number } | undefined> {
+    let handle: FileHandle | undefined;
     try {
-      const value = JSON.parse(await readFile(this.lockOwnerPath(), "utf8")) as unknown;
+      handle = await open(resolve(lockPath, "owner.json"), "r");
+      const value = JSON.parse(await handle.readFile("utf8")) as unknown;
       if (value === null || typeof value !== "object" || Array.isArray(value)) {
         return undefined;
       }
       const owner = value as Record<string, unknown>;
-      if (Object.keys(owner).sort().join(",") !== "expiresAtMs,lockVersion,nonce" ||
+      if (Object.keys(owner).sort().join(",") !== "lockVersion,nonce,pid" ||
           owner.lockVersion !== 1 || typeof owner.nonce !== "string" ||
-          !/^[A-Za-z0-9_-]+$/u.test(owner.nonce) || !Number.isSafeInteger(owner.expiresAtMs)) {
+          !/^[A-Za-z0-9_-]+$/u.test(owner.nonce) ||
+          !Number.isSafeInteger(owner.pid) || (owner.pid as number) < 1) {
         return undefined;
       }
-      return { nonce: owner.nonce, expiresAtMs: owner.expiresAtMs as number };
+      return { nonce: owner.nonce, pid: owner.pid as number };
     } catch {
       return undefined;
+    } finally {
+      await handle?.close().catch(() => undefined);
     }
+  }
+
+  private readLockOwner(): Promise<{ readonly nonce: string; readonly pid: number } | undefined> {
+    return this.readLockOwnerAt(this.lockPath);
+  }
+
+  private processIsAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code !== "ESRCH";
+    }
+  }
+
+  private sameLockOwner(
+    left: { readonly nonce: string; readonly pid: number } | undefined,
+    right: { readonly nonce: string; readonly pid: number },
+  ): boolean {
+    return left?.nonce === right.nonce && left.pid === right.pid;
+  }
+
+  private async isolateLock(
+    suffix: string,
+    expectedOwner: { readonly nonce: string; readonly pid: number },
+  ): Promise<string | undefined> {
+    const isolatedPath = `${this.lockPath}.${suffix}.${process.pid}.${randomBytes(12).toString("base64url")}`;
+    try {
+      await rename(this.lockPath, isolatedPath);
+    } catch (error) {
+      if (["ENOENT", "EEXIST", "EPERM"].includes((error as NodeJS.ErrnoException).code ?? "")) {
+        return undefined;
+      }
+      throw error;
+    }
+    if (this.sameLockOwner(await this.readLockOwnerAt(isolatedPath), expectedOwner)) {
+      return isolatedPath;
+    }
+    await rename(isolatedPath, this.lockPath).catch(() => undefined);
+    return undefined;
   }
 
   private async assertLockOwner(lease: LockLease): Promise<void> {
     const owner = await this.readLockOwner();
-    if (owner === undefined || owner.nonce !== lease.nonce || owner.expiresAtMs <= Date.now()) {
+    if (owner === undefined || owner.nonce !== lease.nonce || owner.pid !== lease.pid) {
       throw internalError("Candidate context lock ownership was lost; fenced writer cannot persist");
     }
   }
@@ -374,24 +424,34 @@ export class CandidateContextStore {
       try {
         await mkdir(this.lockPath, { mode: 0o700 });
         createdLockDirectory = true;
+        await this.faultInjector?.hit("after-lock-directory-create");
         await writeFile(this.lockOwnerPath(), JSON.stringify({
           lockVersion: 1,
           nonce,
-          expiresAtMs: Date.now() + LOCK_LEASE_MS,
+          pid: process.pid,
         }), { encoding: "utf8", flag: "wx", mode: 0o600 });
         return {
           nonce,
+          pid: process.pid,
           release: async () => {
-            const owner = await this.readLockOwner();
-            if (owner?.nonce === nonce) {
-              await rm(this.lockPath, { recursive: true, force: true });
+            const expectedOwner = { nonce, pid: process.pid };
+            for (;;) {
+              const owner = await this.readLockOwner();
+              if (!this.sameLockOwner(owner, expectedOwner)) return;
+              const isolatedPath = await this.isolateLock("released", expectedOwner);
+              if (isolatedPath !== undefined) {
+                await this.faultInjector?.hit("after-lock-release-rename");
+                await rm(isolatedPath, { recursive: true, force: true });
+                return;
+              }
+              await sleep(5);
             }
           },
         };
       } catch (error) {
         const errorCode = (error as NodeJS.ErrnoException).code;
         if (createdLockDirectory) {
-          await rm(this.lockPath, { recursive: true, force: true }).catch(() => undefined);
+          // Leave an incomplete lock for grace-based atomic recovery; the stable path may have been replaced.
           throw internalError("Candidate context lock cannot be acquired");
         }
         if (errorCode !== "EEXIST") {
@@ -412,10 +472,13 @@ export class CandidateContextStore {
           throw internalError("Candidate context lock is unsafe");
         }
         const owner = await this.readLockOwner();
-        if (owner !== undefined && owner.expiresAtMs <= Date.now()) {
-          const stalePath = `${this.lockPath}.stale.${process.pid}.${nonce}`;
+        if (owner !== undefined && !this.processIsAlive(owner.pid)) {
           try {
-            await rename(this.lockPath, stalePath);
+            const stalePath = await this.isolateLock("stale", owner);
+            if (stalePath === undefined) {
+              await sleep(5);
+              continue;
+            }
             await rm(stalePath, { recursive: true, force: true });
             continue;
           } catch (takeoverError) {
@@ -423,13 +486,19 @@ export class CandidateContextStore {
               await sleep(5);
               continue;
             }
-            throw internalError("Expired candidate context lock cannot be safely recovered");
+            throw internalError("Orphaned candidate context lock cannot be safely recovered");
           }
         }
         if (owner === undefined && Date.now() - lockInfo.mtimeMs >= INCOMPLETE_LOCK_GRACE_MS) {
-          const stalePath = `${this.lockPath}.stale.${process.pid}.${nonce}`;
           try {
+            const stalePath = `${this.lockPath}.stale.${process.pid}.${nonce}`;
+            await this.faultInjector?.hit("before-incomplete-lock-isolation");
             await rename(this.lockPath, stalePath);
+            if (await this.readLockOwnerAt(stalePath) !== undefined) {
+              await rename(stalePath, this.lockPath).catch(() => undefined);
+              await sleep(5);
+              continue;
+            }
             await rm(stalePath, { recursive: true, force: true });
             continue;
           } catch (takeoverError) {
@@ -448,38 +517,88 @@ export class CandidateContextStore {
     }
   }
 
-  private async quarantine(): Promise<void> {
+  private sameFileIdentity(left: BigIntStats, right: BigIntStats): boolean {
+    return left.dev === right.dev && left.ino === right.ino;
+  }
+
+  private async quarantine(expected?: BigIntStats): Promise<void> {
     const name = `${basename(this.path)}.corrupt.${String(Date.now())}.${process.pid}`;
+    const quarantinePath = resolve(this.path, "..", name);
     try {
-      await rename(this.path, resolve(this.path, "..", name));
+      await this.faultInjector?.hit("before-store-quarantine");
+      await rename(this.path, quarantinePath);
+      if (expected !== undefined) {
+        const current = await lstat(quarantinePath, { bigint: true });
+        if (!this.sameFileIdentity(expected, current)) {
+          await rename(quarantinePath, this.path).catch(() => undefined);
+          throw internalError("Candidate context store changed before quarantine");
+        }
+      }
     } catch {
       throw internalError("Candidate context store is corrupt and cannot be quarantined");
     }
   }
 
   private async readDocument(): Promise<ContextStoreDocument> {
+    let handle: FileHandle | undefined;
+    let openedIdentity: BigIntStats | undefined;
     try {
-      const info = await lstat(this.path);
-      if (info.isSymbolicLink() || !info.isFile() || info.size > MAX_STORE_BYTES) {
-        await this.quarantine();
-        throw internalError("Candidate context store is corrupt");
-      }
+      handle = await open(this.path, "r");
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
         return { storeVersion: CONTEXT_STORE_VERSION, contexts: [] };
       }
-      if (error instanceof ToolError) {
-        throw error;
+      throw internalError("Candidate context store cannot be opened");
+    }
+    let failure: unknown;
+    let document: ContextStoreDocument | undefined;
+    try {
+      const before = await handle.stat({ bigint: true });
+      openedIdentity = before;
+      if (!before.isFile() || before.isSymbolicLink() || before.size > BigInt(MAX_STORE_BYTES)) {
+        throw internalError("Candidate context store is corrupt");
       }
-      throw internalError("Candidate context store cannot be inspected");
+      await this.faultInjector?.hit("after-store-open");
+      const expectedSize = Number(before.size);
+      const bytes = Buffer.alloc(expectedSize);
+      let offset = 0;
+      while (offset < expectedSize) {
+        const result = await handle.read(bytes, offset, expectedSize - offset, offset);
+        if (result.bytesRead < 1 || result.bytesRead > expectedSize - offset) {
+          throw internalError("Candidate context store changed size while reading");
+        }
+        offset += result.bytesRead;
+      }
+      const extra = Buffer.alloc(1);
+      if ((await handle.read(extra, 0, 1, offset)).bytesRead !== 0) {
+        throw internalError("Candidate context store changed size while reading");
+      }
+      const after = await handle.stat({ bigint: true });
+      if (!after.isFile() || after.size !== before.size || !this.sameFileIdentity(before, after)) {
+        throw internalError("Candidate context store changed identity while reading");
+      }
+      const pathInfo = await lstat(this.path, { bigint: true });
+      if (pathInfo.isSymbolicLink() || !this.sameFileIdentity(before, pathInfo)) {
+        throw internalError("Candidate context store path changed while reading");
+      }
+      document = validateDocument(parseStrictJson(bytes.toString("utf8")));
+    } catch (error) {
+      failure = error;
     }
     try {
-      const text = await readFile(this.path, { encoding: "utf8", flag: "r" });
-      return validateDocument(parseStrictJson(text));
+      await handle.close();
+      handle = undefined;
     } catch {
-      await this.quarantine();
+      failure ??= internalError("Candidate context store handle cannot be closed safely");
+    }
+    if (failure !== undefined) {
+      await this.quarantine(openedIdentity);
       throw internalError("Candidate context store is corrupt");
     }
+    if (document === undefined) {
+      throw internalError("Candidate context store could not be read safely");
+    }
+    return document;
   }
 
   private assertDocumentHasNoRawBearer(document: ContextStoreDocument): void {
@@ -491,6 +610,9 @@ export class CandidateContextStore {
   private async writeDocument(document: ContextStoreDocument, lease: LockLease): Promise<void> {
     this.assertDocumentHasNoRawBearer(document);
     const serialized = `${canonicalizeJson(document)}\n`;
+    if (Buffer.byteLength(serialized, "utf8") > MAX_STORE_BYTES) {
+      throw internalError("Candidate context store exceeds its size limit");
+    }
     const temporaryPath = `${this.path}.tmp.${process.pid}.${Date.now().toString(36)}`;
     let handle;
     try {
@@ -505,6 +627,22 @@ export class CandidateContextStore {
       await this.faultInjector?.hit("before-replace");
       await this.assertLockOwner(lease);
       await rename(temporaryPath, this.path);
+      if (process.platform !== "win32") {
+        const parent = await open(resolve(this.path, ".."), "r");
+        let parentFailure: unknown;
+        try {
+          await parent.sync();
+          await this.faultInjector?.hit("after-parent-sync");
+        } catch (error) {
+          parentFailure = error;
+        }
+        try {
+          await parent.close();
+        } catch (error) {
+          parentFailure ??= error;
+        }
+        if (parentFailure !== undefined) throw parentFailure;
+      }
     } catch {
       if (handle !== undefined) {
         await handle.close().catch(() => undefined);

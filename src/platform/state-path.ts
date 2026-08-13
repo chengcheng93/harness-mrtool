@@ -1,6 +1,6 @@
 import { chmod, lstat, mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
-import { resolve } from "node:path";
+import { dirname, resolve, win32 } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -41,6 +41,17 @@ function powershellSingleQuoted(value: string): string {
   return `'${value.replaceAll("'", "''")}'`;
 }
 
+export function resolveWindowsPowerShellPath(environment: NodeJS.ProcessEnv = process.env): string {
+  const systemRoot = environment.SystemRoot;
+  if (systemRoot === undefined ||
+      !/^[A-Za-z]:\\[^\\/:*?"<>|]+(?:\\[^\\/:*?"<>|]+)*$/u.test(systemRoot) ||
+      win32.normalize(systemRoot) !== systemRoot ||
+      !win32.isAbsolute(systemRoot)) {
+    throw stateError("SystemRoot is unavailable or untrusted");
+  }
+  return win32.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+}
+
 export const systemWindowsAclVerifier: WindowsAclVerifier = {
   async verify(path) {
     const script = [
@@ -67,7 +78,7 @@ export const systemWindowsAclVerifier: WindowsAclVerifier = {
     ].join("; ");
     try {
       await execFileAsync(
-        "powershell.exe",
+        resolveWindowsPowerShellPath(),
         ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
         { windowsHide: true, timeout: 5_000, encoding: "utf8" },
       );
@@ -77,6 +88,25 @@ export const systemWindowsAclVerifier: WindowsAclVerifier = {
   },
 };
 
+async function assertNoReparseAncestors(path: string): Promise<void> {
+  let current = resolve(path);
+  for (;;) {
+    try {
+      const info = await lstat(current);
+      if (info.isSymbolicLink()) {
+        throw stateError("state directory has a symbolic-link or reparse-point ancestor");
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw error;
+      }
+    }
+    const parent = dirname(current);
+    if (parent === current) return;
+    current = parent;
+  }
+}
+
 export async function ensurePrivateStateDirectory(
   path: string,
   options: PrivateStateDirectoryOptions = {},
@@ -85,7 +115,9 @@ export async function ensurePrivateStateDirectory(
     throw stateError("state directory is missing");
   }
   try {
+    await assertNoReparseAncestors(path);
     await mkdir(path, { recursive: true, mode: 0o700 });
+    await assertNoReparseAncestors(path);
     const info = await lstat(path);
     if (info.isSymbolicLink()) {
       throw stateError("state directory is a symbolic link or reparse point");
