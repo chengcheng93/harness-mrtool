@@ -25,6 +25,11 @@ import {
   type ContextRandomSource,
 } from "../../src/context/store.ts";
 import {
+  ProcessLockError,
+  systemProcessLockProvider,
+  type ProcessLockProvider,
+} from "../../src/platform/process-lock.ts";
+import {
   CANDIDATE_CONTEXT_TTL_MS,
   type ContextBinding,
   type IssueContextInput,
@@ -35,6 +40,7 @@ import {
   resolveWindowsPowerShellPath,
   type WindowsAclVerifier,
 } from "../../src/platform/state-path.ts";
+import { systemProcessIdentityProvider } from "../../src/platform/process-identity.ts";
 
 class FakeClock implements ContextClock {
   constructor(private value: number) {}
@@ -66,12 +72,50 @@ class CounterRandom implements ContextRandomSource {
 
 const allowTestAcl: WindowsAclVerifier = { verify: async () => undefined };
 
+class TestProcessLockProvider implements ProcessLockProvider {
+  private static readonly held = new Set<string>();
+
+  async acquire(path: string, timeoutMs: number) {
+    const started = Date.now();
+    while (TestProcessLockProvider.held.has(path)) {
+      if (Date.now() - started >= timeoutMs) throw new ProcessLockError("timeout");
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 1));
+    }
+    TestProcessLockProvider.held.add(path);
+    let released = false;
+    return {
+      assertHeld() {
+        if (released) throw new ProcessLockError("unavailable");
+      },
+      release: async () => {
+        if (released) return;
+        released = true;
+        TestProcessLockProvider.held.delete(path);
+      },
+    };
+  }
+}
+
+async function liveLockOwner(nonce: string, pid = process.pid) {
+  const status = await systemProcessIdentityProvider.inspect(pid);
+  assert.equal(status.state, "alive");
+  return {
+    lockVersion: 2,
+    nonce,
+    pid,
+    processStartKey: status.startKey,
+  };
+}
+
 const binding: ContextBinding = {
   operation: "create",
   gitlabOrigin: "https://gitlab.example.com",
   targetProject: { id: "100", fullPath: "group/project" },
   targetBranch: "develop",
+  sourceProject: { id: "200", fullPath: "fork/project" },
+  sourceBranch: "feature/context-binding",
   sourceHeadSha: "a".repeat(40),
+  targetRefSha: "c".repeat(40),
   mrIid: null,
   releaseSetId: "stable-42",
   cliVersion: "1.2.3",
@@ -87,6 +131,10 @@ const binding: ContextBinding = {
 const snapshot = {
   snapshotVersion: 1,
   targetProject: { id: "100", path: "group/project" },
+  targetBranch: "develop",
+  targetRefSha: "c".repeat(40),
+  sourceProject: { id: "200", path: "fork/project" },
+  sourceBranch: "feature/context-binding",
   sourceHeadSha: "a".repeat(40),
   labelCandidates: [
     { id: "gid://gitlab/ProjectLabel/10", name: "type::bug" },
@@ -144,6 +192,7 @@ async function fixture(context: test.TestContext) {
     clock,
     random: new CounterRandom(),
     lockTimeoutMs: 1_000,
+    processLockProvider: new TestProcessLockProvider(),
     windowsAclVerifier: allowTestAcl,
   });
   return { directory, clock, store };
@@ -189,7 +238,11 @@ test("resolves only tokens matching context, host, project, kind, release, Bundl
     { ...binding, targetProject: { ...binding.targetProject, id: "101" } },
     { ...binding, operation: "update", mrIid: 51 },
     { ...binding, targetBranch: "main" },
+    { ...binding, sourceProject: { ...binding.sourceProject, id: "201" } },
+    { ...binding, sourceProject: { ...binding.sourceProject, fullPath: "other/project" } },
+    { ...binding, sourceBranch: "feature/same-head-different-branch" },
     { ...binding, sourceHeadSha: "d".repeat(40) },
+    { ...binding, targetRefSha: "e".repeat(40) },
     { ...binding, releaseSetId: "stable-43" },
     { ...binding, bundle: { ...binding.bundle, manifestHash: "c".repeat(64) } },
     { ...binding, protocols: { ...binding.protocols, inputSchema: 2 } },
@@ -301,6 +354,7 @@ test("concurrent stores serialize updates without losing contexts", async (conte
         },
       },
       lockTimeoutMs: 2_000,
+      processLockProvider: new TestProcessLockProvider(),
       windowsAclVerifier: allowTestAcl,
     });
   });
@@ -463,6 +517,7 @@ test("lock contention fails closed within the configured timeout", async (contex
     clock,
     random: new CounterRandom(),
     lockTimeoutMs: 50,
+    processLockProvider: new TestProcessLockProvider(),
     windowsAclVerifier: allowTestAcl,
   });
   await mkdir(resolve(directory, "candidate-contexts-v1.lock"));
@@ -473,6 +528,28 @@ test("lock contention fails closed within the configured timeout", async (contex
     (error: unknown) => isToolError(error, "INTERNAL_ERROR", /lock timed out/i),
   );
   assert.equal(Date.now() - started < 500, true);
+});
+
+test("system process lock serializes independent child processes", async (context) => {
+  const { directory } = await fixture(context);
+  const lockPath = resolve(directory, "cross-process.oslock");
+  const lease = await systemProcessLockProvider.acquire(lockPath, 2_000);
+  const moduleUrl = new URL("../../src/platform/process-lock.ts", import.meta.url).href;
+  const child = spawn(process.execPath, [
+    "--import",
+    "tsx",
+    "--input-type=module",
+    "-e",
+    `import { systemProcessLockProvider } from ${JSON.stringify(moduleUrl)}; ` +
+      `try { await systemProcessLockProvider.acquire(${JSON.stringify(lockPath)}, 80); process.exit(2); } ` +
+      "catch (error) { process.exit(error?.reason === 'timeout' ? 0 : 3); }",
+  ], { stdio: "ignore", windowsHide: true });
+  try {
+    const [code] = await once(child, "exit");
+    assert.equal(code, 0);
+  } finally {
+    await lease.release();
+  }
 });
 
 test("strict store parsing quarantines unknown fields, duplicate keys and oversized files", async (context) => {
@@ -490,6 +567,7 @@ test("strict store parsing quarantines unknown fields, duplicate keys and oversi
       stateDirectory: directory,
       clock: new FakeClock(Date.UTC(2026, 7, 14)),
       random: new CounterRandom(),
+      processLockProvider: new TestProcessLockProvider(),
       windowsAclVerifier: allowTestAcl,
     });
     await first.issue(issueInput);
@@ -592,6 +670,7 @@ test("issue rejects a clock whose TTL would exceed the safe integer range withou
     stateDirectory: emptyDirectory,
     clock,
     random: new CounterRandom(),
+    processLockProvider: new TestProcessLockProvider(),
     windowsAclVerifier: allowTestAcl,
   });
   await assert.rejects(
@@ -673,6 +752,7 @@ test("candidate digest collisions retry and then fail at the bounded limit", asy
     stateDirectory: directory,
     clock,
     random,
+    processLockProvider: new TestProcessLockProvider(),
     windowsAclVerifier: allowTestAcl,
   });
   const singleCandidate = { ...issueInput, candidates: [issueInput.candidates[0]!] };
@@ -690,6 +770,7 @@ test("candidate digest collisions retry and then fail at the bounded limit", asy
         return bytes;
       },
     },
+    processLockProvider: new TestProcessLockProvider(),
     windowsAclVerifier: allowTestAcl,
   });
   await assert.rejects(
@@ -703,15 +784,17 @@ test("takes over a lock whose recorded owner process is dead", async (context) =
   const lockPath = resolve(directory, "candidate-contexts-v1.lock");
   await mkdir(lockPath);
   await writeFile(resolve(lockPath, "owner.json"), JSON.stringify({
-    lockVersion: 1,
+    lockVersion: 2,
     nonce: "stale-owner",
     pid: 2_147_483_647,
+    processStartKey: "dead-instance",
   }), "utf8");
   const store = new CandidateContextStore({
     stateDirectory: directory,
     clock,
     random: new CounterRandom(),
     lockTimeoutMs: 200,
+    processLockProvider: new TestProcessLockProvider(),
     windowsAclVerifier: allowTestAcl,
   });
 
@@ -731,9 +814,8 @@ test("never takes over an old lock while its owner process is alive", async (con
   const lockPath = resolve(directory, "candidate-contexts-v1.lock");
   await mkdir(lockPath);
   await writeFile(resolve(lockPath, "owner.json"), JSON.stringify({
-    lockVersion: 1,
+    ...(await liveLockOwner("live-cross-process-owner", child.pid)),
     nonce: "live-cross-process-owner",
-    pid: child.pid,
   }), "utf8");
   const old = new Date(Date.now() - 60_000);
   await utimes(lockPath, old, old);
@@ -743,6 +825,7 @@ test("never takes over an old lock while its owner process is alive", async (con
     clock,
     random: new CounterRandom(),
     lockTimeoutMs: 50,
+    processLockProvider: new TestProcessLockProvider(),
     windowsAclVerifier: allowTestAcl,
   });
   await assert.rejects(
@@ -763,9 +846,10 @@ test("takes over a lock only after its owner process is proven dead", async (con
   const lockPath = resolve(directory, "candidate-contexts-v1.lock");
   await mkdir(lockPath);
   await writeFile(resolve(lockPath, "owner.json"), JSON.stringify({
-    lockVersion: 1,
+    lockVersion: 2,
     nonce: "dead-cross-process-owner",
     pid: deadPid,
+    processStartKey: "dead-child-instance",
   }), "utf8");
 
   const store = new CandidateContextStore({
@@ -773,20 +857,217 @@ test("takes over a lock only after its owner process is proven dead", async (con
     clock,
     random: new CounterRandom(),
     lockTimeoutMs: 500,
+    processLockProvider: new TestProcessLockProvider(),
     windowsAclVerifier: allowTestAcl,
   });
   const issued = await store.issue(issueInput);
   assert.match(issued.contextId, /^hmrx1_/u);
 });
 
+test("does not take over an old lock held by the same live process instance", async (context) => {
+  const { directory, clock } = await fixture(context);
+  const lockPath = resolve(directory, "candidate-contexts-v1.lock");
+  await mkdir(lockPath);
+  await writeFile(resolve(lockPath, "owner.json"), JSON.stringify({
+    lockVersion: 2,
+    nonce: "same-live-instance",
+    pid: process.pid,
+    processStartKey: "instance-a",
+  }), "utf8");
+  const old = new Date(Date.now() - 60_000);
+  await utimes(lockPath, old, old);
+  const options = {
+    stateDirectory: directory,
+    clock,
+    random: new CounterRandom(),
+    lockTimeoutMs: 1_000,
+    processIdentityProvider: {
+      async current() {
+        return { pid: process.pid, startKey: "instance-a" };
+      },
+      async inspect(pid: number) {
+        assert.equal(pid, process.pid);
+        return { state: "alive" as const, startKey: "instance-a" };
+      },
+    },
+    processLockProvider: new TestProcessLockProvider(),
+    windowsAclVerifier: allowTestAcl,
+  };
+
+  await assert.rejects(
+    new CandidateContextStore(options).issue(issueInput),
+    (error: unknown) => isToolError(error, "INTERNAL_ERROR", /lock timed out/i),
+  );
+});
+
+test("takes over a reused PID only when the recorded process instance differs", async (context) => {
+  const { directory, clock } = await fixture(context);
+  const lockPath = resolve(directory, "candidate-contexts-v1.lock");
+  await mkdir(lockPath);
+  await writeFile(resolve(lockPath, "owner.json"), JSON.stringify({
+    lockVersion: 2,
+    nonce: "reused-pid-old-instance",
+    pid: process.pid,
+    processStartKey: "instance-old",
+  }), "utf8");
+  const store = new CandidateContextStore({
+    stateDirectory: directory,
+    clock,
+    random: new CounterRandom(),
+    lockTimeoutMs: 200,
+    processIdentityProvider: {
+      async current() {
+        return { pid: process.pid, startKey: "instance-new" };
+      },
+      async inspect() {
+        return { state: "alive" as const, startKey: "instance-new" };
+      },
+    },
+    processLockProvider: new TestProcessLockProvider(),
+    windowsAclVerifier: allowTestAcl,
+  });
+
+  assert.match((await store.issue(issueInput)).contextId, /^hmrx1_/u);
+});
+
+test("fails closed when the recorded process instance cannot be inspected", async (context) => {
+  const { directory, clock } = await fixture(context);
+  const lockPath = resolve(directory, "candidate-contexts-v1.lock");
+  await mkdir(lockPath);
+  await writeFile(resolve(lockPath, "owner.json"), JSON.stringify({
+    lockVersion: 2,
+    nonce: "unknown-instance",
+    pid: process.pid,
+    processStartKey: "instance-old",
+  }), "utf8");
+  const store = new CandidateContextStore({
+    stateDirectory: directory,
+    clock,
+    random: new CounterRandom(),
+    lockTimeoutMs: 40,
+    processIdentityProvider: {
+      async current() {
+        return { pid: process.pid, startKey: "instance-new" };
+      },
+      async inspect() {
+        return { state: "unknown" as const };
+      },
+    },
+    processLockProvider: new TestProcessLockProvider(),
+    windowsAclVerifier: allowTestAcl,
+  });
+
+  await assert.rejects(
+    store.issue(issueInput),
+    (error: unknown) => isToolError(error, "INTERNAL_ERROR", /lock timed out/i),
+  );
+});
+
+test("rejects oversized lock-owner metadata without deleting the stable lock", async (context) => {
+  const { directory, clock } = await fixture(context);
+  const lockPath = resolve(directory, "candidate-contexts-v1.lock");
+  await mkdir(lockPath);
+  await writeFile(resolve(lockPath, "owner.json"), `${JSON.stringify({
+    lockVersion: 2,
+    nonce: "oversized-owner",
+    pid: process.pid,
+    processStartKey: "instance-a",
+  })}${" ".repeat(4_096)}`, "utf8");
+  const old = new Date(Date.now() - 60_000);
+  await utimes(lockPath, old, old);
+  const options = {
+    stateDirectory: directory,
+    clock,
+    random: new CounterRandom(),
+    lockTimeoutMs: 1_000,
+    processIdentityProvider: {
+      async current() {
+        return { pid: process.pid, startKey: "instance-a" };
+      },
+      async inspect() {
+        return { state: "alive" as const, startKey: "instance-a" };
+      },
+    },
+    processLockProvider: new TestProcessLockProvider(),
+    windowsAclVerifier: allowTestAcl,
+  };
+
+  await assert.rejects(
+    new CandidateContextStore(options).issue(issueInput),
+    (error: unknown) => isToolError(error, "INTERNAL_ERROR", /lock.*unsafe/i),
+  );
+  assert.equal((await lstat(lockPath)).isDirectory(), true);
+});
+
+test("rejects a symbolic-link lock owner without following or deleting its target", async (context) => {
+  const { directory, clock } = await fixture(context);
+  const lockPath = resolve(directory, "candidate-contexts-v1.lock");
+  const outsideOwner = resolve(directory, "outside-owner.json");
+  await mkdir(lockPath);
+  await writeFile(outsideOwner, JSON.stringify(await liveLockOwner("outside-owner")), "utf8");
+  try {
+    await symlink(outsideOwner, resolve(lockPath, "owner.json"), "file");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EPERM") {
+      context.skip("Windows account cannot create file symbolic links");
+      return;
+    }
+    throw error;
+  }
+  const store = new CandidateContextStore({
+    stateDirectory: directory,
+    clock,
+    random: new CounterRandom(),
+    lockTimeoutMs: 100,
+    processLockProvider: new TestProcessLockProvider(),
+    windowsAclVerifier: allowTestAcl,
+  });
+
+  await assert.rejects(
+    store.issue(issueInput),
+    (error: unknown) => isToolError(error, "INTERNAL_ERROR", /lock.*unsafe/i),
+  );
+  assert.equal(JSON.parse(await readFile(outsideOwner, "utf8")).nonce, "outside-owner");
+});
+
+test("rejects a lock owner path replaced after its handle is opened", async (context) => {
+  const { directory, clock } = await fixture(context);
+  const lockPath = resolve(directory, "candidate-contexts-v1.lock");
+  const ownerPath = resolve(lockPath, "owner.json");
+  const openedOwnerPath = resolve(lockPath, "opened-owner.json");
+  await mkdir(lockPath);
+  await writeFile(ownerPath, JSON.stringify(await liveLockOwner("opened-owner")), "utf8");
+  let injected = false;
+  const store = new CandidateContextStore({
+    stateDirectory: directory,
+    clock,
+    random: new CounterRandom(),
+    lockTimeoutMs: 100,
+    faultInjector: {
+      async hit(point: string) {
+        if (point === "after-lock-owner-open" && !injected) {
+          injected = true;
+          await rename(ownerPath, openedOwnerPath);
+          await writeFile(ownerPath, JSON.stringify(await liveLockOwner("replacement-owner")), "utf8");
+        }
+      },
+    },
+    processLockProvider: new TestProcessLockProvider(),
+    windowsAclVerifier: allowTestAcl,
+  });
+
+  await assert.rejects(
+    store.issue(issueInput),
+    (error: unknown) => isToolError(error, "INTERNAL_ERROR", /lock.*unsafe/i),
+  );
+  assert.equal(injected, true);
+  assert.equal(JSON.parse(await readFile(ownerPath, "utf8")).nonce, "replacement-owner");
+});
+
 test("release deletes only its atomically isolated lock directory", async (context) => {
   const { directory, clock } = await fixture(context);
   const lockPath = resolve(directory, "candidate-contexts-v1.lock");
-  const replacementOwner = {
-    lockVersion: 1,
-    nonce: "replacement-owner",
-    pid: process.pid,
-  };
+  const replacementOwner = await liveLockOwner("replacement-owner");
   const store = new CandidateContextStore({
     stateDirectory: directory,
     clock,
@@ -799,6 +1080,7 @@ test("release deletes only its atomically isolated lock directory", async (conte
         }
       },
     },
+    processLockProvider: new TestProcessLockProvider(),
     windowsAclVerifier: allowTestAcl,
   });
 
@@ -810,7 +1092,7 @@ test("failed lock initialization never recursively deletes a replacement stable 
   const { directory, clock } = await fixture(context);
   const lockPath = resolve(directory, "candidate-contexts-v1.lock");
   const abandonedPath = resolve(directory, "abandoned-lock");
-  const replacementOwner = { lockVersion: 1, nonce: "replacement-owner", pid: process.pid };
+  const replacementOwner = await liveLockOwner("replacement-owner");
   const store = new CandidateContextStore({
     stateDirectory: directory,
     clock,
@@ -825,6 +1107,7 @@ test("failed lock initialization never recursively deletes a replacement stable 
         }
       },
     },
+    processLockProvider: new TestProcessLockProvider(),
     windowsAclVerifier: allowTestAcl,
   });
 
@@ -851,6 +1134,7 @@ test("recovers old ownerless and malformed locks but does not steal a fresh owne
       clock,
       random: new CounterRandom(),
       lockTimeoutMs: 200,
+      processLockProvider: new TestProcessLockProvider(),
       windowsAclVerifier: allowTestAcl,
     });
     const issued = await store.issue(issueInput);
@@ -864,6 +1148,7 @@ test("recovers old ownerless and malformed locks but does not steal a fresh owne
     clock,
     random: new CounterRandom(),
     lockTimeoutMs: 30,
+    processLockProvider: new TestProcessLockProvider(),
     windowsAclVerifier: allowTestAcl,
   });
   await assert.rejects(
@@ -878,7 +1163,7 @@ test("ownerless takeover restores a live owner that appears before atomic isolat
   await mkdir(lockPath);
   const old = new Date(Date.now() - 60_000);
   await utimes(lockPath, old, old);
-  const liveOwner = { lockVersion: 1, nonce: "late-live-owner", pid: process.pid };
+  const liveOwner = await liveLockOwner("late-live-owner");
   let injected = false;
   const store = new CandidateContextStore({
     stateDirectory: directory,
@@ -893,6 +1178,7 @@ test("ownerless takeover restores a live owner that appears before atomic isolat
         }
       },
     },
+    processLockProvider: new TestProcessLockProvider(),
     windowsAclVerifier: allowTestAcl,
   });
 
@@ -901,6 +1187,60 @@ test("ownerless takeover restores a live owner that appears before atomic isolat
     (error: unknown) => isToolError(error, "INTERNAL_ERROR", /lock timed out/i),
   );
   assert.deepEqual(JSON.parse(await readFile(resolve(lockPath, "owner.json"), "utf8")), liveOwner);
+});
+
+test("serializes stale-lock recovery before any contender can inspect or replace the stable lock", async (context) => {
+  const { directory, clock } = await fixture(context);
+  const lockPath = resolve(directory, "candidate-contexts-v1.lock");
+  await mkdir(lockPath);
+  const old = new Date(Date.now() - 60_000);
+  await utimes(lockPath, old, old);
+
+  let enteredResolve!: () => void;
+  const entered = new Promise<void>((resolvePromise) => {
+    enteredResolve = resolvePromise;
+  });
+  let resumeResolve!: () => void;
+  const resume = new Promise<void>((resolvePromise) => {
+    resumeResolve = resolvePromise;
+  });
+  const first = new CandidateContextStore({
+    stateDirectory: directory,
+    clock,
+    random: new CounterRandom(),
+    lockTimeoutMs: 500,
+    faultInjector: {
+      async hit(point: string) {
+        if (point === "before-incomplete-lock-isolation") {
+          enteredResolve();
+          await resume;
+        }
+      },
+    },
+    processLockProvider: new TestProcessLockProvider(),
+    windowsAclVerifier: allowTestAcl,
+  });
+  const second = new CandidateContextStore({
+    stateDirectory: directory,
+    clock,
+    random: new CounterRandom(),
+    lockTimeoutMs: 40,
+    processLockProvider: new TestProcessLockProvider(),
+    windowsAclVerifier: allowTestAcl,
+  });
+
+  const firstIssue = first.issue(issueInput);
+  await entered;
+  try {
+    await assert.rejects(
+      second.issue(issueInput),
+      (error: unknown) => isToolError(error, "INTERNAL_ERROR", /lock timed out/i),
+    );
+  } finally {
+    resumeResolve();
+  }
+  assert.match((await firstIssue).contextId, /^hmrx1_/u);
+  assert.equal((await readdir(directory)).some((entry) => entry.includes("lock.stale")), false);
 });
 
 test("Windows state preparation invokes an injected ACL verifier and propagates rejection", async (context) => {
@@ -945,13 +1285,13 @@ test("lost lock ownership fences an old writer before atomic replace", async (co
           await rm(lockPath, { recursive: true, force: true });
           await mkdir(lockPath);
           await writeFile(resolve(lockPath, "owner.json"), JSON.stringify({
-            lockVersion: 1,
+            ...(await liveLockOwner("replacement-owner")),
             nonce: "replacement-owner",
-            pid: process.pid,
           }), "utf8");
         }
       },
     },
+    processLockProvider: new TestProcessLockProvider(),
     windowsAclVerifier: allowTestAcl,
   });
 
@@ -978,6 +1318,7 @@ test("atomic persistence failure preserves the previous complete document", asyn
         }
       },
     },
+    processLockProvider: new TestProcessLockProvider(),
     windowsAclVerifier: allowTestAcl,
   });
 
@@ -998,6 +1339,7 @@ test("rejects a document above the read limit before replacing the previous stor
     stateDirectory: directory,
     clock,
     random: new CounterRandom(),
+    processLockProvider: new TestProcessLockProvider(),
     windowsAclVerifier: allowTestAcl,
   });
   const label = issueInput.candidates.find((candidate) => candidate.kind === "label")!;
@@ -1050,6 +1392,7 @@ test("bounded single-handle reads reject growth after opening the store", async 
         }
       },
     },
+    processLockProvider: new TestProcessLockProvider(),
     windowsAclVerifier: allowTestAcl,
   });
 
@@ -1082,6 +1425,7 @@ test("quarantine restores a replacement whose identity differs from the opened s
         }
       },
     },
+    processLockProvider: new TestProcessLockProvider(),
     windowsAclVerifier: allowTestAcl,
   });
 
@@ -1108,6 +1452,7 @@ test("POSIX atomic replacement syncs the parent directory", async (context) => {
         if (point === "after-parent-sync") parentSynced = true;
       },
     },
+    processLockProvider: new TestProcessLockProvider(),
     windowsAclVerifier: allowTestAcl,
   });
   await store.issue(issueInput);

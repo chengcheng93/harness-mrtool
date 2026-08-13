@@ -9,7 +9,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { basename, resolve } from "node:path";
-import type { BigIntStats } from "node:fs";
+import { constants, type BigIntStats } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
 
 import { ToolError } from "../contracts/errors.ts";
@@ -25,6 +25,17 @@ import {
   ensurePrivateStateDirectory,
   type WindowsAclVerifier,
 } from "../platform/state-path.ts";
+import {
+  systemProcessIdentityProvider,
+  type ProcessIdentity,
+  type ProcessIdentityProvider,
+} from "../platform/process-identity.ts";
+import {
+  ProcessLockError,
+  systemProcessLockProvider,
+  type ProcessLockLease,
+  type ProcessLockProvider,
+} from "../platform/process-lock.ts";
 import {
   CANDIDATE_CONTEXT_TTL_MS,
   CONTEXT_STORE_VERSION,
@@ -57,10 +68,18 @@ const MAX_STORE_BYTES = 16 * 1024 * 1024;
 const MAX_COLLISION_ATTEMPTS = 8;
 const RAW_BEARER = /(?:hmrc1_|hmrx1_)[A-Za-z0-9_-]{43}/u;
 const INCOMPLETE_LOCK_GRACE_MS = 1_000;
+const MAX_LOCK_OWNER_BYTES = 1_024;
 
-interface LockLease {
+interface LockOwner extends ProcessIdentity {
   readonly nonce: string;
-  readonly pid: number;
+}
+
+type LockOwnerRead =
+  | { readonly kind: "valid"; readonly owner: LockOwner }
+  | { readonly kind: "missing" | "malformed" | "unsafe" };
+
+interface LockLease extends LockOwner {
+  assertProcessLockHeld(): void;
   release(): Promise<void>;
 }
 
@@ -68,7 +87,7 @@ export interface ContextStoreFaultInjector {
   hit(
     point: "after-lock-directory-create" | "before-replace" | "after-lock-release-rename" |
       "before-incomplete-lock-isolation" | "after-store-open" | "before-store-quarantine" |
-      "after-parent-sync",
+      "after-parent-sync" | "after-lock-owner-open",
   ): Promise<void> | void;
 }
 
@@ -85,6 +104,8 @@ export interface CandidateContextStoreOptions {
   readonly lockTimeoutMs?: number;
   readonly faultInjector?: ContextStoreFaultInjector;
   readonly windowsAclVerifier?: WindowsAclVerifier;
+  readonly processIdentityProvider?: ProcessIdentityProvider;
+  readonly processLockProvider?: ProcessLockProvider;
 }
 
 const systemClock: ContextClock = { now: () => Date.now() };
@@ -134,13 +155,16 @@ function validPositiveInteger(value: JsonValue | undefined): value is number {
 function normalizeBinding(bindingValue: ContextBinding): ContextBinding {
   const binding = copyJsonValue(bindingValue) as unknown as ContextBinding;
   const bindingRecord = binding as unknown as JsonObject;
-  const projectRecord = binding.targetProject as unknown as JsonObject;
+  const targetProjectRecord = binding.targetProject as unknown as JsonObject;
+  const sourceProjectRecord = binding.sourceProject as unknown as JsonObject;
   const bundleRecord = binding.bundle as unknown as JsonObject;
   const protocolsRecord = binding.protocols as unknown as JsonObject;
   if (!exactFields(bindingRecord, [
-    "operation", "gitlabOrigin", "targetProject", "targetBranch", "sourceHeadSha",
-    "mrIid", "releaseSetId", "cliVersion", "bundle", "protocols",
-  ]) || !exactFields(projectRecord, ["id", "fullPath"]) ||
+    "operation", "gitlabOrigin", "targetProject", "targetBranch", "sourceProject",
+    "sourceBranch", "sourceHeadSha", "targetRefSha", "mrIid", "releaseSetId",
+    "cliVersion", "bundle", "protocols",
+  ]) || !exactFields(targetProjectRecord, ["id", "fullPath"]) ||
+      !exactFields(sourceProjectRecord, ["id", "fullPath"]) ||
       !exactFields(bundleRecord, ["id", "version", "releaseTag", "manifestHash"]) ||
       !exactFields(protocolsRecord, ["inputSchema", "policySchema", "skillProtocol"])) {
     throw contextInputError("Candidate context scope is invalid");
@@ -160,7 +184,10 @@ function normalizeBinding(bindingValue: ContextBinding): ContextBinding {
   }
   if (!["create", "update", "migrate"].includes(binding.operation) ||
       !nonEmpty(binding.targetProject.id) || !nonEmpty(binding.targetProject.fullPath) ||
-      !nonEmpty(binding.targetBranch) || !SHA.test(binding.sourceHeadSha) ||
+      !nonEmpty(binding.targetBranch) ||
+      !nonEmpty(binding.sourceProject.id) || !nonEmpty(binding.sourceProject.fullPath) ||
+      !nonEmpty(binding.sourceBranch) || !SHA.test(binding.sourceHeadSha) ||
+      !SHA.test(binding.targetRefSha) ||
       !nonEmpty(binding.releaseSetId) || !nonEmpty(binding.cliVersion) ||
       !nonEmpty(binding.bundle.id) || !nonEmpty(binding.bundle.version) ||
       !nonEmpty(binding.bundle.releaseTag) || !SHA256.test(binding.bundle.manifestHash) ||
@@ -325,6 +352,9 @@ export class CandidateContextStore {
   private readonly lockTimeoutMs: number;
   private readonly faultInjector: ContextStoreFaultInjector | undefined;
   private readonly windowsAclVerifier: WindowsAclVerifier | undefined;
+  private readonly processIdentityProvider: ProcessIdentityProvider;
+  private readonly processLockProvider: ProcessLockProvider;
+  private readonly processLockPath: string;
 
   constructor(options: CandidateContextStoreOptions) {
     this.path = resolve(options.stateDirectory, STORE_NAME);
@@ -334,6 +364,9 @@ export class CandidateContextStore {
     this.lockTimeoutMs = options.lockTimeoutMs ?? 2_000;
     this.faultInjector = options.faultInjector;
     this.windowsAclVerifier = options.windowsAclVerifier;
+    this.processIdentityProvider = options.processIdentityProvider ?? systemProcessIdentityProvider;
+    this.processLockProvider = options.processLockProvider ?? systemProcessLockProvider;
+    this.processLockPath = resolve(options.stateDirectory, `${LOCK_NAME}.oslock`);
     if (!Number.isSafeInteger(this.lockTimeoutMs) || this.lockTimeoutMs < 1) {
       throw new TypeError("lockTimeoutMs must be a positive integer");
     }
@@ -343,55 +376,110 @@ export class CandidateContextStore {
     return resolve(this.lockPath, "owner.json");
   }
 
-  private async readLockOwnerAt(lockPath: string): Promise<{ readonly nonce: string; readonly pid: number } | undefined> {
-    let handle: FileHandle | undefined;
-    try {
-      handle = await open(resolve(lockPath, "owner.json"), "r");
-      const value = JSON.parse(await handle.readFile("utf8")) as unknown;
-      if (value === null || typeof value !== "object" || Array.isArray(value)) {
-        return undefined;
-      }
-      const owner = value as Record<string, unknown>;
-      if (Object.keys(owner).sort().join(",") !== "lockVersion,nonce,pid" ||
-          owner.lockVersion !== 1 || typeof owner.nonce !== "string" ||
-          !/^[A-Za-z0-9_-]+$/u.test(owner.nonce) ||
-          !Number.isSafeInteger(owner.pid) || (owner.pid as number) < 1) {
-        return undefined;
-      }
-      return { nonce: owner.nonce, pid: owner.pid as number };
-    } catch {
-      return undefined;
-    } finally {
-      await handle?.close().catch(() => undefined);
-    }
+  private sameFileIdentity(left: BigIntStats, right: BigIntStats): boolean {
+    return left.dev === right.dev && left.ino === right.ino;
   }
 
-  private readLockOwner(): Promise<{ readonly nonce: string; readonly pid: number } | undefined> {
+  private async readLockOwnerAt(lockPath: string): Promise<LockOwnerRead> {
+    const ownerPath = resolve(lockPath, "owner.json");
+    let pathBefore: BigIntStats;
+    try {
+      pathBefore = await lstat(ownerPath, { bigint: true });
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "ENOENT" ? { kind: "missing" } : { kind: "unsafe" };
+    }
+    if (pathBefore.isSymbolicLink() || !pathBefore.isFile() || pathBefore.nlink !== 1n ||
+        pathBefore.size > BigInt(MAX_LOCK_OWNER_BYTES)) {
+      return { kind: "unsafe" };
+    }
+    let handle: FileHandle | undefined;
+    let result: LockOwnerRead = { kind: "unsafe" };
+    try {
+      handle = await open(ownerPath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+      await this.faultInjector?.hit("after-lock-owner-open");
+      const before = await handle.stat({ bigint: true });
+      if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n ||
+          !this.sameFileIdentity(pathBefore, before) ||
+          before.size > BigInt(MAX_LOCK_OWNER_BYTES)) {
+        result = { kind: "unsafe" };
+      } else {
+        const expectedSize = Number(before.size);
+        const bytes = Buffer.alloc(expectedSize + 1);
+        let offset = 0;
+        while (offset < bytes.length) {
+          const { bytesRead } = await handle.read(bytes, offset, bytes.length - offset, offset);
+          if (bytesRead === 0) break;
+          offset += bytesRead;
+        }
+        const after = await handle.stat({ bigint: true });
+        const pathAfter = await lstat(ownerPath, { bigint: true });
+        if (offset !== expectedSize || after.size !== before.size || after.nlink !== 1n ||
+            after.mtimeNs !== before.mtimeNs || after.ctimeNs !== before.ctimeNs ||
+            !this.sameFileIdentity(before, after) || pathAfter.isSymbolicLink() ||
+            pathAfter.nlink !== 1n || !this.sameFileIdentity(before, pathAfter)) {
+          result = { kind: "unsafe" };
+        } else {
+          let value: unknown;
+          try {
+            value = parseStrictJson(bytes.subarray(0, offset).toString("utf8"));
+          } catch {
+            value = undefined;
+          }
+          if (value === null || typeof value !== "object" || Array.isArray(value)) {
+            result = { kind: "malformed" };
+          } else {
+            const owner = value as Record<string, unknown>;
+            if (Object.keys(owner).sort().join(",") !== "lockVersion,nonce,pid,processStartKey" ||
+                owner.lockVersion !== 2 || typeof owner.nonce !== "string" ||
+                !/^[A-Za-z0-9_-]+$/u.test(owner.nonce) ||
+                !Number.isSafeInteger(owner.pid) || (owner.pid as number) < 1 ||
+                typeof owner.processStartKey !== "string" ||
+                !/^[A-Za-z0-9:._-]{1,128}$/u.test(owner.processStartKey)) {
+              result = { kind: "malformed" };
+            } else {
+              result = {
+                kind: "valid",
+                owner: { nonce: owner.nonce, pid: owner.pid as number, startKey: owner.processStartKey },
+              };
+            }
+          }
+        }
+      }
+    } catch {
+      result = { kind: "unsafe" };
+    }
+    try {
+      await handle?.close();
+    } catch {
+      return { kind: "unsafe" };
+    }
+    return result;
+  }
+
+  private readLockOwner(): Promise<LockOwnerRead> {
     return this.readLockOwnerAt(this.lockPath);
   }
 
-  private processIsAlive(pid: number): boolean {
-    try {
-      process.kill(pid, 0);
-      return true;
-    } catch (error) {
-      return (error as NodeJS.ErrnoException).code !== "ESRCH";
-    }
+  private async ownerIsProvablyStale(owner: LockOwner): Promise<boolean> {
+    const status = await this.processIdentityProvider.inspect(owner.pid);
+    return status.state === "dead" || (status.state === "alive" && status.startKey !== owner.startKey);
   }
 
   private sameLockOwner(
-    left: { readonly nonce: string; readonly pid: number } | undefined,
-    right: { readonly nonce: string; readonly pid: number },
+    left: LockOwner | undefined,
+    right: LockOwner,
   ): boolean {
-    return left?.nonce === right.nonce && left.pid === right.pid;
+    return left?.nonce === right.nonce && left.pid === right.pid && left.startKey === right.startKey;
   }
 
   private async isolateLock(
     suffix: string,
-    expectedOwner: { readonly nonce: string; readonly pid: number },
+    expectedOwner: LockOwner | undefined,
+    processLock: ProcessLockLease,
   ): Promise<string | undefined> {
     const isolatedPath = `${this.lockPath}.${suffix}.${process.pid}.${randomBytes(12).toString("base64url")}`;
     try {
+      processLock.assertHeld();
       await rename(this.lockPath, isolatedPath);
     } catch (error) {
       if (["ENOENT", "EEXIST", "EPERM"].includes((error as NodeJS.ErrnoException).code ?? "")) {
@@ -399,16 +487,19 @@ export class CandidateContextStore {
       }
       throw error;
     }
-    if (this.sameLockOwner(await this.readLockOwnerAt(isolatedPath), expectedOwner)) {
+    const isolatedOwner = await this.readLockOwnerAt(isolatedPath);
+    if ((expectedOwner === undefined && ["missing", "malformed"].includes(isolatedOwner.kind)) ||
+        (expectedOwner !== undefined && isolatedOwner.kind === "valid" &&
+          this.sameLockOwner(isolatedOwner.owner, expectedOwner))) {
       return isolatedPath;
     }
-    await rename(isolatedPath, this.lockPath).catch(() => undefined);
     return undefined;
   }
 
   private async assertLockOwner(lease: LockLease): Promise<void> {
+    lease.assertProcessLockHeld();
     const owner = await this.readLockOwner();
-    if (owner === undefined || owner.nonce !== lease.nonce || owner.pid !== lease.pid) {
+    if (owner.kind !== "valid" || !this.sameLockOwner(owner.owner, lease)) {
       throw internalError("Candidate context lock ownership was lost; fenced writer cannot persist");
     }
   }
@@ -418,33 +509,57 @@ export class CandidateContextStore {
       ...(this.windowsAclVerifier === undefined ? {} : { windowsAclVerifier: this.windowsAclVerifier }),
     });
     const started = Date.now();
+    let processLock: ProcessLockLease;
+    let identity: ProcessIdentity;
+    try {
+      identity = await this.processIdentityProvider.current();
+      if (!Number.isSafeInteger(identity.pid) || identity.pid < 1 ||
+          !/^[A-Za-z0-9:._-]{1,128}$/u.test(identity.startKey)) {
+        throw new Error("invalid process identity");
+      }
+      processLock = await this.processLockProvider.acquire(this.processLockPath, this.lockTimeoutMs);
+    } catch (error) {
+      if (error instanceof ProcessLockError && error.reason === "timeout") {
+        throw internalError("Candidate context lock timed out");
+      }
+      throw internalError("Candidate context process lock is unavailable");
+    }
+    let leaseCreated = false;
+    try {
     for (;;) {
+      processLock.assertHeld();
       const nonce = randomBytes(24).toString("base64url");
       let createdLockDirectory = false;
       try {
         await mkdir(this.lockPath, { mode: 0o700 });
         createdLockDirectory = true;
         await this.faultInjector?.hit("after-lock-directory-create");
+        processLock.assertHeld();
         await writeFile(this.lockOwnerPath(), JSON.stringify({
-          lockVersion: 1,
+          lockVersion: 2,
           nonce,
-          pid: process.pid,
+          pid: identity.pid,
+          processStartKey: identity.startKey,
         }), { encoding: "utf8", flag: "wx", mode: 0o600 });
+        leaseCreated = true;
+        const expectedOwner: LockOwner = { nonce, pid: identity.pid, startKey: identity.startKey };
         return {
           nonce,
-          pid: process.pid,
+          pid: identity.pid,
+          startKey: identity.startKey,
+          assertProcessLockHeld: () => processLock.assertHeld(),
           release: async () => {
-            const expectedOwner = { nonce, pid: process.pid };
-            for (;;) {
+            try {
+              processLock.assertHeld();
               const owner = await this.readLockOwner();
-              if (!this.sameLockOwner(owner, expectedOwner)) return;
-              const isolatedPath = await this.isolateLock("released", expectedOwner);
+              if (owner.kind !== "valid" || !this.sameLockOwner(owner.owner, expectedOwner)) return;
+              const isolatedPath = await this.isolateLock("released", expectedOwner, processLock);
               if (isolatedPath !== undefined) {
                 await this.faultInjector?.hit("after-lock-release-rename");
                 await rm(isolatedPath, { recursive: true, force: true });
-                return;
               }
-              await sleep(5);
+            } finally {
+              await processLock.release();
             }
           },
         };
@@ -471,13 +586,21 @@ export class CandidateContextStore {
         if (lockInfo.isSymbolicLink() || !lockInfo.isDirectory()) {
           throw internalError("Candidate context lock is unsafe");
         }
-        const owner = await this.readLockOwner();
-        if (owner !== undefined && !this.processIsAlive(owner.pid)) {
+        const observed = await this.readLockOwner();
+        if (observed.kind === "unsafe") {
+          throw internalError("Candidate context lock owner metadata is unsafe");
+        }
+        if (observed.kind === "valid" && await this.ownerIsProvablyStale(observed.owner)) {
           try {
-            const stalePath = await this.isolateLock("stale", owner);
-            if (stalePath === undefined) {
+            const current = await this.readLockOwner();
+            if (current.kind !== "valid" || !this.sameLockOwner(current.owner, observed.owner) ||
+                !await this.ownerIsProvablyStale(current.owner)) {
               await sleep(5);
               continue;
+            }
+            const stalePath = await this.isolateLock("stale", current.owner, processLock);
+            if (stalePath === undefined) {
+              throw internalError("Orphaned candidate context lock changed during recovery");
             }
             await rm(stalePath, { recursive: true, force: true });
             continue;
@@ -489,15 +612,18 @@ export class CandidateContextStore {
             throw internalError("Orphaned candidate context lock cannot be safely recovered");
           }
         }
-        if (owner === undefined && Date.now() - lockInfo.mtimeMs >= INCOMPLETE_LOCK_GRACE_MS) {
+        if (["missing", "malformed"].includes(observed.kind) &&
+            Date.now() - lockInfo.mtimeMs >= INCOMPLETE_LOCK_GRACE_MS) {
           try {
-            const stalePath = `${this.lockPath}.stale.${process.pid}.${nonce}`;
             await this.faultInjector?.hit("before-incomplete-lock-isolation");
-            await rename(this.lockPath, stalePath);
-            if (await this.readLockOwnerAt(stalePath) !== undefined) {
-              await rename(stalePath, this.lockPath).catch(() => undefined);
+            const current = await this.readLockOwner();
+            if (!["missing", "malformed"].includes(current.kind)) {
               await sleep(5);
               continue;
+            }
+            const stalePath = await this.isolateLock("stale", undefined, processLock);
+            if (stalePath === undefined) {
+              throw internalError("Incomplete candidate context lock changed during recovery");
             }
             await rm(stalePath, { recursive: true, force: true });
             continue;
@@ -515,10 +641,9 @@ export class CandidateContextStore {
         await sleep(5);
       }
     }
-  }
-
-  private sameFileIdentity(left: BigIntStats, right: BigIntStats): boolean {
-    return left.dev === right.dev && left.ino === right.ino;
+    } finally {
+      if (!leaseCreated) await processLock.release().catch(() => undefined);
+    }
   }
 
   private async quarantine(expected?: BigIntStats): Promise<void> {

@@ -14,7 +14,13 @@ export interface ContextBinding {
     readonly fullPath: string;
   };
   readonly targetBranch: string;
+  readonly sourceProject: {
+    readonly id: string;
+    readonly fullPath: string;
+  };
+  readonly sourceBranch: string;
   readonly sourceHeadSha: string;
+  readonly targetRefSha: string;
   readonly mrIid: number | null;
   readonly releaseSetId: string;
   readonly cliVersion: string;
