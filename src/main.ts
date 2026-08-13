@@ -79,7 +79,14 @@ function runContractProbe(): void {
       workItem: { relation: "none", noIssueReason: "This is an internal binary probe" },
       impact: { areaIds: ["devops"], nature: "non-functional" },
       verification: {
-        items: [{ id: "self-test", state: "checked", evidence: "Embedded probe execution" }],
+        items: [{
+          id: "self-test",
+          state: "checked",
+          evidenceKind: "command-output",
+          command: "self-test --contract-probe",
+          result: "Embedded request schema accepted",
+          evidence: "Executed inside the packaged SEA artifact",
+        }],
       },
       documentation: {},
       risk: { level: "low" },

@@ -775,7 +775,7 @@ checkbox 分为三类，必须使用不同的 Schema 表达：
 | 类型 | 示例 | 输入模型 | 未勾选含义 |
 | --- | --- | --- | --- |
 | categorical | Impact area、Impact nature、Documentation updates | selected ID 或单选 enum | 未选择该分类 |
-| evidence-state | Build、test、manual verification | `checked` / `pending` / `not-applicable` + evidence | 尚未完成或不适用 |
+| evidence-state | Build、test、manual verification | `state` + tagged `evidenceKind` + typed evidence fields | 尚未完成或不适用 |
 | derived-local | branch、commit、repository hygiene | 不接受用户状态输入，由本地 Git/规则检查派生 | 当前本地检查未满足或不可用 |
 | derived-gitlab | CI、review request、approval、blocking discussions | 不接受用户状态输入，由 GitLab 回读 | 当前 GitLab 状态未满足 |
 | derived-composite | Issue/work item metadata | 不接受状态输入，由 validated Request 与 GitLab 快照共同派生 | 当前复合条件未满足 |
@@ -805,7 +805,16 @@ checkbox 分为三类，必须使用不同的 Schema 表达：
 | `high-risk-reviewers` | `derived-gitlab` | High risk 时当前 MR 至少有 2 名合格 reviewer；其他风险为 not-applicable |
 | `blocking-issues` | `derived-gitlab` | unresolved discussions / blocking state 为零；API 不可用时为 pending |
 
-Categorical checkbox 由 selected ID/enum 渲染；未选择只表示该分类未被选中。Evidence-state 使用 `{id,state,evidence}`，`not-applicable` 时 evidence 字段保存具体理由。所有 derived checkbox 均不出现在用户 Request 的 state 字段中；V1 不提供人工证据覆盖 derived 结果的旁路。诊断标记保存完整 state map，因而 `[ ]` 可以在回读时区分 pending 与 not-applicable。
+Categorical checkbox 由 selected ID/enum 渲染；未选择只表示该分类未被选中。Evidence-state 使用 `{id,state,evidenceKind,command,result,evidence}` 的 tagged union，CLI 只按 tag 与字段结构判定，不从自然语言猜测状态：
+
+| `state` | 允许的 `evidenceKind` | `command` | `result` | `evidence` |
+| --- | --- | --- | --- | --- |
+| `checked` | `command-output` | 非空 | 非空 | 具体来源说明 |
+| `checked` | `file-inspection` / `manual-verification` | 可为 `null` | 非空 | 具体文件或人工验证说明 |
+| `pending` | `pending-reason` | 必须为 `null` | 必须为 `null` | 具体等待原因 |
+| `not-applicable` | `not-applicable-reason` | 必须为 `null` | 必须为 `null` | 具体不适用原因 |
+
+所有 `evidence` 在 trim 后至少 16 个 Unicode scalar value，非空 `result` 至少 8 个 Unicode scalar value；这些是统一结构下限，不使用词语黑名单。所有 derived checkbox 均不出现在用户 Request 的 state 字段中；V1 不提供人工证据覆盖 derived 结果的旁路。诊断标记保存完整 state map，因而 `[ ]` 可以在回读时区分 pending 与 not-applicable。
 
 互斥规则：
 
@@ -1034,6 +1043,8 @@ Profile 可以提出建议，例如 `fix -> type::bug` 或 `docs -> type::doc`�
 - stdin 必须显式指定 `--input-format yaml|json`；
 - stdin 使用 UTF-8 并读到 EOF；
 - UTF-8 payload 最大 2 MiB，超限返回 `INPUT_TOO_LARGE`；
+- YAML 在构建文档 AST 前通过同版本 YAML lexer 惰性扫描，最多允许 20,000 个 lexeme；超限或 lexer 异常返回 `INPUT_ERROR`。quoted scalar 和 comment 的内容长度不增加 lexeme 数，文本总长度仍由独立的 2 MiB 上限约束；
+- 解析后的结构化值最大嵌套深度为 256；文件、stdin 和公开的内存输入边界均在递归复制、归一化和 Schema 校验前迭代检查，超限返回 `INPUT_ERROR`；
 - YAML 只允许单文档；
 - YAML 拒绝重复 key、自定义 tag、对象构造和 alias merge；
 - JSON 拒绝重复 key 和尾随内容；
@@ -1090,6 +1101,7 @@ Profile 可以提出建议，例如 `fix -> type::bug` 或 `docs -> type::doc`�
       {
         "id": "local-build",
         "state": "checked",
+        "evidenceKind": "command-output",
         "command": "cmake --build build-debug --target LubanStudio",
         "result": "Debug target passed",
         "evidence": "Local command output"
@@ -1097,6 +1109,7 @@ Profile 可以提出建议，例如 `fix -> type::bug` 或 `docs -> type::doc`�
       {
         "id": "unit-tests",
         "state": "checked",
+        "evidenceKind": "command-output",
         "command": "npm test -- --silent",
         "result": "274 tests passed",
         "evidence": "Local command output"
@@ -1104,20 +1117,24 @@ Profile 可以提出建议，例如 `fix -> type::bug` 或 `docs -> type::doc`�
       {
         "id": "integration-tests",
         "state": "pending",
-        "result": "Not run",
+        "evidenceKind": "pending-reason",
+        "command": null,
+        "result": null,
         "evidence": "Pending reviewer environment"
       },
       {
         "id": "core-behavior",
         "state": "checked",
-        "command": "Inspect the final embedded frontend HTML",
+        "evidenceKind": "file-inspection",
+        "command": null,
         "result": "No Tailwind @property --tw-* registrations remain",
         "evidence": "Generated artifact inspection"
       },
       {
         "id": "docs-links-format",
         "state": "checked",
-        "command": "Review changed Markdown files",
+        "evidenceKind": "file-inspection",
+        "command": null,
         "result": "Links and formatting are valid",
         "evidence": "Local document review"
       }

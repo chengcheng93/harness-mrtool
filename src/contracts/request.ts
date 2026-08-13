@@ -9,14 +9,43 @@ export type RequestIntent = "draft" | "ready";
 export type ImpactNature = "functional" | "non-functional" | "docs-only";
 export type RiskLevel = "low" | "medium" | "high";
 export type VerificationState = "checked" | "pending" | "not-applicable";
+export type VerificationEvidenceKind =
+  | "command-output"
+  | "file-inspection"
+  | "manual-verification"
+  | "pending-reason"
+  | "not-applicable-reason";
 
-export interface VerificationItem {
+interface VerificationItemBase {
   readonly id: string;
-  readonly state: VerificationState;
-  readonly command: string | null;
-  readonly result: string | null;
   readonly evidence: string;
 }
+
+export type VerificationItem =
+  | (VerificationItemBase & {
+      readonly state: "checked";
+      readonly evidenceKind: "command-output";
+      readonly command: string;
+      readonly result: string;
+    })
+  | (VerificationItemBase & {
+      readonly state: "checked";
+      readonly evidenceKind: "file-inspection" | "manual-verification";
+      readonly command: string | null;
+      readonly result: string;
+    })
+  | (VerificationItemBase & {
+      readonly state: "pending";
+      readonly evidenceKind: "pending-reason";
+      readonly command: null;
+      readonly result: null;
+    })
+  | (VerificationItemBase & {
+      readonly state: "not-applicable";
+      readonly evidenceKind: "not-applicable-reason";
+      readonly command: null;
+      readonly result: null;
+    });
 
 export type WorkItem =
   | { readonly relation: "closes" | "related"; readonly iid: number }

@@ -3,12 +3,15 @@ import {
   isNode,
   isPair,
   isScalar,
+  Lexer,
   parseAllDocuments,
   visit,
 } from "yaml";
 
 import { ToolError } from "../contracts/errors.ts";
 import { copyJsonValue, type JsonValue } from "../contracts/jcs.ts";
+
+export const MAX_YAML_LEXEMES = 20_000;
 
 function inputError(reason: string, cause?: unknown): ToolError<"INPUT_ERROR"> {
   return new ToolError(
@@ -24,7 +27,28 @@ function inputError(reason: string, cause?: unknown): ToolError<"INPUT_ERROR"> {
   );
 }
 
+function assertYamlLexicalComplexity(text: string): void {
+  let lexemeCount = 0;
+  let exceeded = false;
+  try {
+    for (const _lexeme of new Lexer().lex(text)) {
+      lexemeCount += 1;
+      if (lexemeCount > MAX_YAML_LEXEMES) {
+        exceeded = true;
+        break;
+      }
+    }
+  } catch (error) {
+    throw inputError("YAML lexical analysis failed", error);
+  }
+  if (exceeded) {
+    throw inputError(`YAML lexical complexity exceeds ${MAX_YAML_LEXEMES} lexemes`);
+  }
+}
+
 export function parseStrictYaml(text: string): JsonValue {
+  assertYamlLexicalComplexity(text);
+
   let documents;
   try {
     documents = parseAllDocuments(text, {

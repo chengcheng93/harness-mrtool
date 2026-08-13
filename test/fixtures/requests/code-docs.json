@@ -28,8 +28,9 @@
       {
         "id": " unit-tests ",
         "state": " checked ",
+        "evidenceKind": " file-inspection ",
         "result": " 274 tests passed ",
-        "evidence": "  artifact\r\nlog  "
+        "evidence": "  inspected generated artifact\r\nlog output  "
       }
     ]
   },

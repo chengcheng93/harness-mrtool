@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
+import { Lexer } from "yaml";
+
 import { isToolError } from "../../src/contracts/errors.ts";
 import {
   decodeInputBytes,
@@ -14,7 +16,10 @@ import {
   MAX_JSON_NESTING_DEPTH,
   parseStrictJson,
 } from "../../src/input/strict-json.ts";
-import { parseStrictYaml } from "../../src/input/strict-yaml.ts";
+import {
+  MAX_YAML_LEXEMES,
+  parseStrictYaml,
+} from "../../src/input/strict-yaml.ts";
 
 function assertInputError(action: () => unknown, message?: RegExp): void {
   assert.throws(action, (error: unknown) => {
@@ -40,7 +45,12 @@ function validRequest(): Record<string, unknown> {
     workItem: { relation: "none", noIssueReason: "No issue exists for this maintenance task" },
     impact: { areaIds: ["future-area"], nature: "functional" },
     verification: {
-      items: [{ id: "future-check", state: "pending", evidence: "CI has not started" }],
+      items: [{
+        id: "future-check",
+        state: "pending",
+        evidenceKind: "pending-reason",
+        evidence: "CI has not started in the target project",
+      }],
     },
     documentation: {},
     risk: { level: "low" },
@@ -117,6 +127,37 @@ test("rejects unsafe YAML graph features", () => {
 
 test("converts deeply nested YAML parser failures to ToolError", () => {
   assertInputError(() => parseStrictYaml(`${"[".repeat(10_000)}0${"]".repeat(10_000)}`));
+});
+
+test("bounds YAML lexical complexity before building a document tree", () => {
+  const blockMap = (entries: number): string =>
+    `${Array.from({ length: entries }, (_, index) => `key${index}: 0`).join("\n")}\n`;
+  const flowSequence = (items: number): string => `[${"0,".repeat(items - 1)}0]\n`;
+  const flowMap = (entries: number): string =>
+    `{${Array.from({ length: entries }, (_, index) => `key${index}: 0`).join(",")}}\n`;
+
+  const boundaryMap = blockMap(2_857);
+  assert.equal([...new Lexer().lex(boundaryMap)].length, MAX_YAML_LEXEMES);
+  const parsedBoundary = parseStrictYaml(boundaryMap);
+  assert.equal(Object.keys(parsedBoundary as Record<string, unknown>).length, 2_857);
+
+  for (const raw of [
+    blockMap(MAX_YAML_LEXEMES + 1),
+    flowSequence(MAX_YAML_LEXEMES + 1),
+    flowMap(MAX_YAML_LEXEMES + 1),
+  ]) {
+    assert.throws(() => parseStrictYaml(raw), (error: unknown) => {
+      assert.equal(isToolError(error, "INPUT_ERROR"), true);
+      assert.equal(
+        isToolError(error) ? error.details.actual : null,
+        `YAML lexical complexity exceeds ${MAX_YAML_LEXEMES} lexemes`,
+      );
+      return true;
+    });
+  }
+
+  const longScalarAndComment = `value: "${"x".repeat(100_000)}"\n# ${"y".repeat(100_000)}\n`;
+  assert.deepEqual(parseStrictYaml(longScalarAndComment), { value: "x".repeat(100_000) });
 });
 
 test("rejects duplicate keys, empty YAML and every extra document", () => {
@@ -335,6 +376,7 @@ test("equivalent complete JSON and YAML fixtures normalize identically", async (
   assert.equal(normalizedJson.changes.summary[0], "  First line\nSecond line  ");
   assert.equal(normalizedJson.verification.items[0]?.command, null);
   assert.equal(normalizedJson.verification.items[0]?.result, " 274 tests passed ");
+  assert.equal(normalizedJson.verification.items[0]?.evidenceKind, "file-inspection");
   assert.deepEqual(normalizedJson.changes.technicalChanges, []);
   assert.deepEqual(normalizedJson.profileFields, {});
   assert.deepEqual(normalizedJson.review.reviewerCandidateTokens, [
@@ -416,8 +458,18 @@ test("rejects duplicate canonical IDs and tokens", () => {
     },
     (request) => {
       (request.verification as Record<string, unknown>).items = [
-        { id: "check", state: "pending", evidence: "first" },
-        { id: " check ", state: "pending", evidence: "second" },
+        {
+          id: "check",
+          state: "pending",
+          evidenceKind: "pending-reason",
+          evidence: "The first check is still pending",
+        },
+        {
+          id: " check ",
+          state: "pending",
+          evidenceKind: "pending-reason",
+          evidence: "The second check is still pending",
+        },
       ];
     },
   ];
@@ -502,6 +554,10 @@ test("uses the conservative V1 plain-title rule and allows business punctuation"
     "Keep CSS @property compatible with Qt/C++",
     "Preserve fallback-values: Debug (Windows)",
     "Handle issue #51 in API v2.0",
+    "Keep AT&T compatibility",
+    "Fix foo_bar mapping",
+    "Compare x < y and y > z",
+    "Use C:\\temp path",
   ]) {
     const request = validRequest();
     (request.title as Record<string, unknown>).titleSummary = titleSummary;
@@ -538,47 +594,105 @@ test("rejects blank or placeholder provided prose and always requires evidence",
   }
 });
 
-test("requires substantive verification evidence for checked and not-applicable states", () => {
-  const rejected: readonly [string, string][] = [
-    ["not-applicable", "Not applicable"],
-    ["not-applicable", "Does not apply"],
-    ["not-applicable", "N/A because this does not apply"],
-    ["not-applicable", "Short"],
-    ["checked", "yes"],
-    ["checked", "pass"],
-    ["checked", "passed"],
-    ["checked", "ok"],
-    ["checked", "success"],
-    ["checked", "Passed!"],
+test("enforces the tagged verification evidence contract", () => {
+  const accepted = [
+    {
+      id: "unit-tests",
+      state: "checked",
+      evidenceKind: "command-output",
+      command: "npm test",
+      result: "121 tests passed",
+      evidence: "Captured stdout from the local test run",
+    },
+    {
+      id: "artifact-check",
+      state: "checked",
+      evidenceKind: "file-inspection",
+      command: null,
+      result: "No incompatible registrations remain",
+      evidence: "Inspected the generated frontend artifact",
+    },
+    {
+      id: "runtime-check",
+      state: "checked",
+      evidenceKind: "manual-verification",
+      command: null,
+      result: "Login page remained rendered",
+      evidence: "Verified manually in Qt WebEngine Debug",
+    },
+    {
+      id: "integration-tests",
+      state: "pending",
+      evidenceKind: "pending-reason",
+      command: null,
+      result: null,
+      evidence: "Awaiting the reviewer environment",
+    },
+    {
+      id: "deployment-check",
+      state: "not-applicable",
+      evidenceKind: "not-applicable-reason",
+      command: null,
+      result: null,
+      evidence: "This change has no deployment path",
+    },
   ];
-  const unexpectedlyAccepted: string[] = [];
-  for (const [state, evidence] of rejected) {
+  for (const item of accepted) {
     const request = validRequest();
-    (request.verification as { items: Record<string, unknown>[] }).items = [
-      { id: "manual-check", state, evidence },
-    ];
-    try {
-      normalizeAndValidateRequest(request);
-      unexpectedlyAccepted.push(`${state}:${evidence}`);
-    } catch (error) {
-      assert.equal(isToolError(error, "INPUT_ERROR"), true);
-    }
+    (request.verification as { items: Record<string, unknown>[] }).items = [item];
+    assert.deepEqual(normalizeAndValidateRequest(request).verification.items[0], item);
   }
-  assert.deepEqual(unexpectedlyAccepted, []);
 
-  for (const [state, evidence] of [
-    ["checked", "Manually verified the login page in Qt WebEngine"],
-    ["not-applicable", "No deployment path exists for this documentation-only change"],
-  ] as const) {
+  const rejected = [
+    { id: "check", state: "checked", command: "npm test", result: "Tests passed", evidence: "Captured stdout" },
+    { id: "check", state: "checked", evidenceKind: "pending-reason", command: null, result: null, evidence: "Testing has not started" },
+    { id: "check", state: "pending", evidenceKind: "manual-verification", command: null, result: null, evidence: "Testing has not started" },
+    { id: "check", state: "not-applicable", evidenceKind: "pending-reason", command: null, result: null, evidence: "No deployment path exists" },
+    { id: "check", state: "checked", evidenceKind: "command-output", command: null, result: "Tests passed", evidence: "Captured stdout" },
+    { id: "check", state: "checked", evidenceKind: "command-output", command: "npm test", result: null, evidence: "Captured stdout" },
+    { id: "check", state: "checked", evidenceKind: "file-inspection", command: null, result: null, evidence: "Inspected artifact" },
+    { id: "check", state: "checked", evidenceKind: "manual-verification", command: null, result: null, evidence: "Verified manually" },
+    { id: "check", state: "pending", evidenceKind: "pending-reason", command: "npm test", result: null, evidence: "Testing has not started" },
+    { id: "check", state: "pending", evidenceKind: "pending-reason", command: null, result: "Not run yet", evidence: "Testing has not started" },
+    { id: "check", state: "not-applicable", evidenceKind: "not-applicable-reason", command: null, result: "Not needed", evidence: "No deployment path exists" },
+    { id: "check", state: "checked", evidenceKind: "manual-verification", command: null, result: "done", evidence: "verified" },
+  ];
+  for (const item of rejected) {
+    const request = validRequest();
+    (request.verification as { items: Record<string, unknown>[] }).items = [item];
+    assertInvalidRequest(request);
+  }
+});
+
+test("requires minimum text without guessing evidence vocabulary", () => {
+  for (const evidence of ["", "short", "verified"]) {
     const request = validRequest();
     (request.verification as { items: Record<string, unknown>[] }).items = [
-      { id: "manual-check", state, evidence },
+      {
+        id: "manual-check",
+        state: "checked",
+        evidenceKind: "manual-verification",
+        command: null,
+        result: "Page rendered successfully",
+        evidence,
+      },
     ];
-    const item = normalizeAndValidateRequest(request).verification.items[0];
-    assert.equal(item?.evidence, evidence);
-    assert.equal(item?.command, null);
-    assert.equal(item?.result, null);
+    assertInvalidRequest(request);
   }
+
+  const request = validRequest();
+  (request.verification as { items: Record<string, unknown>[] }).items = [{
+    id: "manual-check",
+    state: "checked",
+    evidenceKind: "manual-verification",
+    command: null,
+    result: "Page rendered successfully",
+    evidence: "This was verified",
+  }];
+  assert.equal(
+    normalizeAndValidateRequest(request).verification.items[0]?.evidence,
+    "This was verified",
+  );
 });
 
 test("rejects placeholders in titles, identities, IDs and candidate tokens", () => {
@@ -616,14 +730,17 @@ test("normalizes only declared semantic empties and preserves prose whitespace a
   (request.title as Record<string, unknown>).titleSummary = "  e\u0301 title  ";
   (request.changes as { summary: string[] }).summary = ["  prose\rline  "];
   const verification = request.verification as { items: Record<string, unknown>[] };
+  verification.items[0]!.state = "checked";
+  verification.items[0]!.evidenceKind = "file-inspection";
   verification.items[0]!.command = "   ";
-  verification.items[0]!.result = "  result  ";
+  verification.items[0]!.result = "  result passed  ";
+  verification.items[0]!.evidence = "  inspected generated file  ";
   const normalized = normalizeAndValidateRequest(request);
   assert.equal(normalized.title.titleSummary, "e\u0301 title");
   assert.notEqual(normalized.title.titleSummary, "\u00e9 title");
   assert.equal(normalized.changes.summary[0], "  prose\nline  ");
   assert.equal(normalized.verification.items[0]?.command, null);
-  assert.equal(normalized.verification.items[0]?.result, "  result  ");
+  assert.equal(normalized.verification.items[0]?.result, "  result passed  ");
 
   for (const requiredField of ["intent", "targetBranch", "workItem", "risk", "mergeRequest"]) {
     const missing = validRequest();
@@ -650,6 +767,44 @@ test("sanitizes request validation errors and snapshots caller-owned values", ()
   const normalized = normalizeAndValidateRequest(request);
   (request.title as Record<string, unknown>).titleSummary = "mutated";
   assert.equal(normalized.title.titleSummary, "A valid title");
+});
+
+test("rejects excessively deep public values without leaking runtime errors", () => {
+  for (const depth of [257, 2_500, 2_800, 2_900, 4_000, 10_000]) {
+    let deepArray: unknown = null;
+    let deepObject: unknown = null;
+    for (let index = 0; index < depth; index += 1) {
+      deepArray = [deepArray];
+      deepObject = { child: deepObject };
+    }
+    for (const value of [deepArray, deepObject]) {
+      const request = validRequest();
+      request.unexpected = value;
+      assert.throws(() => normalizeAndValidateRequest(request), (error: unknown) => {
+        assert.equal(isToolError(error, "INPUT_ERROR"), true);
+        assert.equal(error instanceof RangeError, false);
+        assert.equal(
+          isToolError(error) ? error.details.actual : null,
+          "structured value exceeds 256 levels",
+        );
+        return true;
+      });
+    }
+  }
+
+  let getterReads = 0;
+  const accessorValue = {};
+  Object.defineProperty(accessorValue, "secret", {
+    enumerable: true,
+    get() {
+      getterReads += 1;
+      return "secret";
+    },
+  });
+  const request = validRequest();
+  request.unexpected = accessorValue;
+  assertInputError(() => normalizeAndValidateRequest(request));
+  assert.equal(getterReads, 0);
 });
 
 test("masks dynamic profile field keys in validation errors", () => {

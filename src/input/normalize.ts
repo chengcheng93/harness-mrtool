@@ -1,11 +1,13 @@
 import { Ajv, type ErrorObject } from "ajv";
 
 import requestSchema from "../../schemas/request-v1.schema.json" with { type: "json" };
-import { ToolError } from "../contracts/errors.ts";
+import { isToolError, ToolError } from "../contracts/errors.ts";
 import { copyJsonValue, type JsonObject, type JsonValue } from "../contracts/jcs.ts";
 import type { Request } from "../contracts/request.ts";
 
 type MutableObject = Record<string, JsonValue>;
+
+export const MAX_STRUCTURED_VALUE_DEPTH = 256;
 
 const requestValidator = new Ajv({ allErrors: true, strict: true }).compile<Request>(
   requestSchema,
@@ -18,6 +20,59 @@ function inputError(field: string | null, expected: JsonValue, actual: JsonValue
     actual,
     safeNextStep: "Correct the reported request field and submit the structured input again.",
   });
+}
+
+function structuredBoundaryError(actual: string): ToolError<"INPUT_ERROR"> {
+  return inputError(null, "a plain JSON value no deeper than 256 levels", actual);
+}
+
+function assertStructuredValueBoundary(root: unknown): void {
+  const pending: { readonly depth: number; readonly value: unknown }[] = [
+    { depth: 0, value: root },
+  ];
+  const greatestVisitedDepth = new WeakMap<object, number>();
+
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (current === undefined) {
+      break;
+    }
+    const { depth, value } = current;
+    if (depth > MAX_STRUCTURED_VALUE_DEPTH) {
+      throw structuredBoundaryError("structured value exceeds 256 levels");
+    }
+    if (value === null || typeof value !== "object") {
+      continue;
+    }
+
+    const previousDepth = greatestVisitedDepth.get(value);
+    if (previousDepth !== undefined && previousDepth >= depth) {
+      continue;
+    }
+    greatestVisitedDepth.set(value, depth);
+
+    const prototype = Object.getPrototypeOf(value);
+    if (Array.isArray(value)) {
+      if (prototype !== Array.prototype) {
+        throw structuredBoundaryError("structured value contains a non-plain array");
+      }
+    } else if (prototype !== Object.prototype && prototype !== null) {
+      throw structuredBoundaryError("structured value contains a non-plain object");
+    }
+    if (Object.getOwnPropertySymbols(value).length > 0) {
+      throw structuredBoundaryError("structured value contains symbol keys");
+    }
+
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    for (const descriptor of Object.values(descriptors)) {
+      if ("get" in descriptor || "set" in descriptor) {
+        throw structuredBoundaryError("structured value contains an accessor property");
+      }
+      if (descriptor.enumerable && "value" in descriptor) {
+        pending.push({ depth: depth + 1, value: descriptor.value });
+      }
+    }
+  }
 }
 
 function asObject(value: JsonValue | undefined): MutableObject | undefined {
@@ -146,6 +201,7 @@ function normalizeRequestShape(value: JsonValue): JsonValue {
       const item = asObject(itemValue);
       trimScalar(item, "id");
       trimScalar(item, "state");
+      trimScalar(item, "evidenceKind");
       for (const field of ["command", "result"]) {
         const optional = item?.[field];
         if (item !== undefined && (optional === undefined || optional === null ||
@@ -204,7 +260,7 @@ function isPlaceholder(value: string): boolean {
   const trimmed = value.trim();
   const compactAscii = trimmed.replace(/\s/gu, "").toUpperCase();
   return trimmed === "\u65e0" || compactAscii === "N/A" || compactAscii === "NA" ||
-    compactAscii === "TBD" || compactAscii === "NOTAPPLICABLE";
+    compactAscii === "TBD";
 }
 
 function assertProse(value: string, field: string): void {
@@ -244,47 +300,59 @@ function assertSemanticContent(request: Request): void {
     assertProse(request.workItem.noIssueReason, "/workItem/noIssueReason");
   }
   for (const [index, item] of request.verification.items.entries()) {
-    assertProse(item.evidence, `/verification/items/${index}/evidence`);
-    assertVerificationEvidence(item.state, item.evidence, index);
+    assertVerificationEvidence(item, index);
     if (item.command !== null) {
-      assertProse(item.command, `/verification/items/${index}/command`);
+      assertMinimumText(item.command, `/verification/items/${index}/command`, 1, "a non-empty command");
     }
     if (item.result !== null) {
-      assertProse(item.result, `/verification/items/${index}/result`);
+      assertMinimumText(item.result, `/verification/items/${index}/result`, 8, "a specific verification result");
     }
   }
 }
 
-const GENERIC_AFFIRMATIONS = new Set(["yes", "pass", "passed", "ok", "success"]);
-const MINIMUM_REASON_SCALARS = 8;
-
-function normalizedWords(value: string): string {
-  return value.trim().replace(/\s+/gu, " ").toLowerCase();
+function assertMinimumText(
+  value: string,
+  field: string,
+  minimumScalars: number,
+  expected: string,
+): void {
+  if ([...value.trim()].length < minimumScalars) {
+    throw inputError(field, expected, "text is blank or too short");
+  }
 }
 
 function assertVerificationEvidence(
-  state: Request["verification"]["items"][number]["state"],
-  evidence: string,
+  item: Request["verification"]["items"][number],
   index: number,
 ): void {
-  const field = `/verification/items/${index}/evidence`;
-  const normalized = normalizedWords(evidence);
-  const affirmation = normalized.replace(/[^\p{L}\p{N}]+/gu, "");
-  if (state === "checked" && GENERIC_AFFIRMATIONS.has(affirmation)) {
-    throw inputError(field, "specific verification evidence", "generic affirmation");
-  }
-  if (state === "not-applicable") {
-    const compact = normalized.replace(/[^\p{L}\p{N}]+/gu, "");
-    if (isPlaceholder(evidence) || /^n\s*\/\s*a\b/iu.test(normalized) ||
-        normalized.startsWith("not applicable") ||
-        normalized.startsWith("does not apply") ||
-        [...compact].length < MINIMUM_REASON_SCALARS) {
-      throw inputError(
-        field,
-        "a substantive reason explaining why the check is not applicable",
-        "missing or generic not-applicable reason",
-      );
+  const base = `/verification/items/${index}`;
+  assertMinimumText(item.evidence, `${base}/evidence`, 16, "specific verification evidence or reason");
+  if (item.state === "checked") {
+    if (!["command-output", "file-inspection", "manual-verification"].includes(item.evidenceKind)) {
+      throw inputError(`${base}/evidenceKind`, "a checked evidence source", "state and evidence kind conflict");
     }
+    if (item.evidenceKind === "command-output" &&
+        (item.command === null || item.result === null)) {
+      throw inputError(base, "command and result for command output", "incomplete command output evidence");
+    }
+    if (item.evidenceKind !== "command-output" && item.result === null) {
+      throw inputError(`${base}/result`, "a verification result", "missing result");
+    }
+    return;
+  }
+  if (item.state === "pending") {
+    if (item.evidenceKind !== "pending-reason" || item.command !== null || item.result !== null) {
+      throw inputError(base, "pending-reason with null command and result", "invalid pending evidence fields");
+    }
+    return;
+  }
+  if (item.evidenceKind !== "not-applicable-reason" ||
+      item.command !== null || item.result !== null) {
+    throw inputError(
+      base,
+      "not-applicable-reason with null command and result",
+      "invalid not-applicable evidence fields",
+    );
   }
 }
 
@@ -304,19 +372,20 @@ function assertTitle(titleSummary: string): void {
   }
 }
 
-// V1 titles intentionally reject Markdown-capable punctuation instead of
-// attempting to embed a full CommonMark parser in the input contract.
-const DISALLOWED_TITLE_CHARACTERS = new Set(["*", "_", "~", "`", "<", ">", "\\", "&"]);
-
 function containsConservativeV1TitleMarkup(title: string): boolean {
-  if ([...title].some((character) => DISALLOWED_TITLE_CHARACTERS.has(character))) {
-    return true;
-  }
   if (/^\s{0,3}(?:#{1,6}\s|>|[-+]\s|\d{1,9}[.)]\s|\[[^\]\r\n]+\]:)/u.test(title) ||
       /^\s{0,3}(?:-\s*){3,}$/u.test(title)) {
     return true;
   }
-  return /!?\[[^\]\r\n]+\](?:\([^\r\n)]*\)|\[[^\]\r\n]*\])/u.test(title);
+  return /!?\[[^\]\r\n]+\](?:\([^\r\n)]*\)|\[[^\]\r\n]*\])/u.test(title) ||
+    /&(?:#[xX][0-9a-fA-F]+|#[0-9]+|[A-Za-z][A-Za-z0-9]+);/u.test(title) ||
+    /<(?:[A-Za-z][A-Za-z0-9+.-]{1,31}:[^ <>\r\n]*|[^ <>@\r\n]+@[^ <>\r\n]+)>/u.test(title) ||
+    /<\/?[A-Za-z][^>\r\n]*>/u.test(title) ||
+    /\\[!"#$%&'()*+,./:;<=>?@[\]^_`{|}~-]/u.test(title) ||
+    /(^|[^\p{L}\p{N}])\*[^*\r\n]+\*(?!\*)/u.test(title) ||
+    /(^|[^\p{L}\p{N}])_[^_\r\n]+_(?![\p{L}\p{N}_])/u.test(title) ||
+    /~~[^~\r\n]+~~/u.test(title) ||
+    /(`+)[^`\r\n]+\1/u.test(title);
 }
 
 function assertImpactAreas(request: Request): void {
@@ -373,25 +442,32 @@ function assertUniqueVerificationIds(request: Request): void {
 }
 
 export function normalizeAndValidateRequest(value: unknown): Request {
-  let copied: JsonValue;
   try {
-    copied = copyJsonValue(value);
+    assertStructuredValueBoundary(value);
+    const copied = copyJsonValue(value);
+    const normalized = normalizeRequestShape(copied);
+    if (!requestValidator(normalized)) {
+      const issue = requestValidator.errors?.[0];
+      throw inputError(
+        issue === undefined ? null : safeField(issue),
+        issue?.keyword ?? "request-v1 schema",
+        "invalid request value",
+      );
+    }
+    assertTitle(normalized.title.titleSummary);
+    assertImpactAreas(normalized);
+    assertCanonicalScalars(normalized);
+    assertSemanticContent(normalized);
+    assertUniqueVerificationIds(normalized);
+    return normalized;
   } catch (error) {
-    throw inputError(null, "JSON-compatible structured request", "non-JSON request value");
-  }
-  const normalized = normalizeRequestShape(copied);
-  if (!requestValidator(normalized)) {
-    const issue = requestValidator.errors?.[0];
+    if (isToolError(error)) {
+      throw error;
+    }
     throw inputError(
-      issue === undefined ? null : safeField(issue),
-      issue?.keyword ?? "request-v1 schema",
-      "invalid request value",
+      null,
+      "JSON-compatible structured request",
+      "structured request processing failed",
     );
   }
-  assertTitle(normalized.title.titleSummary);
-  assertImpactAreas(normalized);
-  assertCanonicalScalars(normalized);
-  assertSemanticContent(normalized);
-  assertUniqueVerificationIds(normalized);
-  return normalized;
 }

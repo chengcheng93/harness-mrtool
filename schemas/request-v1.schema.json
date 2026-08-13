@@ -137,10 +137,19 @@
     "verificationItem": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "state", "command", "result", "evidence"],
+      "required": ["id", "state", "evidenceKind", "command", "result", "evidence"],
       "properties": {
         "id": { "$ref": "#/definitions/opaque" },
         "state": { "enum": ["checked", "pending", "not-applicable"] },
+        "evidenceKind": {
+          "enum": [
+            "command-output",
+            "file-inspection",
+            "manual-verification",
+            "pending-reason",
+            "not-applicable-reason"
+          ]
+        },
         "command": {
           "anyOf": [{ "type": "null" }, { "$ref": "#/definitions/prose" }]
         },
@@ -148,7 +157,46 @@
           "anyOf": [{ "type": "null" }, { "$ref": "#/definitions/prose" }]
         },
         "evidence": { "$ref": "#/definitions/prose" }
-      }
+      },
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "state": { "const": "checked" },
+                "evidenceKind": { "const": "command-output" },
+                "command": { "$ref": "#/definitions/prose" },
+                "result": { "$ref": "#/definitions/prose" }
+              }
+            },
+            {
+              "properties": {
+                "state": { "const": "checked" },
+                "evidenceKind": {
+                  "enum": ["file-inspection", "manual-verification"]
+                },
+                "result": { "$ref": "#/definitions/prose" }
+              }
+            },
+            {
+              "properties": {
+                "state": { "const": "pending" },
+                "evidenceKind": { "const": "pending-reason" },
+                "command": { "type": "null" },
+                "result": { "type": "null" }
+              }
+            },
+            {
+              "properties": {
+                "state": { "const": "not-applicable" },
+                "evidenceKind": { "const": "not-applicable-reason" },
+                "command": { "type": "null" },
+                "result": { "type": "null" }
+              }
+            }
+          ]
+        }
+      ]
     },
     "verification": {
       "type": "object",
