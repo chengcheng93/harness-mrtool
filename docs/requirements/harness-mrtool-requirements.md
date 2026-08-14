@@ -344,6 +344,15 @@ GitHub Pages 只托管体积很小的 signed channel envelope，不托管二进�
     "revokedCliVersions": [],
     "revokedReleaseSetIds": []
   },
+  "templateHistory": [
+    {
+      "releaseTag": "templates-v1.4.0",
+      "bundleManifestHash": "...",
+      "receiptPayloadSha256": "...",
+      "signingSequence": 42,
+      "signingKeyId": "release-key-1"
+    }
+  ],
   "recommendedSkillVersion": "1.1.0"
 }
 ```
@@ -353,6 +362,8 @@ GitHub Pages 只托管体积很小的 signed channel envelope，不托管二进�
 CLI 与 Template/Policy 构成原子 release set；Skill 不是当前进程可以热替换的成员，只声明推荐版本和兼容范围。每次 Skill 调用另行记录 `loadedSkillVersion`、`loadedSkillProtocol`、`installedSkillVersion`、`stagedSkillVersion` 和 `activationRequired`。
 
 Manifest 必须使用 CLI 内置公钥可验证的签名。客户端持久化已接受的最高 `sequence`，普通 manifest 不得降低该值；回滚必须使用更高 sequence 并显式指向旧的不可变资产。只信任 mutable Pages 文件中的 SHA-256 不足以保护自动更新。
+
+`templateHistory` 是 signed channel 内的追加式历史 Bundle 索引。每项固定 immutable template Release tag、Bundle manifest SHA-256、`bundle-receipt` payload SHA-256、签名 sequence 与 key ID。客户端接受一项后必须把它并入本地 trust state；后续更高 sequence 只能保留或追加，不能删除或改写既有 tag。首次从远端加载历史 Bundle 时，收据必须精确命中该索引并验证签名、manifest 和全部实际文件字节；仅由收据自报旧 sequence 不能绕过 key 撤销后回填伪造历史。
 
 ### 7.5 每次调用前检查
 

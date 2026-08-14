@@ -656,7 +656,7 @@ Expected: FAIL with missing updater.
 
 - [ ] **Step 3: Implement trust-chain verification**
 
-Verify exact base64url payload bytes with `node:crypto` Ed25519 before JSON parse; enforce 256 KiB envelope, sequence monotonicity, fixed origin/repo/tag grammar, compatibility tuple, revocation and key rotation. Historical Bundle receipts contain tag, Bundle manifest hash, every file hash/size, schema versions and signing sequence; cache acceptance stores the verified receipt beside assets.
+Verify exact base64url payload bytes with `node:crypto` Ed25519 before JSON parse; enforce 256 KiB envelope, sequence monotonicity, fixed origin/repo/tag grammar, compatibility tuple, revocation and key rotation. The signed channel carries an append-only `templateHistory` binding each immutable tag to its Bundle manifest and receipt payload digest. Historical Bundle receipts contain tag, Bundle manifest hash, every file hash/size, schema versions and signing sequence; a single fail-closed API verifies the trusted history anchor, receipt, manifest, and all actual file bytes before cache acceptance.
 
 - [ ] **Step 4: Run GREEN with fake clock/server**
 
