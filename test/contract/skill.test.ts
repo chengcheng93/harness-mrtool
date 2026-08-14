@@ -380,6 +380,140 @@ test("repair keeps an old-moved journal when its backup tree is tampered", async
   }
 });
 
+test("repair keeps an old-moved journal and temporary tree when its backup is missing", async () => {
+  const paths = await sandbox();
+  try {
+    const initial = await manager(paths);
+    await initial.install(release("1.0.0", 1, "old\n"));
+    const broken = await manager(paths, {
+      hit(point: string): void {
+        if (point === "after-active-old-move") throw new Error("injected post-move failure");
+      },
+    });
+    await broken.stage(release("1.1.0", 1, "new\n"));
+    await assert.rejects(broken.activate("1.1.0"));
+    const backupName = (await readdir(paths.root)).find((entry) => entry.startsWith(".harness-skill-old-"));
+    assert.ok(backupName);
+    const journal = JSON.parse(await readFile(join(paths.staging, ".harness-skill-activation.json"), "utf8")) as {
+      readonly temporaryPath: string;
+    };
+    await rm(join(paths.root, backupName!), { recursive: true, force: true });
+    await mkdir(journal.temporaryPath, { recursive: true });
+    await writeFile(join(journal.temporaryPath, "pending.txt"), "pending\n");
+    const restarted = await manager(paths);
+    await assert.rejects(
+      restarted.repair(),
+      (error: unknown) => typeof error === "object" && error !== null && "code" in error &&
+        error.code === "UPDATE_SECURITY_ERROR",
+    );
+    assert.ok((await readdir(paths.staging)).includes(".harness-skill-activation.json"));
+    assert.equal(await readFile(join(journal.temporaryPath, "pending.txt"), "utf8"), "pending\n");
+  } finally {
+    await rm(paths.root, { recursive: true, force: true });
+  }
+});
+
+test("repair keeps an old-moved journal and temporary tree when its backup is not a directory", async () => {
+  const paths = await sandbox();
+  try {
+    const initial = await manager(paths);
+    await initial.install(release("1.0.0", 1, "old\n"));
+    const broken = await manager(paths, {
+      hit(point: string): void {
+        if (point === "after-active-old-move") throw new Error("injected post-move failure");
+      },
+    });
+    await broken.stage(release("1.1.0", 1, "new\n"));
+    await assert.rejects(broken.activate("1.1.0"));
+    const backupName = (await readdir(paths.root)).find((entry) => entry.startsWith(".harness-skill-old-"));
+    assert.ok(backupName);
+    const journal = JSON.parse(await readFile(join(paths.staging, ".harness-skill-activation.json"), "utf8")) as {
+      readonly temporaryPath: string;
+    };
+    await rm(join(paths.root, backupName!), { recursive: true, force: true });
+    await writeFile(join(paths.root, backupName!), "not a Skill directory\n");
+    await mkdir(journal.temporaryPath, { recursive: true });
+    await writeFile(join(journal.temporaryPath, "pending.txt"), "pending\n");
+    const restarted = await manager(paths);
+    await assert.rejects(
+      restarted.repair(),
+      (error: unknown) => typeof error === "object" && error !== null && "code" in error &&
+        error.code === "UPDATE_SECURITY_ERROR",
+    );
+    assert.equal(await readFile(join(paths.root, backupName!), "utf8"), "not a Skill directory\n");
+    assert.ok((await readdir(paths.staging)).includes(".harness-skill-activation.json"));
+    assert.equal(await readFile(join(journal.temporaryPath, "pending.txt"), "utf8"), "pending\n");
+  } finally {
+    await rm(paths.root, { recursive: true, force: true });
+  }
+});
+
+test("repair keeps a prepared journal and temporary tree when the previous active Skill is missing", async () => {
+  const paths = await sandbox();
+  try {
+    const initial = await manager(paths);
+    await initial.install(release("1.0.0", 1, "old\n"));
+    const broken = await manager(paths, {
+      hit(point: string): void {
+        if (point === "before-active-publish") throw new Error("injected pre-publish failure");
+      },
+    });
+    await broken.stage(release("1.1.0", 1, "new\n"));
+    await assert.rejects(broken.activate("1.1.0"));
+    const journal = JSON.parse(await readFile(join(paths.staging, ".harness-skill-activation.json"), "utf8")) as {
+      readonly temporaryPath: string;
+    };
+    await rm(paths.active, { recursive: true, force: true });
+    await mkdir(journal.temporaryPath, { recursive: true });
+    await writeFile(join(journal.temporaryPath, "pending.txt"), "pending\n");
+    const restarted = await manager(paths);
+    await assert.rejects(
+      restarted.repair(),
+      (error: unknown) => typeof error === "object" && error !== null && "code" in error &&
+        error.code === "UPDATE_SECURITY_ERROR",
+    );
+    assert.ok((await readdir(paths.staging)).includes(".harness-skill-activation.json"));
+    assert.equal(await readFile(join(journal.temporaryPath, "pending.txt"), "utf8"), "pending\n");
+  } finally {
+    await rm(paths.root, { recursive: true, force: true });
+  }
+});
+
+test("repair keeps a prepared journal and temporary tree when the active Skill version drifts", async () => {
+  const paths = await sandbox();
+  try {
+    const initial = await manager(paths);
+    await initial.install(release("1.0.0", 1, "old\n"));
+    const broken = await manager(paths, {
+      hit(point: string): void {
+        if (point === "before-active-publish") throw new Error("injected pre-publish failure");
+      },
+    });
+    await broken.stage(release("1.1.0", 1, "new\n"));
+    await assert.rejects(broken.activate("1.1.0"));
+    const activeManifestPath = join(paths.active, ".harness-skill-manifest.json");
+    const manifest = JSON.parse(await readFile(activeManifestPath, "utf8")) as Record<string, unknown>;
+    manifest.version = "9.9.9";
+    manifest.tag = "skill-v9.9.9";
+    await writeFile(activeManifestPath, `${canonicalizeJson(manifest as never)}\n`);
+    const journal = JSON.parse(await readFile(join(paths.staging, ".harness-skill-activation.json"), "utf8")) as {
+      readonly temporaryPath: string;
+    };
+    await mkdir(journal.temporaryPath, { recursive: true });
+    await writeFile(join(journal.temporaryPath, "pending.txt"), "pending\n");
+    const restarted = await manager(paths);
+    await assert.rejects(
+      restarted.repair(),
+      (error: unknown) => typeof error === "object" && error !== null && "code" in error &&
+        error.code === "UPDATE_SECURITY_ERROR",
+    );
+    assert.ok((await readdir(paths.staging)).includes(".harness-skill-activation.json"));
+    assert.equal(await readFile(join(journal.temporaryPath, "pending.txt"), "utf8"), "pending\n");
+  } finally {
+    await rm(paths.root, { recursive: true, force: true });
+  }
+});
+
 test("repair keeps the new Skill when the published journal survives cleanup", async () => {
   const paths = await sandbox();
   try {

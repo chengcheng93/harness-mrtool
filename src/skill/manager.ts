@@ -1010,16 +1010,38 @@ export class SkillManager {
           if (backup.isSymbolicLink() || !backup.isDirectory()) fail("UPDATE_SECURITY_ERROR", "Skill repair failed");
           await rm(backupPath!, { recursive: true, force: true });
         }
-      } else if (backup !== null && backup.isDirectory() && !backup.isSymbolicLink()) {
-        const restoredManifest = await loadManifest(backupPath!);
-        if (restoredManifest === null || restoredManifest.version !== journal.previousVersion) {
+      } else if (journal.state === "prepared") {
+        // A prepared journal has not moved the active tree yet. Only clear it
+        // when the previous active state is still exactly provable.
+        const prepared = await this.readActive();
+        if (journal.previousVersion === null) {
+          if (prepared !== null) fail("UPDATE_SECURITY_ERROR", "Skill repair failed");
+        } else if (prepared === null || prepared.manifest.version !== journal.previousVersion) {
           fail("UPDATE_SECURITY_ERROR", "Skill repair failed");
         }
-        if (active !== null) await rm(this.activePath, { recursive: true, force: true });
-        await rename(backupPath!, this.activePath);
-        const restored = await this.readActive();
-        if (restored === null || restored.manifest.version !== journal.previousVersion) {
-          fail("UPDATE_SECURITY_ERROR", "Skill repair failed");
+      } else if (journal.state === "old-moved") {
+        if (backupPath === null) {
+          // With no predecessor backup, the only safe old-moved outcome is a
+          // fully verified new active tree (the rename may have completed just
+          // before the journal advanced to published).
+          const published = await this.readActive();
+          if (published === null || published.manifest.version !== journal.version) {
+            fail("UPDATE_SECURITY_ERROR", "Skill repair failed");
+          }
+        } else {
+          if (backup === null || backup.isSymbolicLink() || !backup.isDirectory()) {
+            fail("UPDATE_SECURITY_ERROR", "Skill repair failed");
+          }
+          const restoredManifest = await loadManifest(backupPath);
+          if (restoredManifest === null || restoredManifest.version !== journal.previousVersion) {
+            fail("UPDATE_SECURITY_ERROR", "Skill repair failed");
+          }
+          if (active !== null) await rm(this.activePath, { recursive: true, force: true });
+          await rename(backupPath, this.activePath);
+          const restored = await this.readActive();
+          if (restored === null || restored.manifest.version !== journal.previousVersion) {
+            fail("UPDATE_SECURITY_ERROR", "Skill repair failed");
+          }
         }
       }
       await rm(temporaryPath, { recursive: true, force: true });
