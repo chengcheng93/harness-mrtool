@@ -458,6 +458,19 @@ test("persisted bootstrap roots are checked when the caller supplies the immutab
   ));
 });
 
+test("unbranded persisted trust states require an immutable bootstrap root", () => {
+  const trusted = createSigningFixture("release-key-1");
+  const state = trust(trusted);
+  const persisted = JSON.parse(JSON.stringify(state)) as typeof state;
+  const envelope = signedEnvelope(canonicalPayload(manifest()), [trusted]);
+
+  assertSecurityError(() => verifySignedEnvelope(envelope, persisted));
+  assert.deepEqual(
+    verifySignedEnvelope(envelope, persisted, [state.bootstrapKeys[0]!]).verifiedKeyIds,
+    [trusted.keyId],
+  );
+});
+
 test("evaluates the release set as one CLI and Template compatibility tuple", () => {
   const key = createSigningFixture("release-key-1");
   const verified = verifyChannelEnvelope(

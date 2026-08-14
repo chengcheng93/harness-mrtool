@@ -17,6 +17,9 @@ const BASE64URL = /^[A-Za-z0-9_-]+$/u;
 const SHA256 = /^[a-f0-9]{64}$/u;
 const MAX_BUNDLE_RECEIPT_ANCHORS = 2_048;
 const MAX_KEY_ROTATION_PROOFS = 32;
+// A serialized trust state is untrusted input.  Only states constructed by
+// this module may omit the immutable bootstrap root supplied by production.
+const trustedStateBrands = new WeakSet<object>();
 
 export function requireCanonicalSemVer(value: unknown): string {
   if (typeof value !== "string") throw updateSecurityError("envelope is invalid");
@@ -228,7 +231,9 @@ function freezeTrustState(value: UpdateTrustState): UpdateTrustState {
   Object.freeze(value.keyRotationProofs);
   Object.freeze(value.keys);
   Object.freeze(value.bundleReceiptAnchors);
-  return Object.freeze(value);
+  const frozen = Object.freeze(value);
+  trustedStateBrands.add(frozen);
+  return frozen;
 }
 
 function validateBundleReceiptAnchor(
@@ -762,6 +767,7 @@ export function createAcceptedTrustState(
     acceptedChannelEnvelope,
     acceptedTransition: transition,
   } satisfies UpdateTrustState;
+  trustedStateBrands.add(candidate);
   return validateTrustState(candidate);
 }
 
@@ -781,6 +787,9 @@ function validateTrustState(
     ]) ||
     value.trustVersion !== 2
   ) {
+    throw updateSecurityError("trusted key state is invalid");
+  }
+  if (expectedBootstrapKeys === undefined && !trustedStateBrands.has(value as object)) {
     throw updateSecurityError("trusted key state is invalid");
   }
   const core = normalizeTrustCore(
@@ -859,5 +868,6 @@ export function copyTrustState(
 ): UpdateTrustState {
   const trusted = validateTrustState(value, expectedBootstrapKeys);
   const copy = copyJsonValue(trusted) as unknown as UpdateTrustState;
+  trustedStateBrands.add(copy as object);
   return validateTrustState(copy, expectedBootstrapKeys);
 }
