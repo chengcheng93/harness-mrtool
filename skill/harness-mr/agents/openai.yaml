@@ -1,0 +1,7 @@
+interface:
+  display_name: Harness MR
+  short_description: Create deterministic merge requests through the harness-mrtool CLI
+  default_prompt: >-
+    Use the harness-mr Skill. Call harness-mrtool context first, use its
+    schema and candidate tokens, preview the request, and submit only through
+    the structured JSON CLI interface.

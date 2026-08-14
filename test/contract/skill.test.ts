@@ -8,7 +8,9 @@ import {
   SkillManager,
   type SkillRelease,
   type SkillReleaseComponent,
+  type SkillReleaseVerifier,
 } from "../../src/skill/manager.ts";
+import { canonicalizeJson } from "../../src/contracts/jcs.ts";
 import { renderSkillInstructions } from "../../src/skill/projection.ts";
 
 const CLI_VERSION = "1.2.0";
@@ -54,12 +56,20 @@ async function sandbox(): Promise<{ readonly root: string; readonly active: stri
   return { root, active, staging };
 }
 
-async function manager(paths: { readonly active: string; readonly staging: string }, faultInjector?: { hit(point: string): void }): Promise<SkillManager> {
+const allowTestSkillVerifier: SkillReleaseVerifier = {
+  verify: async (): Promise<void> => undefined,
+  verifyStaged: async (): Promise<void> => undefined,
+};
+const allowTestAcl = { verify: async (_path: string): Promise<void> => undefined };
+
+async function manager(paths: { readonly active: string; readonly staging: string }, faultInjector?: { hit(point: string): void }, verifier: SkillReleaseVerifier = allowTestSkillVerifier): Promise<SkillManager> {
   return new SkillManager({
     activePath: paths.active,
     stagingPath: paths.staging,
     cliVersion: CLI_VERSION,
     supportedProtocols: [1],
+    releaseVerifier: verifier,
+    windowsAclVerifier: allowTestAcl,
     ...(faultInjector === undefined ? {} : { faultInjector }),
   });
 }
@@ -74,6 +84,53 @@ test("Skill instructions begin with context and delegate rendering/labels to the
   assert.ok(!instructions.includes("status::"));
   assert.ok(!instructions.includes("type::"));
   assert.ok(!instructions.includes("## 1. Changes"));
+});
+
+test("Skill manager prepares the staging root through the private-directory verifier", async () => {
+  const paths = await sandbox();
+  let calls = 0;
+  try {
+    const managerInstance = new SkillManager({
+      activePath: paths.active,
+      stagingPath: paths.staging,
+      cliVersion: CLI_VERSION,
+      supportedProtocols: [1],
+      releaseVerifier: allowTestSkillVerifier,
+      windowsAclVerifier: { verify: async (): Promise<void> => { calls += 1; } },
+    });
+    await managerInstance.status();
+    if (process.platform === "win32") assert.ok(calls > 0);
+    else assert.equal(calls, 0);
+  } finally {
+    await rm(paths.root, { recursive: true, force: true });
+  }
+});
+
+test("activation rejects a self-consistent staging manifest without signed provenance", async () => {
+  const paths = await sandbox();
+  const verifier: SkillReleaseVerifier = {
+    verify: async (): Promise<void> => undefined,
+    verifyStaged: async (staged): Promise<void> => {
+      if (staged.version !== "1.1.0") throw new Error("staged provenance mismatch");
+    },
+  };
+  try {
+    const managerInstance = await manager(paths, undefined, verifier);
+    await managerInstance.stage(release("1.1.0"));
+    const manifestPath = join(paths.staging, "versions", "1.1.0", ".harness-skill-manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as Record<string, unknown>;
+    manifest.version = "9.9.9";
+    manifest.tag = "skill-v9.9.9";
+    await writeFile(manifestPath, `${canonicalizeJson(manifest as never)}\n`);
+    await assert.rejects(
+      managerInstance.activate("1.1.0"),
+      (error: unknown) => typeof error === "object" && error !== null && "code" in error &&
+        error.code === "UPDATE_SECURITY_ERROR",
+    );
+    await assert.rejects(readFile(join(paths.active, "SKILL.md")));
+  } finally {
+    await rm(paths.root, { recursive: true, force: true });
+  }
 });
 
 test("staging a verified Skill leaves the active path unchanged and reports activation", async () => {
@@ -136,6 +193,22 @@ test("staging and activation reject credentials without echoing the credential",
       },
     );
     await assert.rejects(readFile(join(paths.active, "SKILL.md")));
+  } finally {
+    await rm(paths.root, { recursive: true, force: true });
+  }
+});
+
+test("Skill file paths reject Windows device names and trailing dot or space segments", async () => {
+  const paths = await sandbox();
+  try {
+    const managerInstance = await manager(paths);
+    for (const path of ["CON", "docs/CON.txt", "NUL.md", "docs/readme.", "docs/readme "]) {
+      await assert.rejects(
+        managerInstance.stage({ ...release(), files: [{ path, contents: "x\n" }, { path: "SKILL.md", contents: "ok\n" }] }),
+        (error: unknown) => typeof error === "object" && error !== null && "code" in error &&
+          error.code === "UPDATE_SECURITY_ERROR",
+      );
+    }
   } finally {
     await rm(paths.root, { recursive: true, force: true });
   }
@@ -206,6 +279,8 @@ test("staging the same version rejects protocol metadata drift instead of reusin
       stagingPath: paths.staging,
       cliVersion: CLI_VERSION,
       supportedProtocols: [1, 2],
+      releaseVerifier: allowTestSkillVerifier,
+      windowsAclVerifier: allowTestAcl,
     });
     await managerInstance.stage(release("1.1.0", 1));
     await assert.rejects(
@@ -260,6 +335,56 @@ test("repair fails closed when the activation journal path is corrupted", async 
     await mkdir(join(paths.staging, ".harness-skill-activation.json"));
     await assert.rejects(
       managerInstance.repair(),
+      (error: unknown) => typeof error === "object" && error !== null && "code" in error &&
+        error.code === "UPDATE_SECURITY_ERROR",
+    );
+  } finally {
+    await rm(paths.root, { recursive: true, force: true });
+  }
+});
+
+test("repair refuses journal paths that are not manager-owned temporary siblings", async () => {
+  const paths = await sandbox();
+  const victim = join(paths.root, "victim");
+  try {
+    const managerInstance = await manager(paths);
+    await managerInstance.status();
+    await mkdir(victim, { recursive: true });
+    await writeFile(join(victim, "keep.txt"), "do not delete\n");
+    const journal = {
+      journalVersion: 1,
+      state: "prepared",
+      temporaryPath: victim,
+      backupPath: null,
+      activePath: paths.active,
+      version: "1.1.0",
+    };
+    await writeFile(
+      join(paths.staging, ".harness-skill-activation.json"),
+      `${JSON.stringify(journal)}\n`,
+    );
+    await assert.rejects(
+      managerInstance.repair(),
+      (error: unknown) => typeof error === "object" && error !== null && "code" in error &&
+        error.code === "UPDATE_SECURITY_ERROR",
+    );
+    assert.equal(await readFile(join(victim, "keep.txt"), "utf8"), "do not delete\n");
+  } finally {
+    await rm(paths.root, { recursive: true, force: true });
+  }
+});
+
+test("status fails closed when the Skill activation journal is non-canonical", async () => {
+  const paths = await sandbox();
+  try {
+    const managerInstance = await manager(paths);
+    await managerInstance.status();
+    await writeFile(
+      join(paths.staging, ".harness-skill-activation.json"),
+      '{"junk":true}\n',
+    );
+    await assert.rejects(
+      managerInstance.status(),
       (error: unknown) => typeof error === "object" && error !== null && "code" in error &&
         error.code === "UPDATE_SECURITY_ERROR",
     );

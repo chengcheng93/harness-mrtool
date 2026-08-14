@@ -18,6 +18,7 @@ import { canonicalizeJson, sha256Utf8, type JsonValue } from "../contracts/jcs.t
 import { ToolError } from "../contracts/errors.ts";
 import { parseStrictJson } from "../input/strict-json.ts";
 import type { SkillComponent } from "../update/manifest.ts";
+import { ensurePrivateStateDirectory, type WindowsAclVerifier } from "../platform/state-path.ts";
 
 const MAX_SKILL_BYTES = 16 * 1024 * 1024;
 const MAX_SKILL_FILE_BYTES = 4 * 1024 * 1024;
@@ -25,6 +26,7 @@ const MAX_SKILL_FILES = 128;
 const SHA256 = /^[a-f0-9]{64}$/u;
 const VERSION = /^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u;
 const SAFE_PATH = /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))[A-Za-z0-9._/-]+$/u;
+const WINDOWS_DEVICE_SEGMENT = /^(?:con|prn|aux|nul|clock\$|com[1-9]|lpt[1-9])(?:\..*)?$/iu;
 const SECRET_SHAPE = /(?:glpat-[A-Za-z0-9_-]+|hmr[ctx]1_[A-Za-z0-9_-]{20,}|github_pat_[A-Za-z0-9_]+|gh[pousr]_[A-Za-z0-9_]+|(?:authorization|bearer)\s*[:=]\s*[^\s]+|-----BEGIN [A-Z ]+ PRIVATE KEY-----)/iu;
 const MANIFEST_NAME = ".harness-skill-manifest.json";
 const JOURNAL_NAME = ".harness-skill-activation.json";
@@ -55,6 +57,25 @@ export interface SkillRelease {
   readonly files: readonly SkillFile[];
   readonly assetSha256?: string;
   readonly assetSize?: number;
+}
+
+export interface SkillStagedRelease {
+  readonly version: string;
+  readonly tag: string;
+  readonly skillProtocol: number;
+  readonly cliVersionRange: string;
+  readonly activation: "explicit-host-refresh";
+  readonly files: readonly SkillFile[];
+}
+
+/**
+ * Trust boundary supplied by the signed-channel composition root. The
+ * second method is required because activation can happen after a restart,
+ * when only the persisted staging tree is available.
+ */
+export interface SkillReleaseVerifier {
+  verify(release: SkillRelease): void | Promise<void>;
+  verifyStaged(release: SkillStagedRelease): void | Promise<void>;
 }
 
 export interface SkillInvocationPin {
@@ -95,6 +116,8 @@ export interface SkillManagerOptions {
   readonly stagingPath: string;
   readonly cliVersion: string;
   readonly supportedProtocols: readonly number[];
+  readonly releaseVerifier?: SkillReleaseVerifier;
+  readonly windowsAclVerifier?: WindowsAclVerifier;
   readonly faultInjector?: SkillFaultInjector;
 }
 
@@ -126,6 +149,30 @@ interface ActivationJournal {
   readonly backupPath: string | null;
   readonly activePath: string;
   readonly version: string;
+}
+
+const JOURNAL_TEMP_NAME = /^\.harness-skill-tmp-[0-9a-f]{24}$/u;
+const JOURNAL_BACKUP_NAME = /^\.harness-skill-old-[0-9a-f]{24}$/u;
+
+function exactJournalRecord(value: unknown): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value) ||
+      Object.getPrototypeOf(value) !== Object.prototype) {
+    fail("UPDATE_SECURITY_ERROR", "Skill activation journal is invalid");
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const keys = Object.keys(descriptors).sort();
+  const expected = ["activePath", "backupPath", "journalVersion", "state", "temporaryPath", "version"];
+  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) {
+    fail("UPDATE_SECURITY_ERROR", "Skill activation journal is invalid");
+  }
+  for (const key of keys) {
+    const descriptor = descriptors[key];
+    if (descriptor === undefined || !descriptor.enumerable || !("value" in descriptor) ||
+        descriptor.get !== undefined || descriptor.set !== undefined) {
+      fail("UPDATE_SECURITY_ERROR", "Skill activation journal is invalid");
+    }
+  }
+  return value as Record<string, unknown>;
 }
 
 function managerError(
@@ -187,6 +234,10 @@ function safePath(value: unknown): string {
   if (typeof value !== "string" || value === "" || value.length > 256 ||
       value.includes("\\") || value.includes("//") || !SAFE_PATH.test(value) ||
       isAbsolute(value) || value.endsWith("/") || value.startsWith(".")) {
+    fail("UPDATE_SECURITY_ERROR", "Skill release files are invalid");
+  }
+  const segments = value.split("/");
+  if (segments.some((segment) => segment === "" || /[. ]$/u.test(segment) || WINDOWS_DEVICE_SEGMENT.test(segment))) {
     fail("UPDATE_SECURITY_ERROR", "Skill release files are invalid");
   }
   return value;
@@ -548,6 +599,8 @@ export class SkillManager {
   readonly stagingPath: string;
   readonly cliVersion: string;
   readonly supportedProtocols: readonly number[];
+  private readonly releaseVerifier: SkillReleaseVerifier | undefined;
+  private readonly windowsAclVerifier: WindowsAclVerifier | undefined;
   private readonly faultInjector: SkillFaultInjector | undefined;
   private ready: Promise<void> | undefined;
 
@@ -563,14 +616,26 @@ export class SkillManager {
     if (this.activePath === this.stagingPath || within(this.activePath, this.stagingPath) || within(this.stagingPath, this.activePath)) {
       fail("INPUT_ERROR", "invalid manager options");
     }
+    this.releaseVerifier = options.releaseVerifier;
+    this.windowsAclVerifier = options.windowsAclVerifier;
     this.faultInjector = options.faultInjector;
+  }
+
+  private requireReleaseVerifier(): SkillReleaseVerifier {
+    const verifier = this.releaseVerifier;
+    if (verifier === undefined || typeof verifier.verify !== "function" || typeof verifier.verifyStaged !== "function") {
+      fail("UPDATE_SECURITY_ERROR", "Skill release is not verified");
+    }
+    return verifier;
   }
 
   private async ensureReady(): Promise<void> {
     if (this.ready === undefined) {
       this.ready = (async () => {
         await assertParentChain(this.stagingPath);
-        await assertDirectory(this.stagingPath, true);
+        await ensurePrivateStateDirectory(this.stagingPath, this.windowsAclVerifier === undefined
+          ? {}
+          : { windowsAclVerifier: this.windowsAclVerifier });
         await assertParentChain(this.activePath);
         await assertDirectory(dirname(this.activePath), true);
         const versions = resolve(this.stagingPath, VERSIONS_NAME);
@@ -654,16 +719,68 @@ export class SkillManager {
     return latest;
   }
 
-  private async hasJournal(): Promise<boolean> {
+  private parseActivationJournal(content: Uint8Array): ActivationJournal {
+    let parsed: unknown;
     try {
-      const info = await lstat(resolve(this.stagingPath, JOURNAL_NAME));
-      if (!info.isFile() || info.isSymbolicLink()) fail("UPDATE_SECURITY_ERROR", "Skill activation journal is invalid");
-      return true;
+      const text = new TextDecoder("utf-8", { fatal: true }).decode(content);
+      parsed = parseStrictJson(text);
+      if (text !== `${canonicalizeJson(parsed as JsonValue)}\n`) {
+        fail("UPDATE_SECURITY_ERROR", "Skill activation journal is invalid");
+      }
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
       if (error instanceof ToolError) throw error;
-      fail("UPDATE_SECURITY_ERROR", "Skill state is unavailable");
+      fail("UPDATE_SECURITY_ERROR", "Skill activation journal is invalid");
     }
+    const item = exactJournalRecord(parsed);
+    if (item.journalVersion !== 1 ||
+        (item.state !== "prepared" && item.state !== "old-moved" && item.state !== "published") ||
+        typeof item.activePath !== "string" || item.activePath !== this.activePath ||
+        typeof item.temporaryPath !== "string" ||
+        (item.backupPath !== null && typeof item.backupPath !== "string") ||
+        typeof item.version !== "string") {
+      fail("UPDATE_SECURITY_ERROR", "Skill activation journal is invalid");
+    }
+    const activeParent = dirname(this.activePath);
+    const temporaryPath = item.temporaryPath;
+    const backupPath = item.backupPath;
+    const validManagedSibling = (candidate: string, pattern: RegExp): boolean =>
+      isAbsolute(candidate) && candidate === resolve(candidate) && dirname(candidate) === activeParent &&
+      pattern.test(candidate.slice(activeParent.length + 1));
+    if (!validManagedSibling(temporaryPath, JOURNAL_TEMP_NAME) ||
+        (backupPath !== null && (!validManagedSibling(backupPath, JOURNAL_BACKUP_NAME) || backupPath === temporaryPath)) ||
+        (item.state === "prepared" && backupPath !== null)) {
+      fail("UPDATE_SECURITY_ERROR", "Skill activation journal is invalid");
+    }
+    const version = strictVersion(item.version);
+    return Object.freeze({
+      journalVersion: 1,
+      state: item.state,
+      temporaryPath,
+      backupPath,
+      activePath: this.activePath,
+      version,
+    });
+  }
+
+  private async readActivationJournal(): Promise<ActivationJournal | null> {
+    const path = resolve(this.stagingPath, JOURNAL_NAME);
+    let info;
+    try {
+      info = await lstat(path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      if (error instanceof ToolError) throw error;
+      fail("UPDATE_SECURITY_ERROR", "Skill activation journal is invalid");
+    }
+    if (!info!.isFile() || info!.isSymbolicLink()) {
+      fail("UPDATE_SECURITY_ERROR", "Skill activation journal is invalid");
+    }
+    const content = await readRegularFile(path, 64 * 1024);
+    return this.parseActivationJournal(content);
+  }
+
+  private async hasJournal(): Promise<boolean> {
+    return (await this.readActivationJournal()) !== null;
   }
 
   async status(pin?: SkillInvocationPin): Promise<SkillStatus> {
@@ -673,6 +790,12 @@ export class SkillManager {
 
   async stage(release: SkillRelease): Promise<SkillStageResult> {
     await this.ensureReady();
+    const verifier = this.requireReleaseVerifier();
+    try {
+      await verifier.verify(release);
+    } catch {
+      fail("UPDATE_SECURITY_ERROR", "Skill release is not verified");
+    }
     const normalized = normalizeRelease(release, this.cliVersion, new Set(this.supportedProtocols));
     const target = resolve(this.stagingPath, VERSIONS_NAME, normalized.manifest.version);
     if (!within(this.stagingPath, target)) fail("UPDATE_SECURITY_ERROR", "Skill staging failed");
@@ -737,6 +860,7 @@ export class SkillManager {
 
   async activate(version: string, pin?: SkillInvocationPin): Promise<SkillActivationResult> {
     await this.ensureReady();
+    const verifier = this.requireReleaseVerifier();
     const normalizedPin = pin === undefined ? undefined : this.pinInvocation(pin);
     const requestedVersion = strictVersion(version);
     const staged = await this.readStaged(requestedVersion);
@@ -747,6 +871,27 @@ export class SkillManager {
     } catch (error) {
       if (error instanceof ToolError) throw error;
       fail("UPDATE_SECURITY_ERROR", "Skill state is unavailable");
+    }
+    const stagedFiles: readonly { readonly path: string; readonly content: Uint8Array }[] = Object.freeze(
+      await Promise.all(staged.manifest.files.map(async (file) => ({
+        path: file.path,
+        content: await readRegularFile(resolve(staged.root, file.path), MAX_SKILL_FILE_BYTES),
+      }))),
+    );
+    try {
+      await verifier.verifyStaged({
+        version: staged.manifest.version,
+        tag: staged.manifest.tag,
+        skillProtocol: staged.manifest.skillProtocol,
+        cliVersionRange: staged.manifest.cliVersionRange,
+        activation: staged.manifest.activation,
+        files: Object.freeze(stagedFiles.map((file) => Object.freeze({
+          path: file.path,
+          contents: Uint8Array.from(file.content),
+        }))),
+      });
+    } catch {
+      fail("UPDATE_SECURITY_ERROR", "Skill release is not verified");
     }
     const temporary = resolve(dirname(this.activePath), `${TEMP_PREFIX}${randomSuffix()}`);
     const backup = resolve(dirname(this.activePath), `${BACKUP_PREFIX}${randomSuffix()}`);
@@ -762,9 +907,8 @@ export class SkillManager {
     try {
       await mkdir(temporary, { recursive: true, mode: 0o700 });
       await assertDirectory(temporary);
-      for (const file of staged.manifest.files) {
-        const source = resolve(staged.root, file.path);
-        const content = await readRegularFile(source, MAX_SKILL_FILE_BYTES);
+      for (const file of stagedFiles) {
+        const content = file.content;
         const destination = resolve(temporary, file.path);
         if (!within(temporary, destination)) fail("UPDATE_SECURITY_ERROR", "Skill activation failed");
         await writeFileSecure(destination, content);
@@ -819,46 +963,13 @@ export class SkillManager {
   async repair(): Promise<SkillRepairResult> {
     await this.ensureReady();
     const journalPath = resolve(this.stagingPath, JOURNAL_NAME);
-    let journalInfo;
-    try {
-      journalInfo = await lstat(journalPath);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        const status = await this.statusFor(undefined);
-        return Object.freeze({ ...status, repaired: false });
-      }
-      if (error instanceof ToolError) throw error;
-      fail("UPDATE_SECURITY_ERROR", "Skill activation journal is invalid");
+    const journal = await this.readActivationJournal();
+    if (journal === null) {
+      const status = await this.statusFor(undefined);
+      return Object.freeze({ ...status, repaired: false });
     }
-    if (!journalInfo!.isFile() || journalInfo!.isSymbolicLink()) {
-      fail("UPDATE_SECURITY_ERROR", "Skill activation journal is invalid");
-    }
-    let content: Uint8Array;
-    try {
-      content = await readRegularFile(journalPath, 64 * 1024);
-    } catch (error) {
-      if (error instanceof ToolError) fail("UPDATE_SECURITY_ERROR", "Skill activation journal is invalid");
-      fail("UPDATE_SECURITY_ERROR", "Skill activation journal is invalid");
-    }
-    let parsed: unknown;
-    try {
-      const text = new TextDecoder("utf-8", { fatal: true }).decode(content);
-      parsed = parseStrictJson(text);
-    } catch {
-      fail("UPDATE_SECURITY_ERROR", "Skill activation journal is invalid");
-    }
-    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) fail("UPDATE_SECURITY_ERROR", "Skill activation journal is invalid");
-    const journal = parsed as Record<string, unknown>;
-    if (journal.journalVersion !== 1 || !["prepared", "old-moved", "published"].includes(journal.state as string) ||
-        typeof journal.temporaryPath !== "string" || typeof journal.activePath !== "string" || journal.activePath !== this.activePath ||
-        (journal.backupPath !== null && typeof journal.backupPath !== "string")) {
-      fail("UPDATE_SECURITY_ERROR", "Skill activation journal is invalid");
-    }
-    const temporaryPath = resolve(journal.temporaryPath as string);
-    const backupPath = journal.backupPath === null ? null : resolve(journal.backupPath as string);
-    if (!within(dirname(this.activePath), temporaryPath) || (backupPath !== null && !within(dirname(this.activePath), backupPath))) {
-      fail("UPDATE_SECURITY_ERROR", "Skill activation journal is invalid");
-    }
+    const temporaryPath = journal.temporaryPath;
+    const backupPath = journal.backupPath;
     try {
       const active = await lstat(this.activePath).catch(() => null);
       const backup = backupPath === null ? null : await lstat(backupPath).catch(() => null);
