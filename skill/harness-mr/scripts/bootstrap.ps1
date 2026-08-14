@@ -585,6 +585,10 @@ try {
   Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
   $archive = $null
   try {
+    $archiveCheck = Get-ItemSafe $archivePath
+    if ($archiveCheck.PSIsContainer -or $archiveCheck.Length -ne $archiveItem.Length -or (Get-Sha256File $archivePath) -cne $shaExpected) {
+      Fail-Security 'Downloaded Skill archive changed before extraction.'
+    }
     $archive = [IO.Compression.ZipFile]::OpenRead($archivePath)
     if ($archive.Entries.Count -lt 1 -or $archive.Entries.Count -gt $MaxArchiveEntries) { Fail-Security 'The Skill archive has an invalid entry count.' }
     $entries = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
