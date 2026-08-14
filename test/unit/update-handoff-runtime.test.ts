@@ -102,6 +102,23 @@ test("handoff drains child output while it is still writing stdin", async () => 
   }
 });
 
+test("legacy handoff readers receive the enforced output cap", async () => {
+  const limits: number[] = [];
+  const child: HandoffChild = {
+    async writeStdin() {},
+    async closeStdin() {},
+    async readStdout(maxBytes) { limits.push(maxBytes ?? -1); return encode("ok"); },
+    async readStderr(maxBytes) { limits.push(maxBytes ?? -1); return new Uint8Array(); },
+    async wait() { return { exitCode: 0 }; },
+  };
+  await runUpdateHandoff(
+    (async function* () { yield encode("request"); })(),
+    async () => child,
+    { maxOutputBytes: 7 },
+  );
+  assert.deepEqual(limits.sort((left, right) => left - right), [7, 7]);
+});
+
 test("handoff terminates and cleans a child whose streamed output exceeds its cap", async () => {
   let terminations = 0;
   let cleanups = 0;

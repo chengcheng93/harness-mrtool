@@ -10,6 +10,7 @@ export const MANIFEST_UPDATE_BUDGET_MS = 2_000;
 /** Asset staging has a separate wall-clock budget from the manifest request. */
 export const ASSET_UPDATE_BUDGET_MS = 5 * 60 * 1_000;
 export const MAX_ARCHIVE_ENTRIES = 16_384;
+const ITERATOR_CLOSE_BUDGET_MS = 250;
 
 export interface DownloadOptions {
   readonly maxBytes: number;
@@ -49,9 +50,9 @@ function nowValue(clock: (() => number) | undefined): number {
 async function nextWithinBudget<T>(
   iterator: AsyncIterator<T>,
   deadline: number,
-  clock: (() => number) | undefined,
+  clock: () => number,
 ): Promise<IteratorResult<T>> {
-  const current = nowValue(clock);
+  const current = clock();
   if (current > deadline) throw securityFailure("update asset budget exceeded");
   const remaining = Math.max(1, Math.ceil(deadline - current));
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -66,6 +67,25 @@ async function nextWithinBudget<T>(
       iterator.next(),
       timeout,
     ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+async function closeIterator(iterator: AsyncIterator<unknown>): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const closing = iterator.return?.();
+    if (closing === undefined) return;
+    await Promise.race([
+      Promise.resolve(closing),
+      new Promise<void>((resolvePromise) => {
+        timer = setTimeout(resolvePromise, ITERATOR_CLOSE_BUDGET_MS);
+        timer.unref?.();
+      }),
+    ]);
+  } catch {
+    // Preserve the original bounded-read failure; cleanup is best effort.
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }
@@ -88,11 +108,18 @@ export async function downloadBounded(
   }
   const iterator = source?.[Symbol.asyncIterator]?.();
   if (iterator === undefined) throw securityFailure("update body is not a byte stream");
+  let lastClock = start;
+  const monotonicClock = (): number => {
+    const current = nowValue(clock);
+    if (current < lastClock) throw securityFailure("update clock moved backwards");
+    lastClock = current;
+    return current;
+  };
   const chunks: Uint8Array[] = [];
   let total = 0;
   try {
     while (true) {
-      const step = await nextWithinBudget(iterator, deadline, clock);
+      const step = await nextWithinBudget(iterator, deadline, monotonicClock);
       if (step.done === true) break;
       const chunk = step.value;
       if (!(chunk instanceof Uint8Array)) throw securityFailure("update body contains a non-byte chunk");
@@ -104,11 +131,7 @@ export async function downloadBounded(
       chunks.push(Uint8Array.from(chunk));
     }
   } catch (error) {
-    try {
-      await iterator.return?.();
-    } catch {
-      // Preserve the bounded-read failure; cleanup cannot make an unsafe body valid.
-    }
+    await closeIterator(iterator);
     throw error instanceof ToolError ? error : securityFailure("update asset stream failed");
   }
   if (!options.allowEmpty && total === 0) throw securityFailure("update asset is empty");

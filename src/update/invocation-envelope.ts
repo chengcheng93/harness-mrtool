@@ -6,8 +6,10 @@ export const MAX_HANDOFF_OUTPUT_BYTES = 16 * 1024 * 1024;
 export interface HandoffChild {
   writeStdin(bytes: Uint8Array): Promise<void>;
   closeStdin(): Promise<void>;
-  readStdout(): Promise<Uint8Array>;
-  readStderr(): Promise<Uint8Array>;
+  /** Legacy adapters must enforce the supplied cap while reading. */
+  readStdout(maxBytes?: number): Promise<Uint8Array>;
+  /** Legacy adapters must enforce the supplied cap while reading. */
+  readStderr(maxBytes?: number): Promise<Uint8Array>;
   streamStdout?(): AsyncIterable<Uint8Array>;
   streamStderr?(): AsyncIterable<Uint8Array>;
   wait(): Promise<{ readonly exitCode: number }>;
@@ -63,7 +65,7 @@ function outputLimit(options: HandoffOptions): number {
 
 async function collectOutput(
   stream: AsyncIterable<Uint8Array> | undefined,
-  legacyRead: () => Promise<Uint8Array>,
+  legacyRead: (maxBytes: number) => Promise<Uint8Array>,
   maxBytes: number,
   forward: ((bytes: Uint8Array) => void | Promise<void>) | undefined,
 ): Promise<Uint8Array> {
@@ -82,7 +84,7 @@ async function collectOutput(
   };
 
   if (stream === undefined) {
-    await accept(await legacyRead());
+    await accept(await legacyRead(maxBytes));
   } else {
     const iterator = stream[Symbol.asyncIterator]?.();
     if (iterator === undefined) throw new Error("child output stream is invalid");
@@ -171,13 +173,13 @@ export async function runUpdateHandoff(
       feeding,
       collectOutput(
         child.streamStdout?.(),
-        () => child!.readStdout(),
+        (limit) => child!.readStdout(limit),
         maxOutputBytes,
         options.output?.stdout,
       ),
       collectOutput(
         child.streamStderr?.(),
-        () => child!.readStderr(),
+        (limit) => child!.readStderr(limit),
         maxOutputBytes,
         options.output?.stderr,
       ),
