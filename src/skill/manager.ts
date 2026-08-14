@@ -153,6 +153,7 @@ interface ActivationJournal {
   readonly temporaryPath: string;
   readonly backupPath: string | null;
   readonly activePath: string;
+  readonly previousVersion: string | null;
   readonly version: string;
 }
 
@@ -166,7 +167,7 @@ function exactJournalRecord(value: unknown): Record<string, unknown> {
   }
   const descriptors = Object.getOwnPropertyDescriptors(value);
   const keys = Object.keys(descriptors).sort();
-  const expected = ["activePath", "backupPath", "journalVersion", "state", "temporaryPath", "version"];
+  const expected = ["activePath", "backupPath", "journalVersion", "previousVersion", "state", "temporaryPath", "version"];
   if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) {
     fail("UPDATE_SECURITY_ERROR", "Skill activation journal is invalid");
   }
@@ -749,6 +750,7 @@ export class SkillManager {
         typeof item.activePath !== "string" || item.activePath !== this.activePath ||
         typeof item.temporaryPath !== "string" ||
         (item.backupPath !== null && typeof item.backupPath !== "string") ||
+        (item.previousVersion !== null && typeof item.previousVersion !== "string") ||
         typeof item.version !== "string") {
       fail("UPDATE_SECURITY_ERROR", "Skill activation journal is invalid");
     }
@@ -764,12 +766,14 @@ export class SkillManager {
       fail("UPDATE_SECURITY_ERROR", "Skill activation journal is invalid");
     }
     const version = strictVersion(item.version);
+    const previousVersion = item.previousVersion === null ? null : strictVersion(item.previousVersion);
     return Object.freeze({
       journalVersion: 1,
       state: item.state,
       temporaryPath,
       backupPath,
       activePath: this.activePath,
+      previousVersion,
       version,
     });
   }
@@ -910,12 +914,14 @@ export class SkillManager {
     const temporary = resolve(dirname(this.activePath), `${TEMP_PREFIX}${randomSuffix()}`);
     const backup = resolve(dirname(this.activePath), `${BACKUP_PREFIX}${randomSuffix()}`);
     const journalPath = resolve(this.stagingPath, JOURNAL_NAME);
+    const previous = await this.readActive();
     const journal: ActivationJournal = {
       journalVersion: 1,
       state: "prepared",
       temporaryPath: temporary,
       backupPath: null,
       activePath: this.activePath,
+      previousVersion: previous?.manifest.version ?? null,
       version: requestedVersion,
     };
     try {
@@ -1005,8 +1011,16 @@ export class SkillManager {
           await rm(backupPath!, { recursive: true, force: true });
         }
       } else if (backup !== null && backup.isDirectory() && !backup.isSymbolicLink()) {
+        const restoredManifest = await loadManifest(backupPath!);
+        if (restoredManifest === null || restoredManifest.version !== journal.previousVersion) {
+          fail("UPDATE_SECURITY_ERROR", "Skill repair failed");
+        }
         if (active !== null) await rm(this.activePath, { recursive: true, force: true });
         await rename(backupPath!, this.activePath);
+        const restored = await this.readActive();
+        if (restored === null || restored.manifest.version !== journal.previousVersion) {
+          fail("UPDATE_SECURITY_ERROR", "Skill repair failed");
+        }
       }
       await rm(temporaryPath, { recursive: true, force: true });
       await rm(journalPath, { force: true });

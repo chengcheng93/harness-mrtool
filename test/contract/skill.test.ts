@@ -352,6 +352,34 @@ test("repair restores the old Skill when activation dies after moving the active
   }
 });
 
+test("repair keeps an old-moved journal when its backup tree is tampered", async () => {
+  const paths = await sandbox();
+  try {
+    const initial = await manager(paths);
+    await initial.install(release("1.0.0", 1, "old\n"));
+    const broken = await manager(paths, {
+      hit(point: string): void {
+        if (point === "after-active-old-move") throw new Error("injected post-move failure");
+      },
+    });
+    await broken.stage(release("1.1.0", 1, "new\n"));
+    await assert.rejects(broken.activate("1.1.0"));
+    const backupName = (await readdir(paths.root)).find((entry) => entry.startsWith(".harness-skill-old-"));
+    assert.ok(backupName);
+    await writeFile(join(paths.root, backupName!, "SKILL.md"), "tampered\n");
+    const restarted = await manager(paths);
+    await assert.rejects(
+      restarted.repair(),
+      (error: unknown) => typeof error === "object" && error !== null && "code" in error &&
+        error.code === "UPDATE_SECURITY_ERROR",
+    );
+    assert.ok((await readdir(paths.root)).includes(backupName!));
+    assert.ok((await readdir(paths.staging)).includes(".harness-skill-activation.json"));
+  } finally {
+    await rm(paths.root, { recursive: true, force: true });
+  }
+});
+
 test("repair keeps the new Skill when the published journal survives cleanup", async () => {
   const paths = await sandbox();
   try {
@@ -435,6 +463,7 @@ test("repair refuses journal paths that are not manager-owned temporary siblings
       temporaryPath: victim,
       backupPath: null,
       activePath: paths.active,
+      previousVersion: null,
       version: "1.1.0",
     };
     await writeFile(
