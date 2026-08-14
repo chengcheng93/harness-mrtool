@@ -375,6 +375,36 @@ test("repair keeps the new Skill when the published journal survives cleanup", a
   }
 });
 
+test("repair preserves the backup when a published active tree has the wrong version", async () => {
+  const paths = await sandbox();
+  try {
+    const initial = await manager(paths);
+    await initial.install(release("1.0.0", 1, "old\n"));
+    const broken = await manager(paths, {
+      hit(point: string): void {
+        if (point === "after-active-published") throw new Error("injected published cleanup failure");
+      },
+    });
+    await broken.stage(release("1.1.0", 1, "new\n"));
+    await assert.rejects(broken.activate("1.1.0"));
+    const activeManifestPath = join(paths.active, ".harness-skill-manifest.json");
+    const manifest = JSON.parse(await readFile(activeManifestPath, "utf8")) as Record<string, unknown>;
+    manifest.version = "1.0.0";
+    manifest.tag = "skill-v1.0.0";
+    await writeFile(activeManifestPath, `${canonicalizeJson(manifest as never)}\n`);
+    const restarted = await manager(paths);
+    await assert.rejects(
+      restarted.repair(),
+      (error: unknown) => typeof error === "object" && error !== null && "code" in error &&
+        error.code === "UPDATE_SECURITY_ERROR",
+    );
+    const siblings = await readdir(paths.root);
+    assert.ok(siblings.some((entry) => entry.startsWith(".harness-skill-old-")));
+  } finally {
+    await rm(paths.root, { recursive: true, force: true });
+  }
+});
+
 test("repair fails closed when the activation journal path is corrupted", async () => {
   const paths = await sandbox();
   try {

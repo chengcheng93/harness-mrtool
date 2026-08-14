@@ -992,13 +992,15 @@ export class SkillManager {
         // The new tree is already visible. A crash in the cleanup window must
         // never roll it back to the old backup; only remove manager-owned
         // leftovers and the journal. If publication is not visible anymore,
-        // fail closed unless a verified old backup can be restored.
+        // fail closed and retain the backup for a later, explicit repair.
         if (active === null || active.isSymbolicLink() || !active.isDirectory()) {
-          if (backup === null || backup.isSymbolicLink() || !backup.isDirectory()) {
-            fail("UPDATE_SECURITY_ERROR", "Skill repair failed");
-          }
-          await rename(backupPath!, this.activePath);
-        } else if (backup !== null) {
+          fail("UPDATE_SECURITY_ERROR", "Skill repair failed");
+        }
+        const published = await this.readActive();
+        if (published === null || published.manifest.version !== journal.version) {
+          fail("UPDATE_SECURITY_ERROR", "Skill repair failed");
+        }
+        if (backup !== null) {
           if (backup.isSymbolicLink() || !backup.isDirectory()) fail("UPDATE_SECURITY_ERROR", "Skill repair failed");
           await rm(backupPath!, { recursive: true, force: true });
         }
