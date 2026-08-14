@@ -439,7 +439,9 @@ function parseKeyRotationProofPayload(payloadBytes: Uint8Array): ParsedKeyRotati
   }
   const add = rotation.add.map((entry) => {
     const value = requiredRecord(entry);
-    exactFields(value, ["keyId", "algorithm", "publicKeySpki", "activeFromSequence"]);
+    if (!exactFields(value, ["keyId", "algorithm", "publicKeySpki", "activeFromSequence"])) {
+      throw updateSecurityError("envelope is invalid");
+    }
     if (
       value.algorithm !== "Ed25519" ||
       typeof value.keyId !== "string" ||
@@ -454,12 +456,12 @@ function parseKeyRotationProofPayload(payloadBytes: Uint8Array): ParsedKeyRotati
       activeFromSequence: value.activeFromSequence as number,
       revokedAtSequence: null,
     });
-  }).sort((left, right) => Buffer.compare(
-    Buffer.from(left.keyId, "utf8"), Buffer.from(right.keyId, "utf8"),
-  ));
+  });
   const revoke = rotation.revoke.map((entry) => {
     const value = requiredRecord(entry);
-    exactFields(value, ["keyId", "revokedAtSequence"]);
+    if (!exactFields(value, ["keyId", "revokedAtSequence"])) {
+      throw updateSecurityError("envelope is invalid");
+    }
     if (
       typeof value.keyId !== "string" ||
       !KEY_ID.test(value.keyId) ||
@@ -471,12 +473,12 @@ function parseKeyRotationProofPayload(payloadBytes: Uint8Array): ParsedKeyRotati
       keyId: value.keyId,
       revokedAtSequence: value.revokedAtSequence as number,
     };
-  }).sort((left, right) => Buffer.compare(
-    Buffer.from(left.keyId, "utf8"), Buffer.from(right.keyId, "utf8"),
-  ));
+  });
   if (
-    add.some((entry, index) => index > 0 && add[index - 1]!.keyId === entry.keyId) ||
-    revoke.some((entry, index) => index > 0 && revoke[index - 1]!.keyId === entry.keyId)
+    add.some((entry, index) => index > 0 &&
+      Buffer.compare(Buffer.from(add[index - 1]!.keyId, "utf8"), Buffer.from(entry.keyId, "utf8")) >= 0) ||
+    revoke.some((entry, index) => index > 0 &&
+      Buffer.compare(Buffer.from(revoke[index - 1]!.keyId, "utf8"), Buffer.from(entry.keyId, "utf8")) >= 0)
   ) {
     throw updateSecurityError("envelope is invalid");
   }
