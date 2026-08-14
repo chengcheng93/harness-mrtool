@@ -149,7 +149,8 @@ test("activation gives the verifier persisted signed asset provenance after rest
   try {
     const managerInstance = await manager(paths, undefined, verifier);
     await managerInstance.stage(release());
-    await managerInstance.activate("1.1.0");
+    const restarted = await manager(paths, undefined, verifier);
+    await restarted.activate("1.1.0");
     assert.equal(staged?.assetSha256, "a".repeat(64));
     assert.equal(staged?.assetSize, 32);
   } finally {
@@ -364,7 +365,8 @@ test("repair keeps the new Skill when the published journal survives cleanup", a
     await broken.stage(release("1.1.0", 1, "new\n"));
     await assert.rejects(broken.activate("1.1.0"));
     assert.equal(await readFile(join(paths.active, "SKILL.md"), "utf8"), "new\n");
-    const repaired = await broken.repair();
+    const restarted = await manager(paths);
+    const repaired = await restarted.repair();
     assert.equal(repaired.repaired, true);
     assert.equal(await readFile(join(paths.active, "SKILL.md"), "utf8"), "new\n");
     await assert.rejects(readFile(join(paths.staging, ".harness-skill-activation.json")));
