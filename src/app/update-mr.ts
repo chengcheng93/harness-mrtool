@@ -308,6 +308,7 @@ export async function updateMergeRequest(
     );
   } catch (error) {
     let failure: unknown = error;
+    let verificationReceiptStageFailed = isVerificationReceiptStageError(error);
     if (readyTransitionStarted && hasPossibleWrite(journal)) {
       try {
         current = await compensateReadyFailure(context, plan, current.iid, completed);
@@ -318,6 +319,7 @@ export async function updateMergeRequest(
           error,
         );
       } catch (compensationError) {
+        verificationReceiptStageFailed ||= isVerificationReceiptStageError(compensationError);
         journal.setFinalState("unknown");
         failure = transactionError(
           "PARTIAL_REMOTE_STATE",
@@ -360,7 +362,7 @@ export async function updateMergeRequest(
         webUrl: current.webUrl,
         completedSteps: completed,
         retry: "update",
-        ...(isVerificationReceiptStageError(error)
+        ...(verificationReceiptStageFailed
           ? {
               failedOperation: "verification-receipt-stage" as const,
               failedField: "verificationReceipt",

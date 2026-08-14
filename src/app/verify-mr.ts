@@ -22,6 +22,12 @@ import { assertManagedDescription } from "./description-ownership.ts";
 
 export type VerificationLevel = "structure" | "ready" | "merge";
 
+function assertVerificationLevel(level: unknown): asserts level is VerificationLevel {
+  if (level !== "structure" && level !== "ready" && level !== "merge") {
+    throw verificationError("verification level is invalid");
+  }
+}
+
 export interface MergeRequestVerificationExpectation {
   readonly request: Request;
   readonly snapshot: ExternalContextSnapshot;
@@ -554,9 +560,7 @@ function assertStructure(inputs: VerifyMergeRequestInputs): {
     inputs.bundle,
     inputs.expected.releaseTag,
   );
-  if (!(["structure", "ready", "merge"] as const).includes(inputs.level)) {
-    throw verificationError("verification level is invalid");
-  }
+  assertVerificationLevel(inputs.level);
   const currentSnapshot = validateExternalContextSnapshot(inputs.current.snapshot);
   const expectedSnapshot = validateExternalContextSnapshot(inputs.expected.snapshot);
   const writePlan = validateDesiredWritePlan(inputs.expected.writePlan);
@@ -605,6 +609,7 @@ function assertStructure(inputs: VerifyMergeRequestInputs): {
 }
 
 export function verifyMergeRequest(inputs: VerifyMergeRequestInputs): MergeRequestVerificationResult {
+  assertVerificationLevel(inputs.level);
   const { currentSnapshot } = assertStructure(inputs);
   const policy = reviewPolicy(inputs.bundle);
   const qualified = currentSnapshot.review.qualifiedReviewerUserIds;
@@ -757,6 +762,7 @@ function verifyStoredLiveGate(
 export async function verifyStoredMergeRequest(
   inputs: VerifyStoredMergeRequestInputs,
 ): Promise<MergeRequestVerificationResult> {
+  assertVerificationLevel(inputs.level);
   let marker: ReturnType<typeof parseDiagnosticMarker>;
   try {
     marker = parseDiagnosticMarker(inputs.current.description);

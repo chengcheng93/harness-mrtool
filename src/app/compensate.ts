@@ -153,6 +153,17 @@ export async function readVerifiedReceipt(
   return receipt;
 }
 
+async function readAndRecordPostRead(
+  context: ManagedTransactionContext,
+  iid: number,
+  record: (requestId: unknown, value: RemoteMergeRequest) => void,
+): Promise<RemoteMergeRequest> {
+  const receipt = await context.remote.read(iid);
+  record(receipt.requestId, receipt.value);
+  assertRemoteIdentity(receipt.value, context);
+  return receipt.value;
+}
+
 export async function syncLabels(
   context: ManagedTransactionContext,
   currentValue: RemoteMergeRequest,
@@ -259,12 +270,30 @@ export async function writeAndRead(
     step.mutation("unknown", isRemoteMutationError(error, "unknown") ? error.requestId : null);
     recovered = true;
   }
-  let receipt: RemoteValueReceipt<RemoteMergeRequest>;
+  let readback: RemoteMergeRequest;
+  let postReadRecorded = false;
   try {
-    receipt = await readVerifiedReceipt(context, currentValue.iid);
-    step.readSucceeded(receipt.requestId, receipt.value);
+    readback = await readAndRecordPostRead(
+      context,
+      currentValue.iid,
+      (requestId, value) => {
+        step.readSucceeded(requestId, value);
+        postReadRecorded = true;
+      },
+    );
   } catch (error) {
-    step.readFailed(isRemoteReadError(error) ? error.requestId : null);
+    if (!postReadRecorded) {
+      step.readFailed(isRemoteReadError(error) ? error.requestId : null);
+    }
+    if (postReadRecorded) {
+      step.postcondition("mismatched");
+      throw transactionError(
+        "PARTIAL_REMOTE_STATE",
+        "A GitLab write completed but its readback identity did not match",
+        `${operation} readback identity mismatch`,
+        error,
+      );
+    }
     throw transactionError(
       "PARTIAL_REMOTE_STATE",
       "A GitLab write may have completed but its readback could not be proven",
@@ -273,7 +302,7 @@ export async function writeAndRead(
     );
   }
   try {
-    postcondition?.(receipt.value);
+    postcondition?.(readback);
     step.postcondition("matched");
   } catch (error) {
     step.postcondition("mismatched");
@@ -289,7 +318,7 @@ export async function writeAndRead(
     onRecoveredUnknown?.();
   }
   completed.push(recovered ? `${operation}.recovered` : operation);
-  return receipt.value;
+  return readback;
 }
 
 export function managedFields(

@@ -177,6 +177,7 @@ class FakeMergeRequestRemote implements MergeRequestRemote {
   unknownReady: "none" | "applied" | "applied-with-mismatch" = "none";
   unknownCreate: "none" | "applied" = "none";
   createRecovery: "exact" | "none" | "mismatch" | "multiple" = "exact";
+  createRecoveryReadError: RemoteReadError | null = null;
   mismatchConfirmedCreateReadback = false;
   unknownAfterWrite: WriteKind | null = null;
   unclassifiedAfterWrite: WriteKind | null = null;
@@ -185,6 +186,7 @@ class FakeMergeRequestRemote implements MergeRequestRemote {
   naturalContextDriftOnReadNumber: number | null = null;
   dropReviewerQualificationAfterWrite: WriteKind | null = null;
   renameLabelAfterWrite: { readonly kind: WriteKind; readonly id: string; readonly name: string } | null = null;
+  private activeLabelRename: { readonly id: string; readonly name: string } | null = null;
   private failReadAfterWriteKind: WriteKind | null = null;
   failReadAfterWriteOccurrence = 1;
   failReads = 0;
@@ -240,11 +242,11 @@ class FakeMergeRequestRemote implements MergeRequestRemote {
       const review = snapshot.review as { qualifiedReviewerUserIds: string[] | null };
       review.qualifiedReviewerUserIds = [];
     }
-    if (this.renameLabelAfterWrite !== null) {
+    if (this.activeLabelRename !== null) {
       const mutable = snapshot as unknown as { labelCandidates: Array<{ id: string; name: string }> };
       mutable.labelCandidates = snapshot.labelCandidates.map((label) =>
-        label.id === this.renameLabelAfterWrite?.id
-          ? { ...label, name: this.renameLabelAfterWrite.name }
+        label.id === this.activeLabelRename?.id
+          ? { ...label, name: this.activeLabelRename.name }
           : label);
     }
     return validateExternalContextSnapshot({
@@ -272,7 +274,8 @@ class FakeMergeRequestRemote implements MergeRequestRemote {
       this.dropReviewerQualificationAfterWrite = "create-draft";
     }
     if (this.renameLabelAfterWrite?.kind === kind) {
-      this.renameLabelAfterWrite = { ...this.renameLabelAfterWrite, kind: "create-draft" };
+      this.activeLabelRename = this.renameLabelAfterWrite;
+      this.renameLabelAfterWrite = null;
     }
   }
 
@@ -318,6 +321,11 @@ class FakeMergeRequestRemote implements MergeRequestRemote {
 
   async findOpen(input: CreateDraftInput) {
     this.findOpenCalls += 1;
+    if (this.createRecoveryReadError !== null && this.findOpenCalls > 1) {
+      const error = this.createRecoveryReadError;
+      this.createRecoveryReadError = null;
+      throw error;
+    }
     const current = this.current;
     if (current === null || current.state !== "opened" ||
         current.sourceProjectId !== input.sourceProjectId ||
@@ -698,6 +706,33 @@ test("an unknown create outcome is recovered by exact source and target identity
   assert.equal(result.completedWrites.includes("create-draft.recovered"), true);
 });
 
+test("unknown create recovery preserves the failed query request ID", async () => {
+  const fixture = await transactionFixture();
+  fixture.remote.unknownCreate = "applied";
+  fixture.remote.createRecoveryReadError = new RemoteReadError("timeout", "req-create-outcome-query");
+  let caught: unknown;
+
+  try {
+    await createMergeRequest({
+      request: fixture.request,
+      initialSnapshot: fixture.snapshot,
+      resolvedCandidates: fixture.candidates,
+      bundle: fixture.bundle,
+      releaseTag: "templates-v1.0.0",
+      cliVersion: "0.1.0-dev",
+      sourceBranch: "fix/webengine-css",
+      ...transactionRuntime(fixture.remote),
+    });
+  } catch (error) {
+    caught = error;
+  }
+
+  const recoveryStep = getTransactionAudit(caught)?.steps.find((step) => step.operation === "create-outcome-query");
+  assert.equal(recoveryStep?.postRead.outcome, "failed");
+  assert.equal(recoveryStep?.postRead.requestId, "req-create-outcome-query");
+  assert.equal(recoveryStep?.postcondition, "unavailable");
+});
+
 test("unknown create recovery refuses zero, multiple, or non-identical Draft candidates", async () => {
   for (const recovery of ["none", "mismatch", "multiple"] as const) {
     const fixture = await transactionFixture();
@@ -954,6 +989,41 @@ test("structure and ready verification allow pending live gates while merge veri
   );
 });
 
+test("stored verification rejects an invalid level before loading durable state", async () => {
+  const fixture = await transactionFixture();
+  const created = await createMergeRequest({
+    request: fixture.request,
+    initialSnapshot: fixture.snapshot,
+    resolvedCandidates: fixture.candidates,
+    bundle: fixture.bundle,
+    releaseTag: "templates-v1.0.0",
+    cliVersion: "0.1.0-dev",
+    sourceBranch: "fix/webengine-css",
+    ...transactionRuntime(fixture.remote),
+  });
+  let receiptLoads = 0;
+
+  await assert.rejects(
+    verifyStoredMergeRequest({
+      level: "bypass" as never,
+      current: created.final,
+      gitlabOrigin: "https://gitlab.example.test",
+      receiptLoader: {
+        loadVerified: async () => {
+          receiptLoads += 1;
+          return { trusted: true as const, receipt: null };
+        },
+      },
+      bundleLoader: {
+        loadVerifiedExact: async () => ({ trusted: true as const, bundle: fixture.bundle }),
+      },
+    }),
+    (error: unknown) => typeof error === "object" && error !== null && "code" in error &&
+      error.code === "POSTCONDITION_ERROR",
+  );
+  assert.equal(receiptLoads, 0);
+});
+
 test("the durable verification receipt is staged before the final description write", async () => {
   const fixture = await transactionFixture();
   const staged: VerificationReceiptV1[] = [];
@@ -1012,6 +1082,37 @@ test("a durable receipt staging failure prevents the final description write", a
   assert.equal(getTransactionFailureReceipt(caught)?.failedField, "verificationReceipt");
   assert.equal(fixture.remote.writes.includes("write-description"), false);
   assert.equal(fixture.remote.writes.includes("mark-ready"), false);
+});
+
+test("a compensation receipt staging failure is identified as the failed operation", async () => {
+  const fixture = await transactionFixture();
+  fixture.remote.unknownReady = "applied-with-mismatch";
+  let stages = 0;
+  let caught: unknown;
+  try {
+    await createMergeRequest({
+      request: fixture.request,
+      initialSnapshot: fixture.snapshot,
+      resolvedCandidates: fixture.candidates,
+      bundle: fixture.bundle,
+      releaseTag: "templates-v1.0.0",
+      cliVersion: "0.1.0-dev",
+      sourceBranch: "fix/webengine-css",
+      ...transactionRuntime(fixture.remote),
+      verificationReceiptWriter: {
+        stageAuthenticated: async () => {
+          stages += 1;
+          if (stages === 2) throw new Error("Injected compensation receipt persistence failure");
+        },
+      },
+    });
+  } catch (error) {
+    caught = error;
+  }
+
+  assert.equal(stages, 2);
+  assert.equal(getTransactionFailureReceipt(caught)?.failedOperation, "verification-receipt-stage");
+  assert.equal(getTransactionFailureReceipt(caught)?.failedField, "verificationReceipt");
 });
 
 test("standalone verification reloads a trusted durable receipt and exact historical Bundle", async () => {
@@ -1662,6 +1763,36 @@ test("a selected label renamed under the same stable ID stops the transaction", 
   );
   assert.equal(fixture.remote.writes.includes("write-description"), false);
   assert.equal(fixture.remote.current?.draft, true);
+});
+
+test("a post-write identity drift records the successful read receipt before mismatch", async () => {
+  const fixture = await transactionFixture();
+  fixture.remote.renameLabelAfterWrite = {
+    kind: "write-fields",
+    id: "gid://gitlab/ProjectLabel/10",
+    name: "week::2026-w33-0810-0816",
+  };
+  let caught: unknown;
+  try {
+    await createMergeRequest({
+      request: fixture.request,
+      initialSnapshot: fixture.snapshot,
+      resolvedCandidates: fixture.candidates,
+      bundle: fixture.bundle,
+      releaseTag: "templates-v1.0.0",
+      cliVersion: "0.1.0-dev",
+      sourceBranch: "fix/webengine-css",
+      ...transactionRuntime(fixture.remote),
+    });
+  } catch (error) {
+    caught = error;
+  }
+
+  const fields = getTransactionAudit(caught)?.steps.find((step) => step.operation === "fields-write");
+  assert.equal(fields?.mutation?.outcome, "confirmed");
+  assert.equal(fields?.postRead.outcome, "succeeded");
+  assert.equal(fields?.postRead.requestId, "req-read");
+  assert.equal(fields?.postcondition, "mismatched");
 });
 
 test("update treats a successful write followed by failed readback as unknown remote state", async () => {
