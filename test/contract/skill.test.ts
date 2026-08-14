@@ -351,6 +351,28 @@ test("repair restores the old Skill when activation dies after moving the active
   }
 });
 
+test("repair keeps the new Skill when the published journal survives cleanup", async () => {
+  const paths = await sandbox();
+  try {
+    const initial = await manager(paths);
+    await initial.install(release("1.0.0", 1, "old\n"));
+    const broken = await manager(paths, {
+      hit(point: string): void {
+        if (point === "after-active-published") throw new Error("injected published cleanup failure");
+      },
+    });
+    await broken.stage(release("1.1.0", 1, "new\n"));
+    await assert.rejects(broken.activate("1.1.0"));
+    assert.equal(await readFile(join(paths.active, "SKILL.md"), "utf8"), "new\n");
+    const repaired = await broken.repair();
+    assert.equal(repaired.repaired, true);
+    assert.equal(await readFile(join(paths.active, "SKILL.md"), "utf8"), "new\n");
+    await assert.rejects(readFile(join(paths.staging, ".harness-skill-activation.json")));
+  } finally {
+    await rm(paths.root, { recursive: true, force: true });
+  }
+});
+
 test("repair fails closed when the activation journal path is corrupted", async () => {
   const paths = await sandbox();
   try {

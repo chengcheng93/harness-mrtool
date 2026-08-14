@@ -959,6 +959,7 @@ export class SkillManager {
       await syncDirectory(dirname(this.activePath));
       const publishedJournal: ActivationJournal = { ...committedJournal, state: "published" };
       await writeAtomic(journalPath, new TextEncoder().encode(`${canonicalizeJson(publishedJournal as unknown as JsonValue)}\n`));
+      await this.faultInjector?.hit("after-active-published");
       await rm(journalPath, { force: true });
       if (committedJournal.backupPath !== null) await rm(committedJournal.backupPath, { recursive: true, force: true });
       await syncDirectory(dirname(this.activePath));
@@ -987,7 +988,21 @@ export class SkillManager {
     try {
       const active = await lstat(this.activePath).catch(() => null);
       const backup = backupPath === null ? null : await lstat(backupPath).catch(() => null);
-      if (backup !== null && backup.isDirectory() && !backup.isSymbolicLink()) {
+      if (journal.state === "published") {
+        // The new tree is already visible. A crash in the cleanup window must
+        // never roll it back to the old backup; only remove manager-owned
+        // leftovers and the journal. If publication is not visible anymore,
+        // fail closed unless a verified old backup can be restored.
+        if (active === null || active.isSymbolicLink() || !active.isDirectory()) {
+          if (backup === null || backup.isSymbolicLink() || !backup.isDirectory()) {
+            fail("UPDATE_SECURITY_ERROR", "Skill repair failed");
+          }
+          await rename(backupPath!, this.activePath);
+        } else if (backup !== null) {
+          if (backup.isSymbolicLink() || !backup.isDirectory()) fail("UPDATE_SECURITY_ERROR", "Skill repair failed");
+          await rm(backupPath!, { recursive: true, force: true });
+        }
+      } else if (backup !== null && backup.isDirectory() && !backup.isSymbolicLink()) {
         if (active !== null) await rm(this.activePath, { recursive: true, force: true });
         await rename(backupPath!, this.activePath);
       }
