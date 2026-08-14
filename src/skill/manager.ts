@@ -657,9 +657,11 @@ export class SkillManager {
   private async hasJournal(): Promise<boolean> {
     try {
       const info = await lstat(resolve(this.stagingPath, JOURNAL_NAME));
-      return info.isFile() && !info.isSymbolicLink();
+      if (!info.isFile() || info.isSymbolicLink()) fail("UPDATE_SECURITY_ERROR", "Skill activation journal is invalid");
+      return true;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      if (error instanceof ToolError) throw error;
       fail("UPDATE_SECURITY_ERROR", "Skill state is unavailable");
     }
   }
@@ -676,7 +678,10 @@ export class SkillManager {
     if (!within(this.stagingPath, target)) fail("UPDATE_SECURITY_ERROR", "Skill staging failed");
     const existing = await this.readStaged(normalized.manifest.version);
     if (existing !== null) {
-      if (existing.manifest.treeSha256 !== normalized.manifest.treeSha256) fail("UPDATE_SECURITY_ERROR", "Skill release metadata is invalid");
+      if (canonicalizeJson(existing.manifest as unknown as JsonValue) !==
+          canonicalizeJson(normalized.manifest as unknown as JsonValue)) {
+        fail("UPDATE_SECURITY_ERROR", "Skill release metadata is invalid");
+      }
       const status = await this.statusFor(undefined);
       return Object.freeze({ ...status, stagedPath: existing.root });
     }
@@ -814,15 +819,26 @@ export class SkillManager {
   async repair(): Promise<SkillRepairResult> {
     await this.ensureReady();
     const journalPath = resolve(this.stagingPath, JOURNAL_NAME);
+    let journalInfo;
+    try {
+      journalInfo = await lstat(journalPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        const status = await this.statusFor(undefined);
+        return Object.freeze({ ...status, repaired: false });
+      }
+      if (error instanceof ToolError) throw error;
+      fail("UPDATE_SECURITY_ERROR", "Skill activation journal is invalid");
+    }
+    if (!journalInfo!.isFile() || journalInfo!.isSymbolicLink()) {
+      fail("UPDATE_SECURITY_ERROR", "Skill activation journal is invalid");
+    }
     let content: Uint8Array;
     try {
       content = await readRegularFile(journalPath, 64 * 1024);
     } catch (error) {
-      if (error instanceof ToolError && error.details.actual === "Skill state is unavailable") {
-        const status = await this.statusFor(undefined);
-        return Object.freeze({ ...status, repaired: false });
-      }
-      throw error;
+      if (error instanceof ToolError) fail("UPDATE_SECURITY_ERROR", "Skill activation journal is invalid");
+      fail("UPDATE_SECURITY_ERROR", "Skill activation journal is invalid");
     }
     let parsed: unknown;
     try {

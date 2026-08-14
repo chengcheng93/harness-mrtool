@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -198,6 +198,26 @@ test("bootstrap rejects a fetched asset whose signed size or hash drifts", async
   }
 });
 
+test("staging the same version rejects protocol metadata drift instead of reusing the old manifest", async () => {
+  const paths = await sandbox();
+  try {
+    const managerInstance = new SkillManager({
+      activePath: paths.active,
+      stagingPath: paths.staging,
+      cliVersion: CLI_VERSION,
+      supportedProtocols: [1, 2],
+    });
+    await managerInstance.stage(release("1.1.0", 1));
+    await assert.rejects(
+      managerInstance.stage(release("1.1.0", 2)),
+      (error: unknown) => typeof error === "object" && error !== null && "code" in error &&
+        error.code === "UPDATE_SECURITY_ERROR",
+    );
+  } finally {
+    await rm(paths.root, { recursive: true, force: true });
+  }
+});
+
 test("active Skill state rejects files outside the verified manifest", async () => {
   const paths = await sandbox();
   try {
@@ -227,6 +247,22 @@ test("repair restores the old Skill when activation dies after moving the active
     const repaired = await broken.repair();
     assert.equal(repaired.repaired, true);
     assert.equal(await readFile(join(paths.active, "SKILL.md"), "utf8"), "old\n");
+  } finally {
+    await rm(paths.root, { recursive: true, force: true });
+  }
+});
+
+test("repair fails closed when the activation journal path is corrupted", async () => {
+  const paths = await sandbox();
+  try {
+    const managerInstance = await manager(paths);
+    await managerInstance.status();
+    await mkdir(join(paths.staging, ".harness-skill-activation.json"));
+    await assert.rejects(
+      managerInstance.repair(),
+      (error: unknown) => typeof error === "object" && error !== null && "code" in error &&
+        error.code === "UPDATE_SECURITY_ERROR",
+    );
   } finally {
     await rm(paths.root, { recursive: true, force: true });
   }
