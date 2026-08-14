@@ -55,8 +55,9 @@ export interface SkillRelease {
   readonly activation: "explicit-host-refresh";
   readonly verified: true;
   readonly files: readonly SkillFile[];
-  readonly assetSha256?: string;
-  readonly assetSize?: number;
+  /** Signed channel asset identity; required so restart-time activation can re-verify provenance. */
+  readonly assetSha256: string;
+  readonly assetSize: number;
 }
 
 export interface SkillStagedRelease {
@@ -65,6 +66,8 @@ export interface SkillStagedRelease {
   readonly skillProtocol: number;
   readonly cliVersionRange: string;
   readonly activation: "explicit-host-refresh";
+  readonly assetSha256: string;
+  readonly assetSize: number;
   readonly files: readonly SkillFile[];
 }
 
@@ -138,6 +141,8 @@ interface StoredManifest {
   readonly skillProtocol: number;
   readonly cliVersionRange: string;
   readonly activation: "explicit-host-refresh";
+  readonly assetSha256: string;
+  readonly assetSize: number;
   readonly treeSha256: string;
   readonly files: readonly StoredFile[];
 }
@@ -415,13 +420,16 @@ function exactManifest(value: unknown): StoredManifest {
   if (value === null || typeof value !== "object" || Array.isArray(value)) fail("UPDATE_SECURITY_ERROR", "Skill state is unavailable");
   const item = value as Record<string, unknown>;
   const keys = Object.keys(item).sort();
-  const expected = ["activation", "cliVersionRange", "files", "manifestVersion", "skillProtocol", "tag", "treeSha256", "version"].sort();
+  const expected = ["activation", "assetSha256", "assetSize", "cliVersionRange", "files", "manifestVersion", "skillProtocol", "tag", "treeSha256", "version"].sort();
   if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) fail("UPDATE_SECURITY_ERROR", "Skill state is unavailable");
   const version = strictVersion(item.version);
   const tag = safeSingleLine(item.tag);
   const range = safeSingleLine(item.cliVersionRange);
   if (tag !== `skill-v${version}` || item.manifestVersion !== 1 || item.activation !== "explicit-host-refresh" ||
       !Number.isSafeInteger(item.skillProtocol) || (item.skillProtocol as number) < 1 ||
+      typeof item.assetSha256 !== "string" || !SHA256.test(item.assetSha256) ||
+      !Number.isSafeInteger(item.assetSize) || (item.assetSize as number) < 1 ||
+      (item.assetSize as number) > MAX_SKILL_BYTES ||
       typeof item.treeSha256 !== "string" || !SHA256.test(item.treeSha256) || !Array.isArray(item.files)) {
     fail("UPDATE_SECURITY_ERROR", "Skill state is unavailable");
   }
@@ -452,6 +460,8 @@ function exactManifest(value: unknown): StoredManifest {
     skillProtocol: item.skillProtocol as number,
     cliVersionRange: range,
     activation: "explicit-host-refresh",
+    assetSha256: item.assetSha256 as string,
+    assetSize: item.assetSize as number,
     treeSha256: item.treeSha256 as string,
     files: Object.freeze(files),
   });
@@ -562,8 +572,8 @@ function normalizeRelease(release: SkillRelease, cliVersion: string, protocols: 
   files.sort((left, right) => left.path.localeCompare(right.path));
   const total = files.reduce((sum, file) => sum + file.content.byteLength, 0);
   if (total > MAX_SKILL_BYTES) fail("UPDATE_SECURITY_ERROR", "Skill release files are invalid");
-  if (release.assetSha256 !== undefined && (!SHA256.test(release.assetSha256) || release.assetSize === undefined ||
-      !Number.isSafeInteger(release.assetSize) || release.assetSize < 1)) {
+  if (!SHA256.test(release.assetSha256) || !Number.isSafeInteger(release.assetSize) ||
+      release.assetSize < 1 || release.assetSize > MAX_SKILL_BYTES) {
     fail("UPDATE_SECURITY_ERROR", "Skill release asset does not match the signed component");
   }
   const storedFiles = files.map((file) => Object.freeze({ path: file.path, size: file.content.byteLength, sha256: sha(file.content) }));
@@ -574,6 +584,8 @@ function normalizeRelease(release: SkillRelease, cliVersion: string, protocols: 
     skillProtocol: release.skillProtocol,
     cliVersionRange: range,
     activation: "explicit-host-refresh",
+    assetSha256: release.assetSha256,
+    assetSize: release.assetSize,
     treeSha256: treeHash(storedFiles),
     files: Object.freeze(storedFiles),
   });
@@ -885,6 +897,8 @@ export class SkillManager {
         skillProtocol: staged.manifest.skillProtocol,
         cliVersionRange: staged.manifest.cliVersionRange,
         activation: staged.manifest.activation,
+        assetSha256: staged.manifest.assetSha256,
+        assetSize: staged.manifest.assetSize,
         files: Object.freeze(stagedFiles.map((file) => Object.freeze({
           path: file.path,
           contents: Uint8Array.from(file.content),

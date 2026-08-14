@@ -8,6 +8,7 @@ import {
   SkillManager,
   type SkillRelease,
   type SkillReleaseComponent,
+  type SkillStagedRelease,
   type SkillReleaseVerifier,
 } from "../../src/skill/manager.ts";
 import { canonicalizeJson } from "../../src/contracts/jcs.ts";
@@ -128,6 +129,29 @@ test("activation rejects a self-consistent staging manifest without signed prove
         error.code === "UPDATE_SECURITY_ERROR",
     );
     await assert.rejects(readFile(join(paths.active, "SKILL.md")));
+  } finally {
+    await rm(paths.root, { recursive: true, force: true });
+  }
+});
+
+test("activation gives the verifier persisted signed asset provenance after restart", async () => {
+  const paths = await sandbox();
+  let staged: SkillStagedRelease | undefined;
+  const verifier: SkillReleaseVerifier = {
+    verify: async (): Promise<void> => undefined,
+    verifyStaged: async (value): Promise<void> => {
+      staged = value;
+      if (value.assetSha256 !== "a".repeat(64) || value.assetSize !== 32) {
+        throw new Error("missing signed asset provenance");
+      }
+    },
+  };
+  try {
+    const managerInstance = await manager(paths, undefined, verifier);
+    await managerInstance.stage(release());
+    await managerInstance.activate("1.1.0");
+    assert.equal(staged?.assetSha256, "a".repeat(64));
+    assert.equal(staged?.assetSize, 32);
   } finally {
     await rm(paths.root, { recursive: true, force: true });
   }
