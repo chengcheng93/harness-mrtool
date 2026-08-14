@@ -22,8 +22,13 @@ import {
   ensurePrivateStateDirectory,
   type WindowsAclVerifier,
 } from "../platform/state-path.ts";
-import type { VerifiedChannelManifest } from "./manifest.ts";
-import { updateSecurityError } from "./envelope.ts";
+import {
+  assertUpdateLockLease,
+  withUpdateLock,
+} from "../platform/lock.ts";
+import type { ProcessLockLease, ProcessLockProvider } from "../platform/process-lock.ts";
+import { isVerifiedChannelManifest, type VerifiedChannelManifest } from "./manifest.ts";
+import { requireCanonicalSemVer, updateSecurityError } from "./envelope.ts";
 
 /** Maximum canonical active-pointer bytes accepted from disk. */
 export const MAX_CACHE_POINTER_BYTES = 64 * 1024;
@@ -41,10 +46,13 @@ const RELEASE_ROOT_NAME = "releases";
 const CLI_NAME = "cli.bin";
 const TEMPLATE_NAME = "template.bundle";
 const RECEIPT_NAME = "bundle-receipt.envelope";
+const STAGING_NAME = /^\.staging-[a-f0-9]{24}$/u;
+const STALE_NAME = /^\.stale-[a-f0-9]{24}$/u;
+const MAX_RELEASE_ROOT_ENTRIES = 4_096;
 const SHA256 = /^[a-f0-9]{64}$/u;
 const RELEASE_SET_ID = /^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$/u;
 const TRANSACTION_ID = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,126}[A-Za-z0-9])?$/u;
-const SEMVER = /^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u;
+const WINDOWS_DEVICE_NAME = /^(?:con|prn|aux|nul|clock\$|com[1-9]|lpt[1-9])(?:\..*)?$/iu;
 
 const RECORD_FIELDS = [
   "cacheVersion",
@@ -102,6 +110,15 @@ export interface UpdateCacheOptions {
   readonly stateDirectory: string;
   readonly windowsAclVerifier?: WindowsAclVerifier;
   readonly faultInjector?: CacheFaultInjector;
+  /** Required for any write; cryptographic verification belongs to the caller. */
+  readonly verifySnapshot?: ReleaseSetSnapshotVerifier;
+  /** Optional test/platform injection; production uses the system provider. */
+  readonly lockProvider?: ProcessLockProvider;
+  readonly lockTimeoutMs?: number;
+}
+
+export interface ReleaseSetSnapshotVerifier {
+  verify(snapshot: ReleaseSetSnapshot): void | Promise<void>;
 }
 
 export interface VerifiedManifestSecurityView {
@@ -183,8 +200,16 @@ function boundedInteger(value: unknown, minimum: number, maximum: number): numbe
 }
 
 function strictSemver(value: unknown): string {
-  if (typeof value !== "string" || value.length > 128 || !SEMVER.test(value)) return fail();
-  return value;
+  if (typeof value !== "string" || value.length > 128) return fail();
+  try {
+    return requireCanonicalSemVer(value);
+  } catch {
+    return fail();
+  }
+}
+
+function safeDirectoryIdentifier(value: string): boolean {
+  return !/[. ]$/u.test(value) && !WINDOWS_DEVICE_NAME.test(value);
 }
 
 function sha(value: Uint8Array): string {
@@ -198,6 +223,17 @@ function bytes(value: unknown, maximum: number): Uint8Array {
   return Uint8Array.from(value);
 }
 
+function verifierSnapshot(value: ReleaseSetSnapshot): ReleaseSetSnapshot {
+  // Keep the verifier contract independent from cache implementation paths and
+  // give it fresh byte views so a verifier cannot mutate the loaded result.
+  return Object.freeze({
+    record: value.record,
+    cliBytes: Uint8Array.from(value.cliBytes),
+    templateBytes: Uint8Array.from(value.templateBytes),
+    receiptBytes: Uint8Array.from(value.receiptBytes),
+  });
+}
+
 export function validateReleaseSetRecord(value: unknown): ReleaseSetRecord {
   const item = plainRecord(value, RECORD_FIELDS);
   if (
@@ -205,8 +241,10 @@ export function validateReleaseSetRecord(value: unknown): ReleaseSetRecord {
     item.recordType !== RECORD_TYPE ||
     typeof item.releaseSetId !== "string" ||
     !RELEASE_SET_ID.test(item.releaseSetId) ||
+    !safeDirectoryIdentifier(item.releaseSetId) ||
     typeof item.transactionId !== "string" ||
     !TRANSACTION_ID.test(item.transactionId) ||
+    !safeDirectoryIdentifier(item.transactionId) ||
     typeof item.cliSha256 !== "string" ||
     !SHA256.test(item.cliSha256) ||
     typeof item.templateSha256 !== "string" ||
@@ -258,7 +296,8 @@ function validateSnapshot(value: unknown): ReleaseSetSnapshot {
 function canonicalRecord(record: ReleaseSetRecord): string {
   try {
     return `${canonicalizeJson(record)}\n`;
-  } catch {
+  } catch (error) {
+    if (error instanceof ToolError) throw error;
     return fail();
   }
 }
@@ -348,7 +387,8 @@ async function readBounded(
     const current = await lstat(path, { bigint: true }) as BigIntStats;
     if (!identityEqual(opened, after) || !identityEqual(opened, current) || current.isSymbolicLink()) return fail();
     return result;
-  } catch {
+  } catch (error) {
+    if (error instanceof ToolError) throw error;
     return fail();
   } finally {
     await handle?.close().catch(() => undefined);
@@ -463,22 +503,35 @@ function normalizeSecurityView(manifest: Record<string, unknown>): VerifiedManif
   );
   if (
     typeof release.id !== "string" || !RELEASE_SET_ID.test(release.id) ||
-    typeof release.cli !== "string" || !SEMVER.test(release.cli) ||
-    typeof release.templates !== "string" || !SEMVER.test(release.templates) ||
-    typeof policy.minimumAllowedCliVersion !== "string" || !SEMVER.test(policy.minimumAllowedCliVersion)
+    typeof release.cli !== "string" || typeof release.templates !== "string" ||
+    typeof policy.minimumAllowedCliVersion !== "string"
   ) return fail();
 
-  const revokedCliVersions = securityStringArray(policy.revokedCliVersions, (item) => SEMVER.test(item));
+  // Keep the security projection on the same canonical SemVer grammar as the
+  // signed channel and release record validators (numeric prerelease labels
+  // such as `-01` are intentionally rejected).
+  const cli = strictSemver(release.cli);
+  const templates = strictSemver(release.templates);
+  const minimumAllowedCliVersion = strictSemver(policy.minimumAllowedCliVersion);
+
+  const revokedCliVersions = securityStringArray(policy.revokedCliVersions, (item) => {
+    try {
+      strictSemver(item);
+      return true;
+    } catch {
+      return false;
+    }
+  });
   const revokedReleaseSetIds = securityStringArray(policy.revokedReleaseSetIds, (item) => RELEASE_SET_ID.test(item));
   const frozenSecurity = Object.freeze({
-    minimumAllowedCliVersion: policy.minimumAllowedCliVersion,
+    minimumAllowedCliVersion,
     revokedCliVersions,
     revokedReleaseSetIds,
   });
   const frozenReleaseSet = Object.freeze({
     id: release.id,
-    cli: release.cli,
-    templates: release.templates,
+    cli,
+    templates,
   });
   const frozenManifest = Object.freeze({
     manifestVersion: 1 as const,
@@ -516,8 +569,9 @@ function securityView(input: VerifiedManifestInput): VerifiedManifestSecurityVie
     return normalizeSecurityView(candidate.manifest as Record<string, unknown>);
   }
 
-  // A full VerifiedChannelManifest is produced frozen by verifyChannelEnvelope. Require its
-  // complete top-level shape before projecting the small security policy used for write gating.
+  // A full VerifiedChannelManifest is produced by verifyChannelEnvelope. Its
+  // private runtime brand is the trust boundary; shape checks alone are forgeable.
+  if (!isVerifiedChannelManifest(input)) return fail();
   const candidate = input as unknown as Record<string, unknown>;
   if (
     Object.getPrototypeOf(candidate) !== Object.prototype ||
@@ -561,6 +615,9 @@ export class UpdateCache {
 
   private readonly windowsAclVerifier: WindowsAclVerifier | undefined;
   private readonly faultInjector: CacheFaultInjector | undefined;
+  private readonly verifySnapshot: ReleaseSetSnapshotVerifier | undefined;
+  private readonly lockProvider: ProcessLockProvider | undefined;
+  private readonly lockTimeoutMs: number | undefined;
   private ready: Promise<void> | undefined;
 
   constructor(options: UpdateCacheOptions) {
@@ -571,6 +628,23 @@ export class UpdateCache {
     this.activeRecordPath = safeChild(stateDirectory, ACTIVE_POINTER_NAME);
     this.windowsAclVerifier = options.windowsAclVerifier;
     this.faultInjector = options.faultInjector;
+    this.verifySnapshot = options.verifySnapshot;
+    this.lockProvider = options.lockProvider;
+    this.lockTimeoutMs = options.lockTimeoutMs;
+  }
+
+  private async withOperationLock<T>(
+    lease: ProcessLockLease | undefined,
+    callback: (heldLease: ProcessLockLease) => Promise<T>,
+  ): Promise<T> {
+    if (lease !== undefined) {
+      assertUpdateLockLease(lease, this.cacheDirectory);
+      return callback(lease);
+    }
+    return withUpdateLock(this.cacheDirectory, callback, {
+      ...(this.lockProvider === undefined ? {} : { provider: this.lockProvider }),
+      ...(this.lockTimeoutMs === undefined ? {} : { timeoutMs: this.lockTimeoutMs }),
+    });
   }
 
   private async ensureReady(): Promise<void> {
@@ -621,7 +695,8 @@ export class UpdateCache {
         this.faultInjector,
         "after-active-open",
       );
-    } catch {
+    } catch (error) {
+      if (error instanceof ToolError && error.code !== "UPDATE_SECURITY_ERROR") throw error;
       await quarantine(this.activeRecordPath, this.cacheDirectory).catch(() => undefined);
       return fail();
     }
@@ -689,9 +764,51 @@ export class UpdateCache {
     };
   }
 
-  async storeVerifiedReleaseSet(input: ReleaseSetSnapshot): Promise<StoredReleaseSet> {
+  /** Remove only tool-owned staging directories while the activation lock is held. */
+  private async cleanupStaleStagingDirectoriesUnlocked(): Promise<void> {
+    await this.ensureReady();
+    let directory: Awaited<ReturnType<typeof opendir>> | undefined;
+    let count = 0;
+    try {
+      directory = await opendir(this.releaseRoot);
+      for await (const entry of directory) {
+        count += 1;
+        if (count > MAX_RELEASE_ROOT_ENTRIES) return fail();
+        const isStaging = entry.name.startsWith(".staging-");
+        const isStale = entry.name.startsWith(".stale-");
+        if (!isStaging && !isStale) continue;
+        if ((isStaging && !STAGING_NAME.test(entry.name)) ||
+            (isStale && !STALE_NAME.test(entry.name))) return fail();
+        const source = safeChild(this.releaseRoot, entry.name);
+        await assertPlainDirectory(source);
+        const isolated = isStale ? source : safeChild(this.releaseRoot, `.stale-${randomSuffix()}`);
+        if (!isStale) {
+          await rename(source, isolated);
+          await assertPlainDirectory(isolated);
+        }
+        await rm(isolated, { recursive: true, maxRetries: 3, retryDelay: 10 });
+        await syncDirectory(this.releaseRoot);
+      }
+    } catch (error) {
+      if (error instanceof ToolError) throw error;
+      return fail();
+    } finally {
+      await directory?.close().catch(() => undefined);
+    }
+  }
+
+  async cleanupStaleStagingDirectories(lease?: ProcessLockLease): Promise<void> {
+    await this.withOperationLock(lease, async (heldLease) => {
+      await this.cleanupStaleStagingDirectoriesUnlocked();
+      heldLease.assertHeld();
+    });
+  }
+
+  private async storeVerifiedReleaseSetUnlocked(input: ReleaseSetSnapshot): Promise<StoredReleaseSet> {
     await this.ensureReady();
     const snapshot = validateSnapshot(input);
+    if (this.verifySnapshot === undefined || typeof this.verifySnapshot.verify !== "function") return fail();
+    await this.verifySnapshot.verify(verifierSnapshot(snapshot));
     const releaseDirectory = this.releaseDirectory(snapshot.record);
     try {
       await lstat(releaseDirectory);
@@ -739,7 +856,59 @@ export class UpdateCache {
     return Object.freeze(result);
   }
 
-  async loadLastKnownGoodOrNull(
+  async storeVerifiedReleaseSet(
+    input: ReleaseSetSnapshot,
+    lease?: ProcessLockLease,
+  ): Promise<StoredReleaseSet> {
+    return this.withOperationLock(lease, async (heldLease) => {
+      const result = await this.storeVerifiedReleaseSetUnlocked(input);
+      heldLease.assertHeld();
+      return result;
+    });
+  }
+
+  /** Commit a release directory previously published by a verified store attempt. */
+  private async commitStagedReleaseSetUnlocked(input: ReleaseSetRecord): Promise<StoredReleaseSet | null> {
+    await this.ensureReady();
+    const record = validateReleaseSetRecord(input);
+    const releaseDirectory = this.releaseDirectory(record);
+    try {
+      const existing = await lstat(releaseDirectory);
+      if (existing.isSymbolicLink() || !existing.isDirectory()) return fail();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      if (error instanceof ToolError) throw error;
+      return fail();
+    }
+    const loaded = await this.readRelease(record);
+    if (this.verifySnapshot === undefined || typeof this.verifySnapshot.verify !== "function") return fail();
+    await this.verifySnapshot.verify(verifierSnapshot(loaded));
+    await atomicWrite(
+      this.activeRecordPath,
+      new TextEncoder().encode(canonicalRecord(record)),
+      0o600,
+      this.faultInjector,
+      "before-active-replace",
+    );
+    return Object.freeze({
+      ...loaded,
+      writesBlocked: false,
+      writeBlockReasons: [],
+    });
+  }
+
+  async commitStagedReleaseSet(
+    input: ReleaseSetRecord,
+    lease?: ProcessLockLease,
+  ): Promise<StoredReleaseSet | null> {
+    return this.withOperationLock(lease, async (heldLease) => {
+      const result = await this.commitStagedReleaseSetUnlocked(input);
+      heldLease.assertHeld();
+      return result;
+    });
+  }
+
+  private async loadLastKnownGoodOrNullUnlocked(
     options: { readonly verifiedManifest?: VerifiedManifestInput } = {},
   ): Promise<LoadedReleaseSet | null> {
     await this.ensureReady();
@@ -749,10 +918,23 @@ export class UpdateCache {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
       return fail();
     }
-    return this.loadLastKnownGood(options);
+    return this.loadLastKnownGoodUnlocked(options);
   }
 
-  async loadLastKnownGood(options: { readonly verifiedManifest?: VerifiedManifestInput } = {}): Promise<LoadedReleaseSet> {
+  async loadLastKnownGoodOrNull(
+    options: { readonly verifiedManifest?: VerifiedManifestInput } = {},
+    lease?: ProcessLockLease,
+  ): Promise<LoadedReleaseSet | null> {
+    return this.withOperationLock(lease, async (heldLease) => {
+      const result = await this.loadLastKnownGoodOrNullUnlocked(options);
+      heldLease.assertHeld();
+      return result;
+    });
+  }
+
+  private async loadLastKnownGoodUnlocked(
+    options: { readonly verifiedManifest?: VerifiedManifestInput } = {},
+  ): Promise<LoadedReleaseSet> {
     await this.ensureReady();
     let record: ReleaseSetRecord;
     try {
@@ -766,20 +948,50 @@ export class UpdateCache {
     const manifest = options.verifiedManifest === undefined
       ? undefined
       : securityView(options.verifiedManifest);
+    let loaded: ReleaseSetSnapshot & {
+      readonly releaseDirectory: string;
+      readonly cliPath: string;
+      readonly templatePath: string;
+      readonly receiptPath: string;
+    };
     try {
-      const loaded = await this.readRelease(record);
-      const reasons = writeBlocks(record, manifest);
-      return Object.freeze({
-        ...loaded,
-        writesBlocked: reasons.length > 0,
-        writeBlockReasons: reasons,
-      });
+      loaded = await this.readRelease(record);
     } catch (error) {
+      // Only a branded security failure proves on-disk corruption. Preserve
+      // the active pointer for transient I/O/ACL failures so LKG recovery can
+      // retry instead of destroying the only known-good release.
+      if (error instanceof ToolError && error.code !== "UPDATE_SECURITY_ERROR") {
+        throw error;
+      }
       await quarantine(this.releaseDirectory(record), this.releaseRoot).catch(() => undefined);
       await quarantine(this.activeRecordPath, this.cacheDirectory).catch(() => undefined);
       if (error instanceof ToolError) throw error;
       return fail();
     }
+    // A hash-consistent tuple proves only local file integrity.  Reads are
+    // trusted only after the same application verifier used for publication
+    // authenticates the complete snapshot.
+    if (this.verifySnapshot === undefined || typeof this.verifySnapshot.verify !== "function") {
+      return fail();
+    }
+    await this.verifySnapshot.verify(verifierSnapshot(loaded));
+    const reasons = writeBlocks(record, manifest);
+    return Object.freeze({
+      ...loaded,
+      writesBlocked: reasons.length > 0,
+      writeBlockReasons: reasons,
+    });
+  }
+
+  async loadLastKnownGood(
+    options: { readonly verifiedManifest?: VerifiedManifestInput } = {},
+    lease?: ProcessLockLease,
+  ): Promise<LoadedReleaseSet> {
+    return this.withOperationLock(lease, async (heldLease) => {
+      const result = await this.loadLastKnownGoodUnlocked(options);
+      heldLease.assertHeld();
+      return result;
+    });
   }
 }
 

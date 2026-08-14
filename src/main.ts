@@ -1,4 +1,6 @@
 import { isSea } from "node:sea";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import packageMetadata from "../package.json" with { type: "json" };
 
@@ -20,10 +22,17 @@ import { renderProjectTemplate } from "./render/project-template.ts";
 import { renderTitle } from "./render/title.ts";
 import { normalizeRuntimeArguments } from "./runtime-arguments.ts";
 import { executeCliJson, type CliCommandHandlers } from "./cli/execute.ts";
+import { consumeInvocationStdin } from "./update/invocation-envelope.ts";
+import { parseStrictJson } from "./input/strict-json.ts";
 import {
   createLocalCommandHandlers,
   type TrustedBundleSelection,
 } from "./cli/commands/local.ts";
+import {
+  createProductionCommandHandlers,
+  createDefaultUpdaterCommandServices,
+  mergeCliCommandHandlers,
+} from "./cli/commands/production.ts";
 import { writeProjectTemplate } from "./cli/projection-writer.ts";
 
 declare const __HARNESS_MRTOOL_VERSION__: string;
@@ -33,8 +42,14 @@ const cliVersion = typeof __HARNESS_MRTOOL_VERSION__ === "string"
   ? __HARNESS_MRTOOL_VERSION__
   : packageMetadata.version;
 
-function loadBootstrapTemplateBundle(): LoadedTemplateBundle {
-  const bundle = copyJsonValue(__HARNESS_MRTOOL_BOOTSTRAP_BUNDLE__);
+async function loadBootstrapTemplateBundle(): Promise<LoadedTemplateBundle> {
+  const embedded = typeof __HARNESS_MRTOOL_BOOTSTRAP_BUNDLE__ === "undefined"
+    ? undefined
+    : __HARNESS_MRTOOL_BOOTSTRAP_BUNDLE__;
+  if (embedded === undefined) {
+    return loadTemplateBundle(resolve(dirname(fileURLToPath(import.meta.url)), "..", "template-bundle"));
+  }
+  const bundle = copyJsonValue(embedded);
   validateTemplateBundle(bundle);
   return bundle as unknown as LoadedTemplateBundle;
 }
@@ -69,8 +84,8 @@ function fail(message: string, output: string | undefined): void {
   process.exitCode = 2;
 }
 
-function embeddedBundleSelection(): TrustedBundleSelection {
-  const bundle = loadBootstrapTemplateBundle();
+async function embeddedBundleSelection(): Promise<TrustedBundleSelection> {
+  const bundle = await loadBootstrapTemplateBundle();
   const bundleManifestHash = sha256Utf8(`${canonicalizeJson(bundle.manifest)}\n`);
   return {
     bundle,
@@ -80,12 +95,18 @@ function embeddedBundleSelection(): TrustedBundleSelection {
   };
 }
 
-function publicCommandHandlers(): CliCommandHandlers {
-  return createLocalCommandHandlers({
+async function publicCommandHandlers(): Promise<CliCommandHandlers> {
+  const current = await embeddedBundleSelection();
+  const local = createLocalCommandHandlers({
     cliVersion,
-    current: embeddedBundleSelection(),
+    current,
     writeProjection: writeProjectTemplate,
   });
+  const production = createProductionCommandHandlers({
+    cliVersion,
+    ...createDefaultUpdaterCommandServices(),
+  });
+  return mergeCliCommandHandlers(local, production);
 }
 
 function requestsJsonOutput(arguments_: readonly string[]): boolean {
@@ -198,14 +219,14 @@ function runContractProbe(): void {
   });
 }
 
-function runRendererProbe(): void {
+async function runRendererProbe(): Promise<void> {
   let titleAccepted = false;
   let descriptionAccepted = false;
   let markerVerified = false;
   let projectTemplateAccepted = false;
   let tamperRejected = false;
   try {
-    const bundle = loadBootstrapTemplateBundle();
+    const bundle = await loadBootstrapTemplateBundle();
     const request = normalizeAndValidateRequest({
       schemaVersion: 1,
       contextId: "context:renderer-probe",
@@ -213,10 +234,21 @@ function runRendererProbe(): void {
       profileIds: ["general"],
       targetBranch: "develop",
       title: { type: "chore", module: "mrtool", titleSummary: "Probe deterministic renderer" },
-      changes: { summary: ["Probe the embedded deterministic renderer."] },
-      motivation: { background: ["The SEA must embed the complete renderer path."] },
+      changes: {
+        summary: ["Probe the embedded deterministic renderer."],
+        technicalChanges: ["Render a complete canonical general-profile request."],
+        outOfScope: ["No remote merge request state is changed by this probe."],
+      },
+      motivation: {
+        background: ["The SEA must embed the complete renderer path."],
+        whyNeeded: ["A packaged executable must prove the same renderer contract as source."],
+      },
       workItem: { relation: "none", noIssueReason: "This is an internal binary renderer probe." },
-      impact: { areaIds: ["devops"], nature: "non-functional" },
+      impact: {
+        areaIds: ["devops"],
+        nature: "non-functional",
+        details: ["Only the in-process self-test output is affected."],
+      },
       verification: {
         items: [{
           id: "unit-tests",
@@ -226,10 +258,23 @@ function runRendererProbe(): void {
           result: "Renderer probe completed",
           evidence: "Executed inside the packaged SEA artifact.",
         }],
+        acceptanceEvidence: ["The rendered body has exactly eight canonical sections."],
+        knownGaps: ["The probe does not contact GitLab or mutate a repository."],
       },
-      documentation: { itemIds: ["no-documentation-changes"] },
-      risk: { level: "low" },
-      review: {},
+      documentation: {
+        itemIds: ["no-documentation-changes"],
+        details: ["No documentation changes are required for an internal self-test."],
+      },
+      risk: {
+        level: "low",
+        items: ["The probe operates on embedded immutable fixtures only."],
+        compatibilityImpact: ["The probe does not alter the public request contract."],
+        rollbackPlan: ["Restore the previous packaged executable if the probe fails."],
+      },
+      review: {
+        reviewerFocus: ["Confirm the packaged renderer matches source behavior."],
+        additionalNotes: ["All probe inputs are deterministic and token-free."],
+      },
       mergeRequest: { removeSourceBranch: false, squash: false },
     });
     const title = renderTitle(request, bundle);
@@ -352,12 +397,59 @@ async function runBundleValidation(bundleDirectory: string): Promise<void> {
   }
 }
 
+async function runInternalApplyUpdate(): Promise<void> {
+  try {
+    const bytes = await consumeInvocationStdin((async function* (): AsyncIterable<Uint8Array> {
+      for await (const chunk of process.stdin) {
+        yield chunk instanceof Uint8Array ? Uint8Array.from(chunk) : new Uint8Array(chunk);
+      }
+    })());
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    const value = parseStrictJson(text);
+    if (
+      value === null || typeof value !== "object" || Array.isArray(value) ||
+      Object.keys(value).sort().join(",") !== "command,payload,schemaVersion" ||
+      value.schemaVersion !== 1 || value.command !== "apply-update" ||
+      value.payload === null || typeof value.payload !== "object" || Array.isArray(value.payload)
+    ) {
+      throw new ToolError("INPUT_ERROR", "Invalid internal update envelope", {
+        field: "stdin",
+        expected: "{schemaVersion:1,command:'apply-update',payload:object}",
+        actual: "invalid private envelope",
+        safeNextStep: "Invoke internal apply-update only through the verified updater handoff.",
+      });
+    }
+    // The private handoff is intentionally fail-closed until a verified
+    // platform updater is injected. It must never claim activation happened.
+    throw new ToolError("UPDATE_REQUIRED", "Verified update activation is not configured", {
+      field: "activation",
+      expected: "a trusted updater helper and release-set verifier",
+      actual: "activation service is unavailable",
+      safeNextStep: "Install a complete verified release and retry self-update.",
+    });
+  } catch (error) {
+    const failure = error instanceof ToolError
+      ? error
+      : new ToolError("INPUT_ERROR", "Invalid internal update envelope", {
+          field: "stdin",
+          expected: "one bounded canonical JSON envelope",
+          actual: "unreadable or malformed envelope",
+          safeNextStep: "Invoke internal apply-update through the verified updater handoff.",
+        });
+    writeFailure(failure);
+  }
+}
+
 async function main(arguments_: readonly string[]): Promise<void> {
   const outputIndex = arguments_.indexOf("--output");
   const output = outputIndex >= 0 ? arguments_[outputIndex + 1] : undefined;
-  const command = arguments_.find((argument) => !argument.startsWith("-"));
+  const command = arguments_[0];
 
   if (command === "internal") {
+    if (arguments_.length === 2 && arguments_[1] === "apply-update") {
+      await runInternalApplyUpdate();
+      return;
+    }
     if (
       arguments_.length === 3 &&
       arguments_[0] === "internal" &&
@@ -390,7 +482,7 @@ async function main(arguments_: readonly string[]): Promise<void> {
             return process.stdout.write(chunk, callback);
           },
         },
-        handlers: publicCommandHandlers(),
+        handlers: await publicCommandHandlers(),
       });
       process.exitCode = result.exitCode;
       return;
@@ -407,7 +499,7 @@ async function main(arguments_: readonly string[]): Promise<void> {
     return;
   }
   if (arguments_.includes("--renderer-probe")) {
-    runRendererProbe();
+    await runRendererProbe();
     return;
   }
 

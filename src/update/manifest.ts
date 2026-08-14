@@ -121,6 +121,14 @@ export interface VerifiedChannelManifest {
   readonly nextTrustState: UpdateTrustState;
 }
 
+// A frozen object with the same TypeScript shape is not evidence that the
+// channel signature and trust-state transition were actually verified.
+const verifiedManifestBrands = new WeakSet<object>();
+
+export function isVerifiedChannelManifest(value: unknown): value is VerifiedChannelManifest {
+  return typeof value === "object" && value !== null && verifiedManifestBrands.has(value);
+}
+
 function record(value: unknown, subject: string): JsonObject {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw updateSecurityError("envelope is invalid");
@@ -633,12 +641,14 @@ export function verifyChannelEnvelope(
         : acceptedEnvelope,
     );
   }
-  return Object.freeze({
+  const result = Object.freeze({
     manifest: deepFreeze(copyJsonValue(manifest) as unknown as ChannelManifest),
     payloadSha256: verified.payloadSha256,
     signingKeyIds: Object.freeze([...signingKeyIds].sort(ordinal)),
     nextTrustState,
   });
+  verifiedManifestBrands.add(result);
+  return result;
 }
 
 export function channelPayloadSha256(value: Uint8Array): string {

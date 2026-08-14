@@ -13,7 +13,7 @@ type ProjectTemplateProfile = "general" | "code" | "docs" | "ops";
 export type CliCommand =
   | { readonly kind: "doctor" }
   | { readonly kind: "context"; readonly mrIid: number | null; readonly migrateTemplate: boolean }
-  | { readonly kind: "create" }
+  | { readonly kind: "create"; readonly upsert: boolean }
   | {
       readonly kind: "update";
       readonly iid: number | null;
@@ -75,6 +75,7 @@ const LOCAL_COMMON_FLAGS = new Set([
 ]);
 
 const SPECIFIC_FLAGS: Readonly<Partial<Record<CommandKind, Readonly<Record<string, FlagArity>>>>> = {
+  create: { "--upsert": "boolean" },
   context: { "--mr": "value", "--migrate-template": "boolean" },
   update: {
     "--migrate-template": "boolean",
@@ -202,7 +203,12 @@ function commandFor(
 ): CliCommand {
   switch (kind) {
     case "doctor":
-    case "create":
+      requireNoPositionals(positionals);
+      return Object.freeze({ kind });
+    case "create": { // eslint-disable-line no-case-declarations
+      requireNoPositionals(positionals);
+      return Object.freeze({ kind, upsert: specific.has("--upsert") });
+    }
     case "preview":
     case "profiles.list":
     case "profiles.detect":

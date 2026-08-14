@@ -14,6 +14,25 @@ export interface UpdateLockOptions {
   readonly provider?: ProcessLockProvider;
 }
 
+// Cache mutations may be invoked by the activation transaction while its
+// outer lock is already held.  The binding is kept private to this module so
+// a structurally similar object cannot forge an in-lock capability.
+const activeLeaseRoots = new WeakMap<object, string>();
+
+export function assertUpdateLockLease(
+  lease: ProcessLockLease,
+  stateDirectory: string,
+): void {
+  if (lease === null || typeof lease !== "object") {
+    throw new ProcessLockError("unsafe");
+  }
+  const root = activeLeaseRoots.get(lease as object);
+  if (root === undefined || pathKey(root) !== pathKey(stateDirectory)) {
+    throw new ProcessLockError("unsafe");
+  }
+  lease.assertHeld();
+}
+
 function pathKey(path: string): string {
   const normalized = resolve(path);
   return process.platform === "win32" ? normalized.toLowerCase() : normalized;
@@ -79,6 +98,7 @@ export async function withUpdateLock<T>(
   }
   const rootIdentity = await assertPlainStateDirectory(root);
   const lease = await provider.acquire(resolve(root, ".update.lock"), timeoutMs);
+  activeLeaseRoots.set(lease as object, root);
   try {
     const currentRoot = await assertPlainStateDirectory(root);
     if (rootIdentity.dev !== currentRoot.dev || rootIdentity.ino !== currentRoot.ino) {
@@ -87,6 +107,7 @@ export async function withUpdateLock<T>(
     lease.assertHeld();
     return await callback(lease);
   } finally {
+    activeLeaseRoots.delete(lease as object);
     await lease.release();
   }
 }
