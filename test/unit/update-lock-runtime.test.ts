@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
+import { performance } from "node:perf_hooks";
 import test from "node:test";
 
 import { withUpdateLock } from "../../src/platform/lock.ts";
 import {
   ProcessLockError,
+  systemProcessLockProvider,
   type ProcessLockProvider,
 } from "../../src/platform/process-lock.ts";
 
@@ -66,4 +68,26 @@ test("the callback can assert that its update lease remains held", async (t) => 
   assert.equal(assertions, 3);
   assert.equal(releases, 1);
   assert.equal(held, false);
+});
+
+test("system lock contention never exceeds its declared timeout by a helper grace period", async (t) => {
+  if (process.platform !== "linux" && process.platform !== "win32") {
+    t.skip("system process lock provider is not available on this platform");
+    return;
+  }
+  const directory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-lock-timeout-"));
+  t.after(async () => rm(directory, { recursive: true, force: true }));
+  const path = resolve(directory, "update.lock");
+  const held = await systemProcessLockProvider.acquire(path, 2_000);
+  try {
+    const started = performance.now();
+    await assert.rejects(
+      systemProcessLockProvider.acquire(path, 50),
+      (error: unknown) => error instanceof ProcessLockError && error.reason === "timeout",
+    );
+    const elapsed = performance.now() - started;
+    assert.ok(elapsed < 1_500, `lock timeout exceeded declared budget: ${elapsed}ms`);
+  } finally {
+    await held.release();
+  }
 });
