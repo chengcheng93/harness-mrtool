@@ -102,7 +102,7 @@ test("self-update status requires a verifier for existing cache and reads verifi
     receiptBytes,
   };
   const verifier = { verify: async (_value: ReleaseSetSnapshot): Promise<void> => undefined };
-  await new UpdateCache({ stateDirectory: directory, verifySnapshot: verifier }).storeVerifiedReleaseSet(snapshot);
+  await new UpdateCache({ stateDirectory: directory, verifySnapshot: verifier, windowsAclVerifier: allowTestAcl }).storeVerifiedReleaseSet(snapshot);
 
   const unverifiedHandlers = createProductionCommandHandlers({
     cliVersion: "1.0.0",

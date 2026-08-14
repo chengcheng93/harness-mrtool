@@ -399,19 +399,26 @@ function Read-SkillManifest {
   $manifest = Read-JsonValue $text ([ref]$index)
   Read-JsonWhitespace $text ([ref]$index)
   if ($index -ne $text.Length -or $manifest -isnot [System.Collections.IDictionary]) { Fail-Security 'The Skill manifest is invalid.' }
-  $expectedKeys = @('activation', 'assetSha256', 'assetSize', 'cliVersionRange', 'files', 'manifestVersion', 'skillProtocol', 'tag', 'treeSha256', 'version')
+  $baseKeys = @('activation', 'cliVersionRange', 'files', 'manifestVersion', 'skillProtocol', 'tag', 'treeSha256', 'version')
+  $provenanceKeys = @('activation', 'assetSha256', 'assetSize', 'cliVersionRange', 'files', 'manifestVersion', 'skillProtocol', 'tag', 'treeSha256', 'version')
   $actualKeys = @($manifest.Keys | ForEach-Object { [string]$_ }); [Array]::Sort($actualKeys, [StringComparer]::Ordinal)
-  $sortedExpected = @($expectedKeys); [Array]::Sort($sortedExpected, [StringComparer]::Ordinal)
-  if (($actualKeys -join '|') -cne ($sortedExpected -join '|')) { Fail-Security 'The Skill manifest fields are invalid.' }
+  $sortedBase = @($baseKeys); [Array]::Sort($sortedBase, [StringComparer]::Ordinal)
+  $sortedProvenance = @($provenanceKeys); [Array]::Sort($sortedProvenance, [StringComparer]::Ordinal)
+  $hasProvenance = ($actualKeys -join '|') -ceq ($sortedProvenance -join '|')
+  if (-not $hasProvenance -and ($actualKeys -join '|') -cne ($sortedBase -join '|')) { Fail-Security 'The Skill manifest fields are invalid.' }
   $version = Get-JsonStringField $manifest 'version'
   if ($version -cne $ExpectedVersion -or $version -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$') { Fail-Security 'The Skill manifest fields are invalid.' }
   if ((Get-JsonStringField $manifest 'tag') -cne "skill-v$version" -or (Get-JsonStringField $manifest 'activation') -cne 'explicit-host-refresh') { Fail-Security 'The Skill manifest fields are invalid.' }
   if ((Get-JsonIntegerField $manifest 'manifestVersion' 1 1) -ne 1) { Fail-Security 'The Skill manifest fields are invalid.' }
   [void](Get-JsonIntegerField $manifest 'skillProtocol' 1 ([Int64]::MaxValue))
   [void](Get-JsonStringField $manifest 'cliVersionRange')
-  $assetHash = Get-JsonStringField $manifest 'assetSha256'
-  $assetSize = Get-JsonIntegerField $manifest 'assetSize' 1 $MaxArchiveBytes
-  if ($assetHash -cne $ExpectedAssetHash.ToLowerInvariant() -or $assetSize -ne $ExpectedAssetSize) { Fail-Security 'The Skill manifest asset does not match the downloaded release.' }
+  $assetHash = $null
+  $assetSize = $null
+  if ($hasProvenance) {
+    $assetHash = Get-JsonStringField $manifest 'assetSha256'
+    $assetSize = Get-JsonIntegerField $manifest 'assetSize' 1 $MaxArchiveBytes
+    if (-not [string]::IsNullOrEmpty($ExpectedAssetHash) -and ($assetHash -cne $ExpectedAssetHash.ToLowerInvariant() -or $assetSize -ne $ExpectedAssetSize)) { Fail-Security 'The Skill manifest asset does not match the downloaded release.' }
+  }
   $treeHash = Get-JsonStringField $manifest 'treeSha256'
   if ($treeHash -notmatch $Sha256Pattern) { Fail-Security 'The Skill manifest fields are invalid.' }
   $files = Get-JsonField $manifest 'files'
@@ -437,7 +444,24 @@ function Read-SkillManifest {
   if ($text -cne ($canonical + "`n")) { Fail-Security 'The Skill manifest is not canonical JSON.' }
   $treeCanonical = ConvertTo-CanonicalJsonValue $records
   if ((Get-Sha256Bytes ([Text.Encoding]::UTF8.GetBytes($treeCanonical + "`n"))) -cne $treeHash.ToLowerInvariant()) { Fail-Security 'The Skill manifest tree hash is invalid.' }
-  return [pscustomobject]@{ Version = $version; AssetSha256 = $assetHash; AssetSize = $assetSize; Files = $records; FileSet = $seen; ManifestPath = $path }
+  return [pscustomobject]@{ Version = $version; AssetSha256 = $assetHash; AssetSize = $assetSize; HasProvenance = $hasProvenance; Raw = $manifest; Files = $records; FileSet = $seen; ManifestPath = $path }
+}
+
+function Write-ManagerManifest {
+  param([object]$Manifest, [string]$AssetHash, [Int64]$AssetSize)
+  $value = [ordered]@{}
+  foreach ($key in $Manifest.Raw.Keys) { $value.Add([string]$key, $Manifest.Raw[$key]) }
+  if ($value.Contains('assetSha256')) { $value['assetSha256'] = $AssetHash.ToLowerInvariant() } else { $value.Add('assetSha256', $AssetHash.ToLowerInvariant()) }
+  if ($value.Contains('assetSize')) { $value['assetSize'] = $AssetSize } else { $value.Add('assetSize', $AssetSize) }
+  $text = (ConvertTo-CanonicalJsonValue $value) + "`n"
+  $stream = $null
+  try {
+    $stream = [IO.File]::Open($Manifest.ManifestPath, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    $bytes = [Text.Encoding]::UTF8.GetBytes($text)
+    $stream.Write($bytes, 0, $bytes.Length)
+    $stream.Flush($true)
+  } catch { Fail-Security 'The Skill manifest could not be published.' }
+  finally { if ($null -ne $stream) { $stream.Dispose() } }
 }
 
 function Copy-ZipEntry {
@@ -587,6 +611,8 @@ try {
   } finally {
     if ($null -ne $archive) { $archive.Dispose() }
   }
+  $manifest = Read-SkillManifest $stagingPath $Version
+  Write-ManagerManifest $manifest $shaExpected ([Int64]$archiveItem.Length)
   $manifest = Read-SkillManifest $stagingPath $Version $shaExpected ([Int64]$archiveItem.Length)
   Validate-SkillTree $stagingPath $manifest
   if (Test-Exists $destinationFull) {
