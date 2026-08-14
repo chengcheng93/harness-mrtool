@@ -1024,6 +1024,9 @@ export class SkillManager {
           // With no predecessor backup, the only safe old-moved outcome is a
           // fully verified new active tree (the rename may have completed just
           // before the journal advanced to published).
+          if (journal.previousVersion !== null) {
+            fail("UPDATE_SECURITY_ERROR", "Skill repair failed");
+          }
           const published = await this.readActive();
           if (published === null || published.manifest.version !== journal.version) {
             fail("UPDATE_SECURITY_ERROR", "Skill repair failed");
