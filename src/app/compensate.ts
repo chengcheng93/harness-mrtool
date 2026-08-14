@@ -19,6 +19,10 @@ import {
 } from "./remote-outcome.ts";
 import type { RemoteMutationReceipt, RemoteValueReceipt } from "./remote-receipt.ts";
 import {
+  stageVerificationReceipt,
+  type VerificationReceiptWriter,
+} from "./verify-mr.ts";
+import {
   remoteSnapshotDigest,
   type TransactionJournal,
   type TransactionPhase,
@@ -35,6 +39,8 @@ export interface ManagedTransactionContext {
   readonly remote: MergeRequestRemote;
   readonly writePlan: MergeRequestWritePlan;
   readonly journal: TransactionJournal;
+  readonly gitlabOrigin: string;
+  readonly verificationReceiptWriter: VerificationReceiptWriter;
 }
 
 export function transactionError(
@@ -375,6 +381,20 @@ export async function compensateReadyFailure(
     releaseTag: context.releaseTag,
     cliVersion: context.cliVersion,
     renderPhase: "final",
+  });
+  await stageVerificationReceipt(context.verificationReceiptWriter, {
+    gitlabOrigin: context.gitlabOrigin,
+    current,
+    expected: {
+      request: draftRequest,
+      snapshot: current.snapshot,
+      writePlan: plan.draft,
+      releaseTag: context.releaseTag,
+      cliVersion: context.cliVersion,
+      description: draftDescription,
+      sourceBranch: context.sourceBranch,
+    },
+    bundle: context.bundle,
   });
   current = await writeAndRead(
     context,

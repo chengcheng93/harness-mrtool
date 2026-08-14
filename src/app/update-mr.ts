@@ -1,6 +1,5 @@
 import type { LoadedTemplateBundle } from "../bundle/load.ts";
 import { isToolError, ToolError } from "../contracts/errors.ts";
-import { canonicalizeJson, copyJsonValue } from "../contracts/jcs.ts";
 import type { Request } from "../contracts/request.ts";
 import type { Candidate } from "../context/types.ts";
 import { renderDescription } from "../render/markdown.ts";
@@ -25,13 +24,18 @@ import { assertManagedDescription } from "./description-ownership.ts";
 import { isRemoteReadError, remoteFailureToolError } from "./remote-outcome.ts";
 import {
   attachTransactionAudit,
+  attachTransactionFailure,
   candidateSelectionDigest,
+  remoteSnapshotDigest,
   TransactionJournal,
   type TransactionAuditV1,
 } from "./transaction-journal.ts";
 import {
   assertReadyGate,
   assertTransactionStructure,
+  isVerificationReceiptStageError,
+  stageVerificationReceipt,
+  type VerificationReceiptWriter,
 } from "./verify-mr.ts";
 import { buildWritePlan, type MergeRequestWritePlan } from "./write-plan.ts";
 
@@ -53,6 +57,8 @@ export interface UpdateMergeRequestInputs {
   readonly cliVersion: string;
   readonly sourceBranch: string;
   readonly remote: MergeRequestRemote;
+  readonly gitlabOrigin: string;
+  readonly verificationReceiptWriter: VerificationReceiptWriter;
   readonly forceReplaceDescription?: boolean;
 }
 
@@ -131,6 +137,8 @@ export async function updateMergeRequest(
     remote: inputs.remote,
     writePlan: plan,
     journal,
+    gitlabOrigin: inputs.gitlabOrigin,
+    verificationReceiptWriter: inputs.verificationReceiptWriter,
   };
   assertRemoteIdentity(inputs.initial, context);
 
@@ -138,7 +146,7 @@ export async function updateMergeRequest(
   try {
     const liveReceipt = await inputs.remote.read(inputs.initial.iid);
     current = liveReceipt.value;
-    if (canonicalizeJson(copyJsonValue(current)) !== canonicalizeJson(copyJsonValue(inputs.initial))) {
+    if (remoteSnapshotDigest(current) !== remoteSnapshotDigest(inputs.initial)) {
       throw concurrentUpdateError();
     }
     assertRemoteIdentity(current, context);
@@ -215,6 +223,20 @@ export async function updateMergeRequest(
       cliVersion: inputs.cliVersion,
       renderPhase: "final",
       ...(plan.intent === "ready" ? { snapshotExpectation: "ready-transition-pending" as const } : {}),
+    });
+    await stageVerificationReceipt(inputs.verificationReceiptWriter, {
+      gitlabOrigin: inputs.gitlabOrigin,
+      current,
+      expected: {
+        request: inputs.request,
+        snapshot: renderSnapshot,
+        writePlan: plan.desired,
+        releaseTag: inputs.releaseTag,
+        cliVersion: inputs.cliVersion,
+        description: finalDescription,
+        sourceBranch: inputs.sourceBranch,
+      },
+      bundle: inputs.bundle,
     });
     current = await writeAndRead(
       context,
@@ -329,7 +351,26 @@ export async function updateMergeRequest(
     } else {
       journal.setFinalState("not-started");
     }
-    attachTransactionAudit(failure, journal.snapshot());
+    const audit = journal.snapshot();
+    attachTransactionAudit(failure, audit);
+    if (hasPossibleWrite(journal)) {
+      attachTransactionFailure(failure, {
+        audit,
+        iid: current.iid,
+        webUrl: current.webUrl,
+        completedSteps: completed,
+        retry: "update",
+        ...(isVerificationReceiptStageError(error)
+          ? {
+              failedOperation: "verification-receipt-stage" as const,
+              failedField: "verificationReceipt",
+            }
+          : readyTransitionStarted && audit.steps.every((step) =>
+              step.postcondition === "matched" || step.postcondition === "not-applicable")
+          ? { failedOperation: "ready-gate" as const }
+          : {}),
+      });
+    }
     throw failure;
   }
 }

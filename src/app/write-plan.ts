@@ -210,9 +210,11 @@ function validateSelections(
   if (new Set(reviewerIds).size !== reviewerIds.length || reviewerIds.includes(snapshot.mergeRequest.authorUserId)) {
     throw policyError("INPUT_ERROR", "reviewer selection contains duplicates or the MR author");
   }
-  const minimum = request.risk.level === "high"
-    ? Math.max(policy.readyMinimumReviewers, policy.highRiskMinimumReviewers)
-    : request.intent === "ready" ? policy.readyMinimumReviewers : policy.draftMinimumReviewers;
+  const minimum = request.intent === "draft"
+    ? policy.draftMinimumReviewers
+    : request.risk.level === "high"
+      ? Math.max(policy.readyMinimumReviewers, policy.highRiskMinimumReviewers)
+      : policy.readyMinimumReviewers;
   const qualified = snapshot.review.qualifiedReviewerUserIds;
   if (reviewerIds.length < minimum ||
       (minimum > 0 && (qualified === null || reviewerIds.filter((id) => qualified.includes(id)).length < minimum))) {

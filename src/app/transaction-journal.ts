@@ -85,6 +85,7 @@ interface MutableStep {
 }
 
 const audits = new WeakMap<object, TransactionAuditV1>();
+const failureReceipts = new WeakMap<object, TransactionFailureReceiptV1>();
 const SHA = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u;
 const SHA256 = /^[a-f0-9]{64}$/u;
 const OPERATIONS = new Set<TransactionOperation>(["create", "update"]);
@@ -160,6 +161,61 @@ const COMPENSATION_OPERATIONS = new Set<TransactionStepOperation>([
   ...COMPENSATION_ONLY,
 ]);
 
+export interface TransactionFailureReceiptV1 {
+  readonly receiptVersion: 1;
+  readonly iid: number | null;
+  readonly iidUnavailable: boolean;
+  readonly webUrl: string | null;
+  readonly webUrlUnavailable: boolean;
+  readonly completedSteps: readonly string[];
+  readonly failedOperation: TransactionFailureOperation;
+  readonly failedField: string;
+  readonly retryCommand: string;
+}
+
+export type TransactionFailureOperation =
+  | TransactionStepOperation
+  | "ready-gate"
+  | "verification-receipt-stage";
+
+const FAILURE_RECEIPT_FIELDS = new Set([
+  "receiptVersion",
+  "iid",
+  "iidUnavailable",
+  "webUrl",
+  "webUrlUnavailable",
+  "completedSteps",
+  "failedOperation",
+  "failedField",
+  "retryCommand",
+]);
+const SAFE_AUDIT_TEXT = /^[\x20-\x7E]{1,512}$/u;
+const SAFE_RETRY_COMMAND = /^harness-mrtool (?:update [1-9][0-9]* --input - --non-interactive --output json|verify [1-9][0-9]* --level structure --output json|context --output json)$/u;
+const SECRET_SHAPE = /(?:glpat-[A-Za-z0-9_-]+|github_pat_[A-Za-z0-9_]+|gh[pousr]_[A-Za-z0-9]+|hmr[ctx]1_[A-Za-z0-9_-]+)/iu;
+const FAILURE_OPERATIONS = new Set<TransactionFailureOperation>([
+  ...STEP_OPERATIONS,
+  "ready-gate",
+  "verification-receipt-stage",
+]);
+const NORMAL_OPERATION_ORDER = new Map<TransactionStepOperation, number>([
+  ["create-draft", 0],
+  ["mark-draft", 0],
+  ["labels-add", 1],
+  ["labels-remove", 2],
+  ["fields-write", 3],
+  ["description-write", 4],
+  ["lifecycle-status-ready-add", 5],
+  ["lifecycle-status-ready-remove", 6],
+  ["mark-ready", 7],
+]);
+const COMPENSATION_OPERATION_ORDER = new Map<TransactionStepOperation, number>([
+  ["mark-draft", 0],
+  ["compensation-labels-add", 1],
+  ["compensation-labels-remove", 2],
+  ["compensation-fields", 3],
+  ["compensation-description", 4],
+]);
+
 export interface TransactionReadAudit {
   readonly outcome: "not-attempted" | "not-applicable" | "succeeded" | "failed";
   readonly requestId: string | null;
@@ -172,6 +228,56 @@ function ordinal(left: string, right: string): number {
 
 function contractError(reason: string): TypeError {
   return new TypeError(`Transaction audit contract is invalid: ${reason}`);
+}
+
+export function validateTransactionFailureReceipt(value: unknown): TransactionFailureReceiptV1 {
+  let copied: unknown;
+  try {
+    copied = copyJsonValue(value);
+  } catch {
+    throw contractError("failure receipt must be strict JSON");
+  }
+  const input = record(copied, "failure receipt");
+  exactFields(input, FAILURE_RECEIPT_FIELDS, "failure receipt");
+  const expectedRetryCommands = input.iid === null
+    ? ["harness-mrtool context --output json"]
+    : [
+        `harness-mrtool update ${String(input.iid)} --input - --non-interactive --output json`,
+        `harness-mrtool verify ${String(input.iid)} --level structure --output json`,
+      ];
+  const auditText = [
+    ...(Array.isArray(input.completedSteps) ? input.completedSteps : []),
+    input.failedField,
+    input.retryCommand,
+    input.webUrl,
+  ].filter((entry): entry is string => typeof entry === "string");
+  if (input.receiptVersion !== 1 ||
+      (input.iid !== null && (!Number.isSafeInteger(input.iid) || (input.iid as number) < 1)) ||
+      typeof input.iidUnavailable !== "boolean" || input.iidUnavailable !== (input.iid === null) ||
+      typeof input.webUrlUnavailable !== "boolean" ||
+      (input.webUrl !== null && (typeof input.webUrl !== "string" ||
+        input.webUrl === "" || !/^https:\/\/[^\s]+$/u.test(input.webUrl))) ||
+      input.webUrlUnavailable !== (input.webUrl === null) || !Array.isArray(input.completedSteps) ||
+      input.completedSteps.some((step) => typeof step !== "string" || !SAFE_AUDIT_TEXT.test(step)) ||
+      new Set(input.completedSteps).size !== input.completedSteps.length ||
+      !FAILURE_OPERATIONS.has(input.failedOperation as TransactionFailureOperation) ||
+      typeof input.failedField !== "string" || !SAFE_AUDIT_TEXT.test(input.failedField) ||
+      typeof input.retryCommand !== "string" || !SAFE_RETRY_COMMAND.test(input.retryCommand) ||
+      !expectedRetryCommands.includes(input.retryCommand) ||
+      auditText.some((entry) => SECRET_SHAPE.test(entry))) {
+    throw contractError("failure receipt fields are invalid or unsafe");
+  }
+  return deepFreeze({
+    receiptVersion: 1,
+    iid: input.iid as number | null,
+    iidUnavailable: input.iidUnavailable,
+    webUrl: input.webUrl as string | null,
+    webUrlUnavailable: input.webUrlUnavailable,
+    completedSteps: input.completedSteps as string[],
+    failedOperation: input.failedOperation as TransactionFailureOperation,
+    failedField: input.failedField,
+    retryCommand: input.retryCommand,
+  });
 }
 
 function assertPhaseOperation(
@@ -266,18 +372,140 @@ function validateStep(value: unknown, sequence: number): TransactionStepAudit {
   }
   const postRead = validateRead(input.postRead, `step ${String(sequence)} post-read`);
   const postcondition = input.postcondition as TransactionStepAudit["postcondition"];
+  const preRead = validateRead(input.preRead, `step ${String(sequence)} pre-read`);
+  if (mutation !== null && operation !== "create-draft" && preRead.outcome !== "succeeded") {
+    throw contractError(`step ${String(sequence)} mutation requires a successful pre-read`);
+  }
   if (["matched", "mismatched"].includes(postcondition) && postRead.outcome !== "succeeded") {
     throw contractError(`step ${String(sequence)} postcondition requires a successful read`);
+  }
+  if (postcondition === "matched" && operation !== "create-outcome-query" &&
+      (mutation === null || !["confirmed", "unknown"].includes(mutation.outcome))) {
+    throw contractError(`step ${String(sequence)} matched without a possible remote write`);
   }
   return {
     sequence,
     phase,
     operation,
-    preRead: validateRead(input.preRead, `step ${String(sequence)} pre-read`),
+    preRead,
     mutation,
     postRead,
     postcondition,
   };
+}
+
+function isMatchedWrite(step: TransactionStepAudit): boolean {
+  return step.mutation !== null && ["confirmed", "unknown"].includes(step.mutation.outcome) &&
+    step.postRead.outcome === "succeeded" && step.postcondition === "matched";
+}
+
+function replayTransaction(
+  operation: TransactionOperation,
+  finalState: TransactionFinalState,
+  steps: readonly TransactionStepAudit[],
+): void {
+  let normalRank = -1;
+  let compensationRank = -1;
+  let compensationStarted = false;
+  let sawCreate = false;
+  let pendingUnknownCreate = false;
+  let sawRecoveryQuery = false;
+  const seenNormalOperations = new Set<TransactionStepOperation>();
+  const seenCompensationOperations = new Set<TransactionStepOperation>();
+
+  for (const step of steps) {
+    if (step.phase === "normal") {
+      if (compensationStarted) throw contractError("normal steps cannot follow compensation");
+      if (operation === "update" && step.operation === "create-draft") {
+        throw contractError("an update audit cannot create a Draft");
+      }
+      if (operation === "create" && !sawCreate && step.operation !== "create-draft") {
+        throw contractError("a create audit must begin with create-draft");
+      }
+      if (step.operation === "create-draft") {
+        if (operation !== "create" || sawCreate || step.sequence !== 1) {
+          throw contractError("create-draft must be the first and unique create step");
+        }
+        sawCreate = true;
+        pendingUnknownCreate = step.mutation?.outcome === "unknown" &&
+          !(step.postRead.outcome === "succeeded" && step.postcondition === "matched");
+      } else if (pendingUnknownCreate) {
+        throw contractError("unknown create must be recovered successfully before later normal steps");
+      }
+      const rank = NORMAL_OPERATION_ORDER.get(step.operation);
+      if (rank === undefined || rank < normalRank) {
+        throw contractError("normal operation order is invalid");
+      }
+      if (seenNormalOperations.has(step.operation)) {
+        throw contractError("normal transaction operations cannot repeat");
+      }
+      seenNormalOperations.add(step.operation);
+      normalRank = rank;
+    } else if (step.phase === "recovery") {
+      const previous = steps[step.sequence - 2];
+      if (operation !== "create" || !pendingUnknownCreate || sawRecoveryQuery ||
+          previous?.operation !== "create-draft" || previous.mutation?.outcome !== "unknown") {
+        throw contractError("create recovery must immediately follow an unknown create");
+      }
+      sawRecoveryQuery = true;
+      if (step.postRead.outcome === "succeeded" && step.postcondition === "matched") {
+        pendingUnknownCreate = false;
+      }
+    } else {
+      compensationStarted = true;
+      const rank = COMPENSATION_OPERATION_ORDER.get(step.operation);
+      if (rank === undefined || rank < compensationRank) {
+        throw contractError("compensation operation order is invalid");
+      }
+      if (seenCompensationOperations.has(step.operation)) {
+        throw contractError("compensation operations cannot repeat");
+      }
+      seenCompensationOperations.add(step.operation);
+      compensationRank = rank;
+    }
+  }
+
+  const matched = steps.filter(isMatchedWrite);
+  const last = steps.at(-1);
+  if (steps.some((step) => step.phase === "compensation") &&
+      !steps.some((step) => step.phase === "normal" && step.mutation !== null &&
+        ["confirmed", "unknown"].includes(step.mutation.outcome))) {
+    throw contractError("compensation requires a possible normal remote write");
+  }
+  if (finalState === "not-started" && steps.some((step) =>
+    step.mutation !== null && ["confirmed", "unknown"].includes(step.mutation.outcome))) {
+    throw contractError("not-started cannot contain a possible remote write");
+  }
+  if (finalState === "unknown" && !steps.some((step) =>
+    step.mutation !== null && ["confirmed", "unknown"].includes(step.mutation.outcome))) {
+    throw contractError("unknown final state requires a possible remote write");
+  }
+  if (finalState === "draft-proven" && !matched.some((step) =>
+    step.phase === "normal" && step.operation !== "mark-ready")) {
+    throw contractError("final state draft-proven lacks a matched Draft-preserving write");
+  }
+  if (finalState === "draft-proven" && matched.some((step) => step.operation === "mark-ready")) {
+    throw contractError("final state draft-proven cannot follow a matched Ready transition");
+  }
+  if (finalState === "ready-proven" &&
+      !(last?.phase === "normal" && last.operation === "mark-ready" && isMatchedWrite(last))) {
+    throw contractError("final state ready-proven requires mark-ready as the final matched step");
+  }
+  if (finalState === "compensated-draft") {
+    const fields = steps.find((step) => step.phase === "compensation" &&
+      step.operation === "compensation-fields" && isMatchedWrite(step));
+    if (fields === undefined || !(last?.phase === "compensation" &&
+        last.operation === "compensation-description" && isMatchedWrite(last))) {
+      throw contractError("final state compensated-draft requires complete fields and description proof");
+    }
+  }
+  const completeCompensation = steps.some((step) => step.phase === "compensation" &&
+    step.operation === "compensation-fields" && isMatchedWrite(step)) &&
+    last?.phase === "compensation" && last.operation === "compensation-description" &&
+    isMatchedWrite(last);
+  if (completeCompensation && finalState !== "compensated-draft") {
+    throw contractError("complete compensation proof requires compensated-draft final state");
+  }
 }
 
 export function validateTransactionAudit(value: unknown): TransactionAuditV1 {
@@ -300,6 +528,7 @@ export function validateTransactionAudit(value: unknown): TransactionAuditV1 {
   }
   const steps = input.steps.map((step, index) => validateStep(step, index + 1));
   const finalState = input.finalState as TransactionFinalState;
+  replayTransaction(input.operation as TransactionOperation, finalState, steps);
   const matchedMutation = (operation?: TransactionStepOperation) => steps.some((step) =>
     (operation === undefined || step.operation === operation) &&
     step.mutation !== null && ["confirmed", "unknown"].includes(step.mutation.outcome) &&
@@ -353,6 +582,7 @@ export function remoteWriteFromTransactionAudit(value: unknown): RemoteWrite {
 }
 
 export function remoteSnapshotDigest(value: RemoteTransactionSnapshot): string {
+  const external = value.snapshot as Partial<ExternalContextSnapshot>;
   return sha256CanonicalJson({
     iid: value.iid,
     webUrlDigest: sha256Utf8(value.webUrl),
@@ -370,7 +600,7 @@ export function remoteSnapshotDigest(value: RemoteTransactionSnapshot): string {
     reviewerUserIds: [...value.reviewerUserIds].sort(ordinal),
     squash: value.squash,
     removeSourceBranch: value.removeSourceBranch,
-    externalSnapshotDigest: sha256CanonicalJson(value.snapshot),
+    authorUserId: external.mergeRequest?.authorUserId ?? null,
   });
 }
 
@@ -436,7 +666,7 @@ export class TransactionJournal {
     phase: TransactionPhase,
     operation: TransactionStepOperation,
     preState: RemoteTransactionSnapshot | null,
-    preReadRequestId: unknown = null,
+    preReadRequestId: unknown = undefined,
   ): TransactionStepRecorder {
     assertPhaseOperation(phase, operation);
     if (phase !== "compensation" && this.normalWritesClosed && operation !== "create-outcome-query") {
@@ -451,6 +681,8 @@ export class TransactionJournal {
       operation,
       preRead: Object.freeze(preState === null
         ? { outcome: "not-applicable", requestId: null, snapshotDigest: null }
+        : preReadRequestId === undefined
+          ? { outcome: "not-attempted", requestId: null, snapshotDigest: null }
         : {
             outcome: "succeeded",
             requestId: safeRequestId(preReadRequestId),
@@ -476,6 +708,10 @@ export class TransactionJournal {
 
   markRecoveredUnknown(): void {
     this.recoveredUnknownOutcome = true;
+  }
+
+  markPossibleWrite(): void {
+    if (this.finalState === "not-started") this.finalState = "unknown";
   }
 
   setFinalState(value: TransactionFinalState): void {
@@ -508,7 +744,11 @@ export class TransactionStepRecorder {
     if (this.step.mutation !== null) {
       throw new TypeError("Transaction mutation receipt is already recorded");
     }
+    if (this.step.operation !== "create-draft" && this.step.preRead.outcome !== "succeeded") {
+      throw new TypeError("Transaction mutation requires a successful pre-read receipt");
+    }
     this.step.mutation = Object.freeze({ outcome, requestId: safeRequestId(requestId) });
+    if (outcome === "confirmed" || outcome === "unknown") this.journal.markPossibleWrite();
   }
 
   readSucceeded(requestId: unknown, value: RemoteTransactionSnapshot): void {
@@ -530,6 +770,7 @@ export class TransactionStepRecorder {
   }
 
   preReadSucceeded(requestId: unknown, value: RemoteTransactionSnapshot): void {
+    this.assertPreReadAvailable();
     this.step.preRead = Object.freeze({
       outcome: "succeeded",
       requestId: safeRequestId(requestId),
@@ -544,7 +785,14 @@ export class TransactionStepRecorder {
   }
 
   preReadFailed(requestId: unknown = null): void {
+    this.assertPreReadAvailable();
     this.step.preRead = Object.freeze({ outcome: "failed", requestId: safeRequestId(requestId), snapshotDigest: null });
+  }
+
+  private assertPreReadAvailable(): void {
+    if (this.step.preRead.outcome !== "not-attempted") {
+      throw new TypeError("Transaction pre-read receipt is already recorded");
+    }
   }
 
   private assertPostReadAvailable(): void {
@@ -575,4 +823,69 @@ export function attachTransactionAudit(error: unknown, audit: TransactionAuditV1
 export function getTransactionAudit(error: unknown): TransactionAuditV1 | null {
   if ((typeof error !== "object" && typeof error !== "function") || error === null) return null;
   return audits.get(error) ?? null;
+}
+
+export function attachTransactionFailureReceipt(
+  error: unknown,
+  receipt: TransactionFailureReceiptV1,
+): void {
+  if ((typeof error === "object" || typeof error === "function") && error !== null) {
+    failureReceipts.set(error, validateTransactionFailureReceipt(receipt));
+  }
+}
+
+function failedField(operation: TransactionFailureOperation): string {
+  if (["labels-add", "labels-remove", "lifecycle-status-ready-add", "lifecycle-status-ready-remove",
+    "compensation-labels-add", "compensation-labels-remove"].includes(operation)) {
+    return "mergeRequest.labels";
+  }
+  if (["fields-write", "compensation-fields"].includes(operation)) return "mergeRequest.fields";
+  if (["description-write", "compensation-description"].includes(operation)) {
+    return "mergeRequest.description";
+  }
+  if (["mark-ready", "mark-draft", "ready-gate"].includes(operation)) return "mergeRequest.lifecycle";
+  if (operation === "verification-receipt-stage") return "verificationReceipt";
+  if (operation === "create-outcome-query") return "mergeRequest.createOutcome";
+  return "mergeRequest";
+}
+
+export function attachTransactionFailure(
+  error: unknown,
+  input: {
+    readonly audit: TransactionAuditV1;
+    readonly iid: number | null;
+    readonly webUrl: string | null;
+    readonly completedSteps: readonly string[];
+    readonly retry: "update" | "verify";
+    readonly failedOperation?: TransactionFailureOperation;
+    readonly failedField?: string;
+  },
+): void {
+  const audit = validateTransactionAudit(input.audit);
+  const incomplete = [...audit.steps].reverse().find((step) =>
+    step.mutation?.outcome === "rejected" || step.postRead.outcome === "failed" ||
+    step.postcondition === "mismatched" ||
+    (step.mutation?.outcome === "unknown" && step.postcondition !== "matched"));
+  const operation = input.failedOperation ?? incomplete?.operation ?? audit.steps.at(-1)?.operation;
+  if (operation === undefined) return;
+  attachTransactionFailureReceipt(error, {
+    receiptVersion: 1,
+    iid: input.iid,
+    iidUnavailable: input.iid === null,
+    webUrl: input.webUrl,
+    webUrlUnavailable: input.webUrl === null,
+    completedSteps: input.completedSteps,
+    failedOperation: operation,
+    failedField: input.failedField ?? failedField(operation),
+    retryCommand: input.iid === null
+      ? "harness-mrtool context --output json"
+      : input.retry === "update"
+        ? `harness-mrtool update ${String(input.iid)} --input - --non-interactive --output json`
+        : `harness-mrtool verify ${String(input.iid)} --level structure --output json`,
+  });
+}
+
+export function getTransactionFailureReceipt(error: unknown): TransactionFailureReceiptV1 | null {
+  if ((typeof error !== "object" && typeof error !== "function") || error === null) return null;
+  return failureReceipts.get(error) ?? null;
 }

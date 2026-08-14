@@ -1,5 +1,5 @@
 import type { LoadedTemplateBundle } from "../bundle/load.ts";
-import { isToolError } from "../contracts/errors.ts";
+import { isToolError, ToolError } from "../contracts/errors.ts";
 import type { Request } from "../contracts/request.ts";
 import type { Candidate } from "../context/types.ts";
 import { renderDescription } from "../render/markdown.ts";
@@ -20,10 +20,14 @@ import {
   type ManagedTransactionContext,
 } from "./compensate.ts";
 import { buildWritePlan, type MergeRequestWritePlan } from "./write-plan.ts";
+import { updateMergeRequest } from "./update-mr.ts";
 import {
   assertReadyGate,
   assertTransactionStructure,
+  isVerificationReceiptStageError,
+  stageVerificationReceipt,
   type MergeRequestVerificationExpectation,
+  type VerificationReceiptWriter,
 } from "./verify-mr.ts";
 import { UnknownRemoteOutcomeError } from "./remote-outcome.ts";
 import {
@@ -34,6 +38,7 @@ import {
 import type { RemoteMutationReceipt, RemoteValueReceipt } from "./remote-receipt.ts";
 import {
   attachTransactionAudit,
+  attachTransactionFailure,
   candidateSelectionDigest,
   getTransactionAudit,
   TransactionJournal,
@@ -103,6 +108,9 @@ export interface CreateMergeRequestInputs {
   readonly cliVersion: string;
   readonly sourceBranch: string;
   readonly remote: MergeRequestRemote;
+  readonly gitlabOrigin: string;
+  readonly verificationReceiptWriter: VerificationReceiptWriter;
+  readonly upsert?: boolean;
 }
 
 export interface CreateMergeRequestResult {
@@ -136,7 +144,13 @@ export async function createMergeRequest(
     initialSnapshot.sourceHeadSha,
     candidateSelectionDigest(inputs.request, inputs.resolvedCandidates, inputs.initialSnapshot),
   );
-  const context: ManagedTransactionContext = { ...inputs, writePlan: plan, journal };
+  const context: ManagedTransactionContext = {
+    ...inputs,
+    writePlan: plan,
+    journal,
+    gitlabOrigin: inputs.gitlabOrigin,
+    verificationReceiptWriter: inputs.verificationReceiptWriter,
+  };
   const completed: string[] = [];
   const provisionalDescription = renderDescription({
     request: inputs.request,
@@ -158,6 +172,38 @@ export async function createMergeRequest(
     squash: plan.desired.squash,
     removeSourceBranch: plan.desired.removeSourceBranch,
   };
+  try {
+    const existing = await inputs.remote.findOpen(createInput);
+    if (existing.value.length === 1 && inputs.upsert === true) {
+      return updateMergeRequest({
+        request: inputs.request,
+        initial: existing.value[0]!,
+        resolvedCandidates: inputs.resolvedCandidates,
+        bundle: inputs.bundle,
+        releaseTag: inputs.releaseTag,
+        cliVersion: inputs.cliVersion,
+        sourceBranch: inputs.sourceBranch,
+        remote: inputs.remote,
+        gitlabOrigin: inputs.gitlabOrigin,
+        verificationReceiptWriter: inputs.verificationReceiptWriter,
+      });
+    }
+    if (existing.value.length > 0) {
+      throw new ToolError("INPUT_ERROR", "An open merge request already exists for this source and target", {
+        field: "mergeRequest.iid",
+        expected: "no open merge request, or one explicitly selected for update",
+        actual: existing.value.length,
+        safeNextStep: existing.value.length === 1
+          ? "Confirm updating the existing merge request and retry with --upsert."
+          : "Specify the intended merge request IID and run update explicitly.",
+      });
+    }
+  } catch (error) {
+    const failure = isRemoteReadError(error) ? remoteFailureToolError(error) : error;
+    journal.setFinalState("not-started");
+    attachTransactionAudit(failure, journal.snapshot());
+    throw failure;
+  }
   let current: RemoteMergeRequest | null = null;
   let recoveredUnknownOutcome = false;
   const createStep = journal.start("normal", "create-draft", null);
@@ -179,19 +225,44 @@ export async function createMergeRequest(
         error,
       );
       journal.setFinalState("unknown");
-      attachTransactionAudit(failure, journal.snapshot());
+      const audit = journal.snapshot();
+      attachTransactionAudit(failure, audit);
+      attachTransactionFailure(failure, {
+        audit,
+        iid: created.value.iid,
+        webUrl: null,
+        completedSteps: completed,
+        retry: "verify",
+        failedOperation: "create-draft",
+        failedField: "mergeRequest.readback",
+      });
       throw failure;
     }
     current = readback.value;
-    assertExactProvisionalDraft(current, createInput);
-    createStep.postcondition("matched");
+    try {
+      assertExactProvisionalDraft(current, createInput);
+      createStep.postcondition("matched");
+    } catch (error) {
+      createStep.postcondition("mismatched");
+      throw error;
+    }
     completed.push("create-draft");
   } catch (error) {
     if (createMutationRecorded) {
       const failure = error;
       if (getTransactionAudit(failure) === null) {
         journal.setFinalState("unknown");
-        attachTransactionAudit(failure, journal.snapshot());
+        const audit = journal.snapshot();
+        attachTransactionAudit(failure, audit);
+        if (current !== null) {
+          attachTransactionFailure(failure, {
+            audit,
+            iid: current.iid,
+            webUrl: current.webUrl,
+            completedSteps: completed,
+            retry: "verify",
+          });
+        }
       }
       throw failure;
     }
@@ -220,7 +291,16 @@ export async function createMergeRequest(
         readError,
       );
       journal.setFinalState("unknown");
-      attachTransactionAudit(failure, journal.snapshot());
+      const audit = journal.snapshot();
+      attachTransactionAudit(failure, audit);
+      attachTransactionFailure(failure, {
+        audit,
+        iid: null,
+        webUrl: null,
+        completedSteps: completed,
+        retry: "verify",
+        failedOperation: "create-outcome-query",
+      });
       throw failure;
     }
     const match = matches[0];
@@ -240,7 +320,17 @@ export async function createMergeRequest(
         recoveryError,
       );
       journal.setFinalState("unknown");
-      attachTransactionAudit(failure, journal.snapshot());
+      const audit = journal.snapshot();
+      attachTransactionAudit(failure, audit);
+      const singleCandidate = matches.length === 1 ? matches[0] : undefined;
+      attachTransactionFailure(failure, {
+        audit,
+        iid: singleCandidate?.iid ?? null,
+        webUrl: singleCandidate?.webUrl ?? null,
+        completedSteps: completed,
+        retry: "verify",
+        failedOperation: "create-outcome-query",
+      });
       throw failure;
     }
     current = match;
@@ -256,7 +346,16 @@ export async function createMergeRequest(
       "create-draft produced no readable MR",
     );
     journal.setFinalState("unknown");
-    attachTransactionAudit(failure, journal.snapshot());
+    const audit = journal.snapshot();
+    attachTransactionAudit(failure, audit);
+    attachTransactionFailure(failure, {
+      audit,
+      iid: null,
+      webUrl: null,
+      completedSteps: completed,
+      retry: "verify",
+      failedOperation: "create-draft",
+    });
     throw failure;
   }
 
@@ -295,6 +394,20 @@ export async function createMergeRequest(
       cliVersion: inputs.cliVersion,
       renderPhase: "final",
       ...(plan.intent === "ready" ? { snapshotExpectation: "ready-transition-pending" as const } : {}),
+    });
+    await stageVerificationReceipt(inputs.verificationReceiptWriter, {
+      gitlabOrigin: inputs.gitlabOrigin,
+      current,
+      expected: {
+        request: inputs.request,
+        snapshot: finalRenderSnapshot,
+        writePlan: plan.desired,
+        releaseTag: inputs.releaseTag,
+        cliVersion: inputs.cliVersion,
+        description: finalDescription,
+        sourceBranch: inputs.sourceBranch,
+      },
+      bundle: inputs.bundle,
     });
     current = await writeAndRead(
       context,
@@ -405,7 +518,24 @@ export async function createMergeRequest(
     } else {
       journal.setFinalState("unknown");
     }
-    attachTransactionAudit(failure, journal.snapshot());
+    const audit = journal.snapshot();
+    attachTransactionAudit(failure, audit);
+    attachTransactionFailure(failure, {
+      audit,
+      iid: current.iid,
+      webUrl: current.webUrl,
+      completedSteps: completed,
+      retry: "update",
+      ...(isVerificationReceiptStageError(error)
+        ? {
+            failedOperation: "verification-receipt-stage" as const,
+            failedField: "verificationReceipt",
+          }
+        : readyTransitionStarted && audit.steps.every((step) =>
+            step.postcondition === "matched" || step.postcondition === "not-applicable")
+        ? { failedOperation: "ready-gate" as const }
+        : {}),
+    });
     throw failure;
   }
 }

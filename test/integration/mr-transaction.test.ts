@@ -11,10 +11,19 @@ import {
   type MergeRequestRemote,
   type RemoteMergeRequest,
 } from "../../src/app/create-mr.ts";
-import { verifyMergeRequest } from "../../src/app/verify-mr.ts";
+import {
+  buildVerificationReceipt,
+  validateVerificationReceipt,
+  verifyMergeRequest,
+  verifyStoredMergeRequest,
+  type VerificationReceiptV1,
+} from "../../src/app/verify-mr.ts";
 import { updateMergeRequest } from "../../src/app/update-mr.ts";
 import { buildWritePlan } from "../../src/app/write-plan.ts";
-import { getTransactionAudit } from "../../src/app/transaction-journal.ts";
+import {
+  getTransactionAudit,
+  getTransactionFailureReceipt,
+} from "../../src/app/transaction-journal.ts";
 import { mutationReceipt, valueReceipt } from "../../src/app/remote-receipt.ts";
 import { RemoteMutationError } from "../../src/app/remote-outcome.ts";
 import { RemoteReadError } from "../../src/app/remote-outcome.ts";
@@ -128,6 +137,27 @@ test("WritePlan resolves opaque selections, derives lifecycle labels, and preser
   assert.deepEqual(plan.desired.reviewerUserIds, ["user:20"]);
 });
 
+test("a high-risk Draft uses the Draft reviewer minimum", async () => {
+  const fixture = await transactionFixture();
+  const request = normalizeAndValidateRequest({
+    ...structuredClone(fixture.request),
+    intent: "draft",
+    risk: { ...fixture.request.risk, level: "high" },
+    review: { ...fixture.request.review, reviewerCandidateTokens: [] },
+  });
+  const candidates = fixture.candidates.filter((candidate) => candidate.kind !== "reviewer");
+
+  const plan = buildWritePlan({
+    request,
+    snapshot: fixture.snapshot,
+    resolvedCandidates: candidates,
+    bundle: fixture.bundle,
+  });
+
+  assert.equal(plan.intent, "draft");
+  assert.deepEqual(plan.desired.reviewerUserIds, []);
+});
+
 type WriteKind =
   | "create-draft"
   | "add-labels"
@@ -139,16 +169,20 @@ type WriteKind =
 
 class FakeMergeRequestRemote implements MergeRequestRemote {
   readonly writes: WriteKind[] = [];
+  readonly stagedVerificationReceipts: VerificationReceiptV1[] = [];
   readonly baseSnapshot: ExternalContextSnapshot;
+  findOpenCalls = 0;
   current: RemoteMergeRequest | null = null;
   failWrite: WriteKind | null = null;
   unknownReady: "none" | "applied" | "applied-with-mismatch" = "none";
   unknownCreate: "none" | "applied" = "none";
   createRecovery: "exact" | "none" | "mismatch" | "multiple" = "exact";
+  mismatchConfirmedCreateReadback = false;
   unknownAfterWrite: WriteKind | null = null;
   unclassifiedAfterWrite: WriteKind | null = null;
   driftDescriptionBeforeRead: string | null = null;
   driftDescriptionOnReadNumber: { readonly number: number; readonly description: string } | null = null;
+  naturalContextDriftOnReadNumber: number | null = null;
   dropReviewerQualificationAfterWrite: WriteKind | null = null;
   renameLabelAfterWrite: { readonly kind: WriteKind; readonly id: string; readonly name: string } | null = null;
   private failReadAfterWriteKind: WriteKind | null = null;
@@ -276,10 +310,14 @@ class FakeMergeRequestRemote implements MergeRequestRemote {
     if (this.unknownCreate === "applied") {
       throw new UnknownRemoteOutcomeError("create outcome is unknown");
     }
+    if (this.mismatchConfirmedCreateReadback) {
+      this.replace({ title: "Concurrent provisional title" });
+    }
     return valueReceipt({ iid: this.current.iid }, "req-create");
   }
 
   async findOpen(input: CreateDraftInput) {
+    this.findOpenCalls += 1;
     const current = this.current;
     if (current === null || current.state !== "opened" ||
         current.sourceProjectId !== input.sourceProjectId ||
@@ -387,9 +425,122 @@ class FakeMergeRequestRemote implements MergeRequestRemote {
       this.replace({ description });
       return valueReceipt(this.requireCurrent(), "req-read");
     }
+    if (this.naturalContextDriftOnReadNumber === this.readCount) {
+      this.naturalContextDriftOnReadNumber = null;
+      const snapshot = structuredClone(current.snapshot);
+      const changedSnapshot = validateExternalContextSnapshot({
+        ...snapshot,
+        issue: snapshot.issue.kind === "linked" && snapshot.issue.readStatus === "available"
+          ? { ...snapshot.issue, milestone: "Later milestone", dueDate: "2026-09-01" }
+          : snapshot.issue,
+        ci: { status: "running" },
+        review: {
+          ...snapshot.review,
+          approvedByUserIds: [],
+          unresolvedDiscussions: 3,
+        },
+      });
+      this.current = Object.freeze({ ...current, snapshot: changedSnapshot });
+      return valueReceipt(this.current, "req-read");
+    }
     return valueReceipt(current, "req-read");
   }
 }
+
+function transactionRuntime(remote: FakeMergeRequestRemote) {
+  return {
+    remote,
+    gitlabOrigin: "https://gitlab.example.test",
+    verificationReceiptWriter: {
+      stageAuthenticated: async (receipt: VerificationReceiptV1) => {
+        remote.stagedVerificationReceipts.push(structuredClone(receipt));
+      },
+    },
+  };
+}
+
+test("create queries open merge requests before its first remote write", async () => {
+  const fixture = await transactionFixture();
+
+  await createMergeRequest({
+    request: fixture.request,
+    initialSnapshot: fixture.snapshot,
+    resolvedCandidates: fixture.candidates,
+    bundle: fixture.bundle,
+    releaseTag: "templates-v1.0.0",
+    cliVersion: "0.1.0-dev",
+    sourceBranch: "fix/webengine-css",
+    ...transactionRuntime(fixture.remote),
+  });
+
+  assert.equal(fixture.remote.findOpenCalls, 1);
+  assert.equal(fixture.remote.writes[0], "create-draft");
+});
+
+test("create refuses one or multiple existing open merge requests before writing", async () => {
+  for (const count of [1, 2]) {
+    const fixture = await transactionFixture();
+    await createMergeRequest({
+      request: fixture.request,
+      initialSnapshot: fixture.snapshot,
+      resolvedCandidates: fixture.candidates,
+      bundle: fixture.bundle,
+      releaseTag: "templates-v1.0.0",
+      cliVersion: "0.1.0-dev",
+      sourceBranch: "fix/webengine-css",
+      ...transactionRuntime(fixture.remote),
+    });
+    fixture.remote.writes.length = 0;
+    fixture.remote.createRecovery = count === 1 ? "exact" : "multiple";
+
+    await assert.rejects(
+      createMergeRequest({
+        request: fixture.request,
+        initialSnapshot: fixture.snapshot,
+        resolvedCandidates: fixture.candidates,
+        bundle: fixture.bundle,
+        releaseTag: "templates-v1.0.0",
+        cliVersion: "0.1.0-dev",
+        sourceBranch: "fix/webengine-css",
+        ...transactionRuntime(fixture.remote),
+      }),
+      (error: unknown) => typeof error === "object" && error !== null && "code" in error &&
+        error.code === "INPUT_ERROR",
+    );
+    assert.deepEqual(fixture.remote.writes, []);
+  }
+});
+
+test("create upserts the one existing open managed merge request only when explicitly requested", async () => {
+  const fixture = await transactionFixture();
+  const created = await createMergeRequest({
+    request: fixture.request,
+    initialSnapshot: fixture.snapshot,
+    resolvedCandidates: fixture.candidates,
+    bundle: fixture.bundle,
+    releaseTag: "templates-v1.0.0",
+    cliVersion: "0.1.0-dev",
+    sourceBranch: "fix/webengine-css",
+    ...transactionRuntime(fixture.remote),
+  });
+  fixture.remote.writes.length = 0;
+
+  const upserted = await createMergeRequest({
+    request: fixture.request,
+    initialSnapshot: fixture.snapshot,
+    resolvedCandidates: fixture.candidates,
+    bundle: fixture.bundle,
+    releaseTag: "templates-v1.0.0",
+    cliVersion: "0.1.0-dev",
+    sourceBranch: "fix/webengine-css",
+    ...transactionRuntime(fixture.remote),
+    upsert: true,
+  });
+
+  assert.equal(upserted.iid, created.iid);
+  assert.equal(upserted.transaction.operation, "update");
+  assert.equal(fixture.remote.writes.includes("create-draft"), false);
+});
 
 async function transactionFixture(): Promise<{
   readonly request: ReturnType<typeof normalizeAndValidateRequest>;
@@ -456,7 +607,7 @@ test("Ready is the final normal write and the final marker is read back", async 
     releaseTag: "templates-v1.0.0",
     cliVersion: "0.1.0-dev",
     sourceBranch: "fix/webengine-css",
-    remote: fixture.remote,
+    ...transactionRuntime(fixture.remote),
   });
 
   assert.equal(fixture.remote.writes.at(-1), "mark-ready");
@@ -478,7 +629,7 @@ test("an unknown Ready outcome is accepted only after exact readback", async () 
     releaseTag: "templates-v1.0.0",
     cliVersion: "0.1.0-dev",
     sourceBranch: "fix/webengine-css",
-    remote: fixture.remote,
+    ...transactionRuntime(fixture.remote),
   });
 
   assert.equal(result.recoveredUnknownOutcome, true);
@@ -498,7 +649,7 @@ test("unknown label, field, and description writes continue only after exact rea
       releaseTag: "templates-v1.0.0",
       cliVersion: "0.1.0-dev",
       sourceBranch: "fix/webengine-css",
-      remote: fixture.remote,
+      ...transactionRuntime(fixture.remote),
     });
     assert.equal(result.recoveredUnknownOutcome, true, kind);
     assert.equal(result.final.draft, false, kind);
@@ -517,7 +668,7 @@ test("an unclassified adapter failure is treated as unknown until exact readback
     releaseTag: "templates-v1.0.0",
     cliVersion: "0.1.0-dev",
     sourceBranch: "fix/webengine-css",
-    remote: fixture.remote,
+    ...transactionRuntime(fixture.remote),
   });
 
   assert.equal(result.recoveredUnknownOutcome, true);
@@ -539,7 +690,7 @@ test("an unknown create outcome is recovered by exact source and target identity
     releaseTag: "templates-v1.0.0",
     cliVersion: "0.1.0-dev",
     sourceBranch: "fix/webengine-css",
-    remote: fixture.remote,
+    ...transactionRuntime(fixture.remote),
   });
 
   assert.equal(result.recoveredUnknownOutcome, true);
@@ -552,8 +703,9 @@ test("unknown create recovery refuses zero, multiple, or non-identical Draft can
     const fixture = await transactionFixture();
     fixture.remote.unknownCreate = "applied";
     fixture.remote.createRecovery = recovery;
-    await assert.rejects(
-      createMergeRequest({
+    let caught: unknown;
+    try {
+      await createMergeRequest({
         request: fixture.request,
         initialSnapshot: fixture.snapshot,
         resolvedCandidates: fixture.candidates,
@@ -561,11 +713,31 @@ test("unknown create recovery refuses zero, multiple, or non-identical Draft can
         releaseTag: "templates-v1.0.0",
         cliVersion: "0.1.0-dev",
         sourceBranch: "fix/webengine-css",
-        remote: fixture.remote,
-      }),
-      (error: unknown) => typeof error === "object" && error !== null && "code" in error &&
-        error.code === "PARTIAL_REMOTE_STATE",
+        ...transactionRuntime(fixture.remote),
+      });
+    } catch (error) {
+      caught = error;
+    }
+    assert.equal(
+      typeof caught === "object" && caught !== null && "code" in caught ? caught.code : null,
+      "PARTIAL_REMOTE_STATE",
     );
+    const receipt = getTransactionFailureReceipt(caught);
+    if (recovery === "mismatch") {
+      assert.equal(receipt?.iid, 88);
+      assert.equal(receipt?.iidUnavailable, false);
+      assert.equal(receipt?.webUrlUnavailable, false);
+      assert.equal(receipt?.retryCommand, "harness-mrtool verify 88 --level structure --output json");
+    } else {
+      assert.equal(receipt?.iid, null);
+      assert.equal(receipt?.iidUnavailable, true);
+      assert.equal(receipt?.webUrl, null);
+      assert.equal(receipt?.webUrlUnavailable, true);
+      assert.equal(receipt?.retryCommand, "harness-mrtool context --output json");
+    }
+    assert.equal(receipt?.failedOperation, "create-outcome-query");
+    assert.equal(receipt?.failedField, "mergeRequest.createOutcome");
+    assert.deepEqual(receipt?.completedSteps, []);
     assert.deepEqual(fixture.remote.writes, ["create-draft"]);
   }
 });
@@ -587,7 +759,7 @@ test("a Ready request whose provisional Draft title exceeds GitLab's limit write
       releaseTag: "templates-v1.0.0",
       cliVersion: "0.1.0-dev",
       sourceBranch: "fix/webengine-css",
-      remote: fixture.remote,
+      ...transactionRuntime(fixture.remote),
     }),
     (error: unknown) => typeof error === "object" && error !== null && "code" in error &&
       error.code === "RENDER_ERROR",
@@ -608,7 +780,7 @@ test("a rejected Draft create maps to a stable zero-write error with an audit re
       releaseTag: "templates-v1.0.0",
       cliVersion: "0.1.0-dev",
       sourceBranch: "fix/webengine-css",
-      remote: fixture.remote,
+      ...transactionRuntime(fixture.remote),
     });
   } catch (error) {
     caught = error;
@@ -635,7 +807,7 @@ test("an inconsistent unknown Ready outcome is compensated to Draft and reported
       releaseTag: "templates-v1.0.0",
       cliVersion: "0.1.0-dev",
       sourceBranch: "fix/webengine-css",
-      remote: fixture.remote,
+      ...transactionRuntime(fixture.remote),
     }),
     (error: unknown) => typeof error === "object" && error !== null && "code" in error &&
       error.code === "PARTIAL_REMOTE_STATE",
@@ -652,9 +824,9 @@ test("an inconsistent unknown Ready outcome is compensated to Draft and reported
 test("a deterministic post-create write failure reports a provable partial Draft", async () => {
   const fixture = await transactionFixture();
   fixture.remote.failWrite = "add-labels";
-
-  await assert.rejects(
-    createMergeRequest({
+  let caught: unknown;
+  try {
+    await createMergeRequest({
       request: fixture.request,
       initialSnapshot: fixture.snapshot,
       resolvedCandidates: fixture.candidates,
@@ -662,13 +834,87 @@ test("a deterministic post-create write failure reports a provable partial Draft
       releaseTag: "templates-v1.0.0",
       cliVersion: "0.1.0-dev",
       sourceBranch: "fix/webengine-css",
-      remote: fixture.remote,
-    }),
-    (error: unknown) => typeof error === "object" && error !== null && "code" in error &&
-      error.code === "PARTIAL_DRAFT",
+      ...transactionRuntime(fixture.remote),
+    });
+  } catch (error) {
+    caught = error;
+  }
+  assert.equal(
+    typeof caught === "object" && caught !== null && "code" in caught ? caught.code : null,
+    "PARTIAL_DRAFT",
   );
   assert.equal(fixture.remote.current?.draft, true);
   assert.equal(fixture.remote.current?.state, "opened");
+  assert.deepEqual(getTransactionFailureReceipt(caught), {
+    receiptVersion: 1,
+    iid: 88,
+    iidUnavailable: false,
+    webUrl: "https://gitlab.example.test/luban/luban-studio/-/merge_requests/88",
+    webUrlUnavailable: false,
+    completedSteps: ["create-draft"],
+    failedOperation: "labels-add",
+    failedField: "mergeRequest.labels",
+    retryCommand: "harness-mrtool update 88 --input - --non-interactive --output json",
+  });
+  assert.equal(JSON.stringify(getTransactionFailureReceipt(caught)).includes("week-token"), false);
+});
+
+test("create readback failure preserves the known IID and explicitly marks its URL unavailable", async () => {
+  const fixture = await transactionFixture();
+  fixture.remote.failReads = 1;
+  let caught: unknown;
+
+  try {
+    await createMergeRequest({
+      request: fixture.request,
+      initialSnapshot: fixture.snapshot,
+      resolvedCandidates: fixture.candidates,
+      bundle: fixture.bundle,
+      releaseTag: "templates-v1.0.0",
+      cliVersion: "0.1.0-dev",
+      sourceBranch: "fix/webengine-css",
+      ...transactionRuntime(fixture.remote),
+    });
+  } catch (error) {
+    caught = error;
+  }
+
+  assert.deepEqual(getTransactionFailureReceipt(caught), {
+    receiptVersion: 1,
+    iid: 88,
+    iidUnavailable: false,
+    webUrl: null,
+    webUrlUnavailable: true,
+    completedSteps: [],
+    failedOperation: "create-draft",
+    failedField: "mergeRequest.readback",
+    retryCommand: "harness-mrtool verify 88 --level structure --output json",
+  });
+});
+
+test("a confirmed create readback mismatch is recorded as a mismatched postcondition", async () => {
+  const fixture = await transactionFixture();
+  fixture.remote.mismatchConfirmedCreateReadback = true;
+  let caught: unknown;
+
+  try {
+    await createMergeRequest({
+      request: fixture.request,
+      initialSnapshot: fixture.snapshot,
+      resolvedCandidates: fixture.candidates,
+      bundle: fixture.bundle,
+      releaseTag: "templates-v1.0.0",
+      cliVersion: "0.1.0-dev",
+      sourceBranch: "fix/webengine-css",
+      ...transactionRuntime(fixture.remote),
+    });
+  } catch (error) {
+    caught = error;
+  }
+
+  const createStep = getTransactionAudit(caught)?.steps.find((step) => step.operation === "create-draft");
+  assert.equal(createStep?.postRead.outcome, "succeeded");
+  assert.equal(createStep?.postcondition, "mismatched");
 });
 
 test("structure and ready verification allow pending live gates while merge verification does not", async () => {
@@ -681,7 +927,7 @@ test("structure and ready verification allow pending live gates while merge veri
     releaseTag: "templates-v1.0.0",
     cliVersion: "0.1.0-dev",
     sourceBranch: "fix/webengine-css",
-    remote: fixture.remote,
+    ...transactionRuntime(fixture.remote),
   });
 
   assert.equal(verifyMergeRequest({
@@ -708,6 +954,211 @@ test("structure and ready verification allow pending live gates while merge veri
   );
 });
 
+test("the durable verification receipt is staged before the final description write", async () => {
+  const fixture = await transactionFixture();
+  const staged: VerificationReceiptV1[] = [];
+
+  const created = await createMergeRequest({
+    request: fixture.request,
+    initialSnapshot: fixture.snapshot,
+    resolvedCandidates: fixture.candidates,
+    bundle: fixture.bundle,
+    releaseTag: "templates-v1.0.0",
+    cliVersion: "0.1.0-dev",
+    sourceBranch: "fix/webengine-css",
+    ...transactionRuntime(fixture.remote),
+    gitlabOrigin: "https://gitlab.example.test",
+    verificationReceiptWriter: {
+      stageAuthenticated: async (receipt: VerificationReceiptV1) => {
+        assert.equal(fixture.remote.writes.includes("write-description"), false);
+        staged.push(structuredClone(receipt));
+      },
+    },
+  });
+
+  assert.equal(staged.length, 1);
+  assert.equal(staged[0]?.expected.description, created.final.description);
+  assert.equal(staged[0]?.lifecycle, "ready");
+});
+
+test("a durable receipt staging failure prevents the final description write", async () => {
+  const fixture = await transactionFixture();
+  let caught: unknown;
+  try {
+    await createMergeRequest({
+      request: fixture.request,
+      initialSnapshot: fixture.snapshot,
+      resolvedCandidates: fixture.candidates,
+      bundle: fixture.bundle,
+      releaseTag: "templates-v1.0.0",
+      cliVersion: "0.1.0-dev",
+      sourceBranch: "fix/webengine-css",
+      ...transactionRuntime(fixture.remote),
+      gitlabOrigin: "https://gitlab.example.test",
+      verificationReceiptWriter: {
+        stageAuthenticated: async () => {
+          throw new Error("Injected authenticated receipt persistence failure");
+        },
+      },
+    });
+  } catch (error) {
+    caught = error;
+  }
+  assert.equal(
+    typeof caught === "object" && caught !== null && "code" in caught ? caught.code : null,
+    "PARTIAL_DRAFT",
+  );
+  assert.equal(getTransactionFailureReceipt(caught)?.failedOperation, "verification-receipt-stage");
+  assert.equal(getTransactionFailureReceipt(caught)?.failedField, "verificationReceipt");
+  assert.equal(fixture.remote.writes.includes("write-description"), false);
+  assert.equal(fixture.remote.writes.includes("mark-ready"), false);
+});
+
+test("standalone verification reloads a trusted durable receipt and exact historical Bundle", async () => {
+  const fixture = await transactionFixture();
+  const created = await createMergeRequest({
+    request: fixture.request,
+    initialSnapshot: fixture.snapshot,
+    resolvedCandidates: fixture.candidates,
+    bundle: fixture.bundle,
+    releaseTag: "templates-v1.0.0",
+    cliVersion: "0.1.0-dev",
+    sourceBranch: "fix/webengine-css",
+    ...transactionRuntime(fixture.remote),
+  });
+  const receipt = buildVerificationReceipt({
+    gitlabOrigin: "https://gitlab.example.test",
+    current: created.final,
+    expected: created.verification,
+    bundle: fixture.bundle,
+  });
+  assert.equal(JSON.stringify(receipt).includes(fixture.request.contextId), false);
+  assert.equal(JSON.stringify(receipt).includes("week-token"), false);
+  let loadedBundleRef: unknown;
+
+  const verified = await verifyStoredMergeRequest({
+    level: "structure",
+    current: structuredClone(created.final),
+    gitlabOrigin: "https://gitlab.example.test",
+    receiptLoader: {
+      loadVerified: async () => ({ trusted: true as const, receipt: structuredClone(receipt) }),
+    },
+    bundleLoader: {
+      loadVerifiedExact: async (reference) => {
+        loadedBundleRef = reference;
+        return { trusted: true as const, bundle: fixture.bundle };
+      },
+    },
+  });
+
+  assert.equal(verified.valid, true);
+  assert.deepEqual(loadedBundleRef, receipt.bundle);
+});
+
+test("standalone verification fails closed for a missing or untrusted durable receipt", async () => {
+  const fixture = await transactionFixture();
+  const created = await createMergeRequest({
+    request: fixture.request,
+    initialSnapshot: fixture.snapshot,
+    resolvedCandidates: fixture.candidates,
+    bundle: fixture.bundle,
+    releaseTag: "templates-v1.0.0",
+    cliVersion: "0.1.0-dev",
+    sourceBranch: "fix/webengine-css",
+    ...transactionRuntime(fixture.remote),
+  });
+
+  for (const loadVerified of [
+    async () => null,
+    async () => ({ trusted: false as const, receipt: null }),
+  ]) {
+    await assert.rejects(
+      verifyStoredMergeRequest({
+        level: "structure",
+        current: created.final,
+        gitlabOrigin: "https://gitlab.example.test",
+        receiptLoader: { loadVerified },
+        bundleLoader: {
+          loadVerifiedExact: async () => {
+            throw new Error("Bundle loading must not precede receipt trust");
+          },
+        },
+      }),
+      (error: unknown) => typeof error === "object" && error !== null && "code" in error &&
+        error.code === "POSTCONDITION_ERROR",
+    );
+  }
+});
+
+test("a durable receipt must bind every managed user identity", async () => {
+  const fixture = await transactionFixture();
+  const created = await createMergeRequest({
+    request: fixture.request,
+    initialSnapshot: fixture.snapshot,
+    resolvedCandidates: fixture.candidates,
+    bundle: fixture.bundle,
+    releaseTag: "templates-v1.0.0",
+    cliVersion: "0.1.0-dev",
+    sourceBranch: "fix/webengine-css",
+    ...transactionRuntime(fixture.remote),
+  });
+  const receipt = buildVerificationReceipt({
+    gitlabOrigin: "https://gitlab.example.test",
+    current: created.final,
+    expected: created.verification,
+    bundle: fixture.bundle,
+  });
+  const missingAuthorBinding = {
+    ...structuredClone(receipt),
+    userBindings: receipt.userBindings.filter(({ id }) => id !== receipt.authorUserId),
+  };
+
+  await assert.rejects(
+    verifyStoredMergeRequest({
+      level: "structure",
+      current: created.final,
+      gitlabOrigin: "https://gitlab.example.test",
+      receiptLoader: {
+        loadVerified: async () => ({ trusted: true as const, receipt: missingAuthorBinding }),
+      },
+      bundleLoader: {
+        loadVerifiedExact: async () => ({ trusted: true as const, bundle: fixture.bundle }),
+      },
+    }),
+    (error: unknown) => typeof error === "object" && error !== null && "code" in error &&
+      error.code === "POSTCONDITION_ERROR",
+  );
+});
+
+test("verification receipt validation rejects bearer-shaped persisted content", async () => {
+  const fixture = await transactionFixture();
+  const created = await createMergeRequest({
+    request: fixture.request,
+    initialSnapshot: fixture.snapshot,
+    resolvedCandidates: fixture.candidates,
+    bundle: fixture.bundle,
+    releaseTag: "templates-v1.0.0",
+    cliVersion: "0.1.0-dev",
+    sourceBranch: "fix/webengine-css",
+    ...transactionRuntime(fixture.remote),
+  });
+  const receipt = buildVerificationReceipt({
+    gitlabOrigin: "https://gitlab.example.test",
+    current: created.final,
+    expected: created.verification,
+    bundle: fixture.bundle,
+  });
+
+  assert.throws(
+    () => validateVerificationReceipt({
+      ...structuredClone(receipt),
+      expected: { ...structuredClone(receipt.expected), title: "glpat-secretBearerValue" },
+    }),
+    (error: unknown) => typeof error === "object" && error !== null && "code" in error &&
+      error.code === "POSTCONDITION_ERROR",
+  );
+});
+
 test("merge verification never counts the MR author's approval", async () => {
   const fixture = await transactionFixture();
   const created = await createMergeRequest({
@@ -718,7 +1169,7 @@ test("merge verification never counts the MR author's approval", async () => {
     releaseTag: "templates-v1.0.0",
     cliVersion: "0.1.0-dev",
     sourceBranch: "fix/webengine-css",
-    remote: fixture.remote,
+    ...transactionRuntime(fixture.remote),
   });
   const raw = structuredClone(created.final.snapshot);
   const mutableCi = raw.ci as { status: ExternalContextSnapshot["ci"]["status"] };
@@ -758,7 +1209,7 @@ test("merge verification requires the Policy merge lifecycle label", async () =>
     releaseTag: "templates-v1.0.0",
     cliVersion: "0.1.0-dev",
     sourceBranch: "fix/webengine-css",
-    remote: fixture.remote,
+    ...transactionRuntime(fixture.remote),
   });
   const raw = structuredClone(created.final.snapshot);
   const mutableCi = raw.ci as { status: ExternalContextSnapshot["ci"]["status"] };
@@ -807,7 +1258,7 @@ test("a readback failure after a write reports unknown remote state", async () =
       releaseTag: "templates-v1.0.0",
       cliVersion: "0.1.0-dev",
       sourceBranch: "fix/webengine-css",
-      remote: fixture.remote,
+      ...transactionRuntime(fixture.remote),
     }),
     (error: unknown) => typeof error === "object" && error !== null && "code" in error &&
       error.code === "PARTIAL_REMOTE_STATE",
@@ -827,7 +1278,7 @@ test("persistent readback failure after Draft creation reports unknown remote st
       releaseTag: "templates-v1.0.0",
       cliVersion: "0.1.0-dev",
       sourceBranch: "fix/webengine-css",
-      remote: fixture.remote,
+      ...transactionRuntime(fixture.remote),
     }),
     (error: unknown) => typeof error === "object" && error !== null && "code" in error &&
       error.code === "PARTIAL_REMOTE_STATE",
@@ -844,7 +1295,7 @@ test("structure verification detects body drift without writing the MR", async (
     releaseTag: "templates-v1.0.0",
     cliVersion: "0.1.0-dev",
     sourceBranch: "fix/webengine-css",
-    remote: fixture.remote,
+    ...transactionRuntime(fixture.remote),
   });
   const writeCount = fixture.remote.writes.length;
   const current = fixture.remote.current as RemoteMergeRequest;
@@ -871,7 +1322,7 @@ test("verification classifies unmanaged and manually edited descriptions without
     releaseTag: "templates-v1.0.0",
     cliVersion: "0.1.0-dev",
     sourceBranch: "fix/webengine-css",
-    remote: fixture.remote,
+    ...transactionRuntime(fixture.remote),
   });
   const writeCount = fixture.remote.writes.length;
   for (const [description, code] of [
@@ -903,7 +1354,7 @@ test("update refuses an unmanaged or manually edited description without remote 
     releaseTag: "templates-v1.0.0",
     cliVersion: "0.1.0-dev",
     sourceBranch: "fix/webengine-css",
-    remote: fixture.remote,
+    ...transactionRuntime(fixture.remote),
   });
   const managed = fixture.remote.current as RemoteMergeRequest;
 
@@ -922,7 +1373,7 @@ test("update refuses an unmanaged or manually edited description without remote 
         releaseTag: "templates-v1.0.0",
         cliVersion: "0.1.0-dev",
         sourceBranch: "fix/webengine-css",
-        remote: fixture.remote,
+        ...transactionRuntime(fixture.remote),
       }),
       (error: unknown) => typeof error === "object" && error !== null && "code" in error && error.code === code,
     );
@@ -941,7 +1392,7 @@ test("update maps its initial read failure without claiming a remote write", asy
     releaseTag: "templates-v1.0.0",
     cliVersion: "0.1.0-dev",
     sourceBranch: "fix/webengine-css",
-    remote: fixture.remote,
+    ...transactionRuntime(fixture.remote),
   });
   fixture.remote.writes.length = 0;
   fixture.remote.nextReadError = new RemoteReadError("auth", "read-auth-request");
@@ -955,7 +1406,7 @@ test("update maps its initial read failure without claiming a remote write", asy
       releaseTag: "templates-v1.0.0",
       cliVersion: "0.1.0-dev",
       sourceBranch: "fix/webengine-css",
-      remote: fixture.remote,
+      ...transactionRuntime(fixture.remote),
     });
   } catch (error) {
     caught = error;
@@ -978,7 +1429,7 @@ test("force replacement is limited to a managed MR with a manually edited body",
     releaseTag: "templates-v1.0.0",
     cliVersion: "0.1.0-dev",
     sourceBranch: "fix/webengine-css",
-    remote: fixture.remote,
+    ...transactionRuntime(fixture.remote),
   });
   const managed = fixture.remote.current as RemoteMergeRequest;
   fixture.remote.current = Object.freeze({
@@ -995,7 +1446,7 @@ test("force replacement is limited to a managed MR with a manually edited body",
     releaseTag: "templates-v1.0.0",
     cliVersion: "0.1.0-dev",
     sourceBranch: "fix/webengine-css",
-    remote: fixture.remote,
+    ...transactionRuntime(fixture.remote),
     forceReplaceDescription: true,
   });
 
@@ -1013,7 +1464,7 @@ test("a managed Ready MR update returns to Draft and makes Ready the final write
     releaseTag: "templates-v1.0.0",
     cliVersion: "0.1.0-dev",
     sourceBranch: "fix/webengine-css",
-    remote: fixture.remote,
+    ...transactionRuntime(fixture.remote),
   });
   const initial = fixture.remote.current as RemoteMergeRequest;
   fixture.remote.writes.length = 0;
@@ -1026,7 +1477,7 @@ test("a managed Ready MR update returns to Draft and makes Ready the final write
     releaseTag: "templates-v1.0.0",
     cliVersion: "0.1.0-dev",
     sourceBranch: "fix/webengine-css",
-    remote: fixture.remote,
+    ...transactionRuntime(fixture.remote),
   });
 
   assert.equal(fixture.remote.writes[0], "mark-draft");
@@ -1044,7 +1495,7 @@ test("update re-reads ownership and rejects description drift before its first w
     releaseTag: "templates-v1.0.0",
     cliVersion: "0.1.0-dev",
     sourceBranch: "fix/webengine-css",
-    remote: fixture.remote,
+    ...transactionRuntime(fixture.remote),
   });
   const initial = fixture.remote.current as RemoteMergeRequest;
   fixture.remote.writes.length = 0;
@@ -1059,7 +1510,7 @@ test("update re-reads ownership and rejects description drift before its first w
       releaseTag: "templates-v1.0.0",
       cliVersion: "0.1.0-dev",
       sourceBranch: "fix/webengine-css",
-      remote: fixture.remote,
+      ...transactionRuntime(fixture.remote),
     }),
     (error: unknown) => typeof error === "object" && error !== null && "code" in error &&
       error.code === "CONCURRENT_UPDATE",
@@ -1078,7 +1529,7 @@ test("update reports concurrent drift found by its first mutation pre-read with 
     releaseTag: "templates-v1.0.0",
     cliVersion: "0.1.0-dev",
     sourceBranch: "fix/webengine-css",
-    remote: fixture.remote,
+    ...transactionRuntime(fixture.remote),
   });
   fixture.remote.writes.length = 0;
   fixture.remote.driftDescriptionOnReadNumber = {
@@ -1096,7 +1547,7 @@ test("update reports concurrent drift found by its first mutation pre-read with 
       releaseTag: "templates-v1.0.0",
       cliVersion: "0.1.0-dev",
       sourceBranch: "fix/webengine-css",
-      remote: fixture.remote,
+      ...transactionRuntime(fixture.remote),
     });
   } catch (error) {
     caught = error;
@@ -1107,6 +1558,38 @@ test("update reports concurrent drift found by its first mutation pre-read with 
   );
   assert.deepEqual(fixture.remote.writes, []);
   assert.equal(getTransactionAudit(caught)?.finalState, "not-started");
+});
+
+test("update ignores naturally changing Issue, CI, and review context for concurrency", async () => {
+  const fixture = await transactionFixture();
+  const draftRequest = normalizeAndValidateRequest({ ...structuredClone(fixture.request), intent: "draft" });
+  const created = await createMergeRequest({
+    request: draftRequest,
+    initialSnapshot: fixture.snapshot,
+    resolvedCandidates: fixture.candidates,
+    bundle: fixture.bundle,
+    releaseTag: "templates-v1.0.0",
+    cliVersion: "0.1.0-dev",
+    sourceBranch: "fix/webengine-css",
+    ...transactionRuntime(fixture.remote),
+  });
+  fixture.remote.writes.length = 0;
+  fixture.remote.naturalContextDriftOnReadNumber = fixture.remote.currentReadCount + 1;
+
+  const updated = await updateMergeRequest({
+    request: draftRequest,
+    initial: created.final,
+    resolvedCandidates: fixture.candidates,
+    bundle: fixture.bundle,
+    releaseTag: "templates-v1.0.0",
+    cliVersion: "0.1.0-dev",
+    sourceBranch: "fix/webengine-css",
+    ...transactionRuntime(fixture.remote),
+  });
+
+  assert.equal(updated.final.draft, true);
+  assert.equal(updated.transaction.finalState, "draft-proven");
+  assert.equal(fixture.remote.writes.length > 0, true);
 });
 
 test("Ready transition stops when the selected reviewer loses qualification", async () => {
@@ -1122,7 +1605,7 @@ test("Ready transition stops when the selected reviewer loses qualification", as
       releaseTag: "templates-v1.0.0",
       cliVersion: "0.1.0-dev",
       sourceBranch: "fix/webengine-css",
-      remote: fixture.remote,
+      ...transactionRuntime(fixture.remote),
     }),
     (error: unknown) => typeof error === "object" && error !== null && "code" in error &&
       (error.code === "PARTIAL_DRAFT" || error.code === "PARTIAL_REMOTE_STATE"),
@@ -1144,7 +1627,7 @@ test("Ready gate is repeated after lifecycle status readback", async () => {
       releaseTag: "templates-v1.0.0",
       cliVersion: "0.1.0-dev",
       sourceBranch: "fix/webengine-css",
-      remote: fixture.remote,
+      ...transactionRuntime(fixture.remote),
     }),
     (error: unknown) => typeof error === "object" && error !== null && "code" in error &&
       (error.code === "PARTIAL_DRAFT" || error.code === "PARTIAL_REMOTE_STATE"),
@@ -1172,7 +1655,7 @@ test("a selected label renamed under the same stable ID stops the transaction", 
       releaseTag: "templates-v1.0.0",
       cliVersion: "0.1.0-dev",
       sourceBranch: "fix/webengine-css",
-      remote: fixture.remote,
+      ...transactionRuntime(fixture.remote),
     }),
     (error: unknown) => typeof error === "object" && error !== null && "code" in error &&
       (error.code === "PARTIAL_DRAFT" || error.code === "PARTIAL_REMOTE_STATE"),
@@ -1192,7 +1675,7 @@ test("update treats a successful write followed by failed readback as unknown re
     releaseTag: "templates-v1.0.0",
     cliVersion: "0.1.0-dev",
     sourceBranch: "fix/webengine-css",
-    remote: fixture.remote,
+    ...transactionRuntime(fixture.remote),
   });
   fixture.remote.writes.length = 0;
   fixture.remote.failReadAfterWrite = "write-fields";
@@ -1206,7 +1689,7 @@ test("update treats a successful write followed by failed readback as unknown re
       releaseTag: "templates-v1.0.0",
       cliVersion: "0.1.0-dev",
       sourceBranch: "fix/webengine-css",
-      remote: fixture.remote,
+      ...transactionRuntime(fixture.remote),
     }),
     (error: unknown) => typeof error === "object" && error !== null && "code" in error &&
       error.code === "PARTIAL_REMOTE_STATE",
@@ -1224,7 +1707,7 @@ test("successful transactions expose a stable per-write audit journal", async ()
     releaseTag: "templates-v1.0.0",
     cliVersion: "0.1.0-dev",
     sourceBranch: "fix/webengine-css",
-    remote: fixture.remote,
+    ...transactionRuntime(fixture.remote),
   });
 
   assert.equal(result.transaction.journalVersion, 1);
@@ -1261,7 +1744,7 @@ test("failed transactions retain safe audit evidence outside enumerable ToolErro
       releaseTag: "templates-v1.0.0",
       cliVersion: "0.1.0-dev",
       sourceBranch: "fix/webengine-css",
-      remote: fixture.remote,
+      ...transactionRuntime(fixture.remote),
     });
   } catch (error) {
     caught = error;
@@ -1302,7 +1785,7 @@ test("every confirmed normal write preserves a failed readback in the audit", as
         releaseTag: "templates-v1.0.0",
         cliVersion: "0.1.0-dev",
         sourceBranch: "fix/webengine-css",
-        remote: fixture.remote,
+        ...transactionRuntime(fixture.remote),
       });
     } catch (error) {
       caught = error;
@@ -1346,7 +1829,7 @@ test("every confirmed compensation write preserves a failed readback in the audi
         releaseTag: "templates-v1.0.0",
         cliVersion: "0.1.0-dev",
         sourceBranch: "fix/webengine-css",
-        remote: fixture.remote,
+        ...transactionRuntime(fixture.remote),
       });
     } catch (error) {
       caught = error;
