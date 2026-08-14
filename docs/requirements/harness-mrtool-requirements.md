@@ -365,6 +365,8 @@ Manifest 必须使用 CLI 内置公钥可验证的签名。客户端持久化已
 
 `templateHistory` 是 signed channel 内的追加式历史 Bundle 索引。每项固定 immutable template Release tag、Bundle manifest SHA-256、`bundle-receipt` payload SHA-256、签名 sequence 与 key ID。客户端接受一项后必须把它并入本地 trust state；后续更高 sequence 只能保留或追加，不能删除或改写既有 tag。首次从远端加载历史 Bundle 时，收据必须精确命中该索引并验证签名、manifest 和全部实际文件字节；仅由收据自报旧 sequence 不能绕过 key 撤销后回填伪造历史。
 
+Skill ZIP 内的归档 manifest 不把整个 ZIP 的 hash 自引用写入自身。bootstrap 先用 signed channel 提供的外部 asset `sha256`/`size` 验证下载字节和归档树，再在尚未发布的 staging manifest 中原子补写 `assetSha256`/`assetSize`，供重启后的 Skill manager 和 verifier 使用。
+
 ### 7.5 每次调用前检查
 
 除内部更新子进程外，每次 CLI 调用都执行 preflight：

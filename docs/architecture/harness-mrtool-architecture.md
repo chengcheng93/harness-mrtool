@@ -186,6 +186,8 @@ MR marker 可被 MR 作者修改，因此不是信任根。每个 `templates-v*`
 
 稳定 channel payload 同时携带追加式 `templateHistory`。每个已发布 tag 对应一条不可改写的 `{releaseTag,bundleManifestHash,receiptPayloadSha256,signingSequence,signingKeyId}` 锚点；客户端把已接受锚点持久化进 trust state，后续 signed sequence 只能保留或追加。这样，旧 Bundle 可以在新机器上验证，同时撤销 key 的持有者不能事后签一份新收据并把 sequence 回填到撤销前。只有“索引锚点 + 收据签名 + manifest + 全部实际文件字节”一次性通过后，loader 才能产出可缓存的 verified Bundle snapshot。
 
+Skill bootstrap 的 ZIP manifest 采用两阶段格式：归档内先验证不含自引用 ZIP digest 的文件树；下载 hash/size 经 channel 验证后，bootstrap 在未发布 staging 中补写 `assetSha256`/`assetSize`，再按 manager 的完整 manifest 合同校验并发布。这样重启时可验证来源，又不会要求发布流程求解 manifest 对自身 ZIP 字节的循环 hash。
+
 ### 7.3 Release-set 激活
 
 CLI 与 Template/Policy 通过一个 `active-release-set.json` commit pointer 原子选择，不分别提交 current 指针。激活事务包含：
