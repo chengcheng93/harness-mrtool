@@ -387,7 +387,7 @@ function Get-JsonIntegerField {
 }
 
 function Read-SkillManifest {
-  param([string]$Root, [string]$ExpectedVersion)
+  param([string]$Root, [string]$ExpectedVersion, [string]$ExpectedAssetHash, [Int64]$ExpectedAssetSize)
   $path = Join-Path $Root '.harness-skill-manifest.json'
   $item = Get-ItemSafe $path
   Assert-NotReparse $item
@@ -399,7 +399,7 @@ function Read-SkillManifest {
   $manifest = Read-JsonValue $text ([ref]$index)
   Read-JsonWhitespace $text ([ref]$index)
   if ($index -ne $text.Length -or $manifest -isnot [System.Collections.IDictionary]) { Fail-Security 'The Skill manifest is invalid.' }
-  $expectedKeys = @('activation', 'cliVersionRange', 'files', 'manifestVersion', 'skillProtocol', 'tag', 'treeSha256', 'version')
+  $expectedKeys = @('activation', 'assetSha256', 'assetSize', 'cliVersionRange', 'files', 'manifestVersion', 'skillProtocol', 'tag', 'treeSha256', 'version')
   $actualKeys = @($manifest.Keys | ForEach-Object { [string]$_ }); [Array]::Sort($actualKeys, [StringComparer]::Ordinal)
   $sortedExpected = @($expectedKeys); [Array]::Sort($sortedExpected, [StringComparer]::Ordinal)
   if (($actualKeys -join '|') -cne ($sortedExpected -join '|')) { Fail-Security 'The Skill manifest fields are invalid.' }
@@ -409,6 +409,9 @@ function Read-SkillManifest {
   if ((Get-JsonIntegerField $manifest 'manifestVersion' 1 1) -ne 1) { Fail-Security 'The Skill manifest fields are invalid.' }
   [void](Get-JsonIntegerField $manifest 'skillProtocol' 1 ([Int64]::MaxValue))
   [void](Get-JsonStringField $manifest 'cliVersionRange')
+  $assetHash = Get-JsonStringField $manifest 'assetSha256'
+  $assetSize = Get-JsonIntegerField $manifest 'assetSize' 1 $MaxArchiveBytes
+  if ($assetHash -cne $ExpectedAssetHash.ToLowerInvariant() -or $assetSize -ne $ExpectedAssetSize) { Fail-Security 'The Skill manifest asset does not match the downloaded release.' }
   $treeHash = Get-JsonStringField $manifest 'treeSha256'
   if ($treeHash -notmatch $Sha256Pattern) { Fail-Security 'The Skill manifest fields are invalid.' }
   $files = Get-JsonField $manifest 'files'
@@ -434,7 +437,7 @@ function Read-SkillManifest {
   if ($text -cne ($canonical + "`n")) { Fail-Security 'The Skill manifest is not canonical JSON.' }
   $treeCanonical = ConvertTo-CanonicalJsonValue $records
   if ((Get-Sha256Bytes ([Text.Encoding]::UTF8.GetBytes($treeCanonical + "`n"))) -cne $treeHash.ToLowerInvariant()) { Fail-Security 'The Skill manifest tree hash is invalid.' }
-  return [pscustomobject]@{ Version = $version; Files = $records; FileSet = $seen; ManifestPath = $path }
+  return [pscustomobject]@{ Version = $version; AssetSha256 = $assetHash; AssetSize = $assetSize; Files = $records; FileSet = $seen; ManifestPath = $path }
 }
 
 function Copy-ZipEntry {
@@ -584,7 +587,7 @@ try {
   } finally {
     if ($null -ne $archive) { $archive.Dispose() }
   }
-  $manifest = Read-SkillManifest $stagingPath $Version
+  $manifest = Read-SkillManifest $stagingPath $Version $shaExpected ([Int64]$archiveItem.Length)
   Validate-SkillTree $stagingPath $manifest
   if (Test-Exists $destinationFull) {
     [IO.Directory]::Move($destinationFull, $backupPath)
