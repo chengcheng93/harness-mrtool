@@ -7,8 +7,10 @@ import {
   type CliOptions,
 } from "./options.ts";
 
+
 type VerificationLevel = "structure" | "ready" | "merge";
 type ProjectTemplateProfile = "general" | "code" | "docs" | "ops";
+
 
 export type CliCommand =
   | { readonly kind: "doctor" }
@@ -39,13 +41,16 @@ export type CliCommand =
   | { readonly kind: "skill.status" }
   | { readonly kind: "version" };
 
+
 export interface CliInvocation {
   readonly command: CliCommand;
   readonly options: CliOptions;
 }
 
+
 type CommandKind = CliCommand["kind"];
 type FlagArity = "boolean" | "value";
+
 
 const BASE_COMMON_FLAGS = new Set([
   "--output",
@@ -68,11 +73,9 @@ const REQUEST_COMMON_FLAGS = new Set([
   "--title-summary",
 ]);
 const LOCAL_COMMON_FLAGS = new Set([
-  "--output",
-  "--client",
-  "--client-version",
-  "--skill-protocol",
+  ...BASE_COMMON_FLAGS,
 ]);
+
 
 const SPECIFIC_FLAGS: Readonly<Partial<Record<CommandKind, Readonly<Record<string, FlagArity>>>>> = {
   create: { "--upsert": "boolean" },
@@ -92,6 +95,7 @@ const SPECIFIC_FLAGS: Readonly<Partial<Record<CommandKind, Readonly<Record<strin
   "skill.activate": { "--version": "value", "--path": "value" },
 };
 
+
 function commandInputError(
   field: string | null,
   expected: JsonValue,
@@ -105,6 +109,7 @@ function commandInputError(
   });
 }
 
+
 function invalid(
   field: string | null,
   expected: JsonValue,
@@ -112,6 +117,7 @@ function invalid(
 ): never {
   throw commandInputError(field, expected, actual);
 }
+
 
 function route(arguments_: readonly string[]): { readonly kind: CommandKind; readonly offset: number } {
   const first = arguments_[0];
@@ -143,6 +149,7 @@ function route(arguments_: readonly string[]): { readonly kind: CommandKind; rea
   return { kind: first as CommandKind, offset: 1 };
 }
 
+
 function commonFlagsFor(kind: CommandKind): ReadonlySet<string> {
   if (kind === "create" || kind === "update" || kind === "preview") {
     return REQUEST_COMMON_FLAGS;
@@ -161,6 +168,7 @@ function commonFlagsFor(kind: CommandKind): ReadonlySet<string> {
   return BASE_COMMON_FLAGS;
 }
 
+
 function parsePositiveInteger(raw: string, field: string): number {
   if (!/^[1-9][0-9]*$/u.test(raw)) {
     invalid(field, "a positive integer without leading zeroes", "invalid integer");
@@ -172,6 +180,7 @@ function parsePositiveInteger(raw: string, field: string): number {
   return value;
 }
 
+
 function scalar(raw: string | undefined, field: string): string {
   if (raw === undefined || raw === "" || raw !== raw.trim() || /[\r\n\u0000]/u.test(raw)) {
     invalid(field, "a non-empty single-line value without outer whitespace", "invalid value");
@@ -179,10 +188,12 @@ function scalar(raw: string | undefined, field: string): string {
   return raw;
 }
 
+
 function optionalIid(positionals: readonly string[], field: string): number | null {
   if (positionals.length > 1) invalid(field, "zero or one MR IID", "too many positional arguments");
   return positionals.length === 0 ? null : parsePositiveInteger(positionals[0]!, field);
 }
+
 
 function requireNoPositionals(positionals: readonly string[]): void {
   if (positionals.length !== 0) {
@@ -190,10 +201,12 @@ function requireNoPositionals(positionals: readonly string[]): void {
   }
 }
 
+
 function specificValue(values: ReadonlyMap<string, string | true>, flag: string): string | undefined {
   const value = values.get(flag);
   return typeof value === "string" ? value : undefined;
 }
+
 
 function commandFor(
   kind: CommandKind,
@@ -320,6 +333,7 @@ function commandFor(
   }
 }
 
+
 export function parseCliInvocation(arguments_: readonly string[]): CliInvocation {
   if (!Array.isArray(arguments_) || arguments_.some((argument) => typeof argument !== "string")) {
     throw commandInputError("arguments", "an array of command-line strings", "invalid argument vector");
@@ -330,6 +344,7 @@ export function parseCliInvocation(arguments_: readonly string[]): CliInvocation
   const commonArguments: string[] = [];
   const usedCommon = new Set<string>();
   const positionals: string[] = [];
+
 
   for (let index = selected.offset; index < arguments_.length; index += 1) {
     const argument = arguments_[index]!;
@@ -375,6 +390,7 @@ export function parseCliInvocation(arguments_: readonly string[]): CliInvocation
     }
     specific.set(flag, scalar(value, flag));
   }
+
 
   const options = parseCliOptions(commonArguments);
   const allowedCommon = commonFlagsFor(selected.kind);
