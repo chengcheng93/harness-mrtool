@@ -2,15 +2,18 @@ import type { CliInvocation } from "../cli/program.ts";
 import { isToolError, ToolError } from "../contracts/errors.ts";
 import { createProductionUpdateTrustConfig } from "./trust-config.ts";
 
+
 export interface PublicInvocationPreflightInput {
   readonly commandKind: CliInvocation["command"]["kind"];
   readonly noUpdate: boolean;
   readonly offline: boolean;
 }
 
+
 export interface PublicInvocationPreflight {
   readonly run: (input: PublicInvocationPreflightInput) => Promise<void>;
 }
+
 
 function unavailableProductionTrust(): ToolError<"UPDATE_SECURITY_ERROR"> {
   return new ToolError("UPDATE_SECURITY_ERROR", "Production update trust is unavailable", {
@@ -21,13 +24,15 @@ function unavailableProductionTrust(): ToolError<"UPDATE_SECURITY_ERROR"> {
   });
 }
 
+
 /**
  * The shipped source tree intentionally has no release signing roots. The
  * production entry therefore fails closed until the build injects them.
  */
 export function createProductionUpdatePreflight(): PublicInvocationPreflight {
   return Object.freeze({
-    run: async (_input: PublicInvocationPreflightInput): Promise<void> => {
+    run: async (input: PublicInvocationPreflightInput): Promise<void> => {
+      if (input.noUpdate) return;
       try {
         createProductionUpdateTrustConfig();
       } catch (error) {
@@ -38,6 +43,7 @@ export function createProductionUpdatePreflight(): PublicInvocationPreflight {
     },
   });
 }
+
 
 export async function runPublicInvocationPreflight(
   preflight: PublicInvocationPreflight,
