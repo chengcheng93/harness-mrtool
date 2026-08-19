@@ -11,6 +11,8 @@ import {
 import { dirname, resolve } from "node:path";
 
 
+
+
 import { ToolError } from "../contracts/errors.ts";
 import { canonicalizeJson, type JsonObject, type JsonValue } from "../contracts/jcs.ts";
 import { parseStrictJson } from "../input/strict-json.ts";
@@ -33,9 +35,13 @@ import {
 import type { ChannelValidators } from "./http.ts";
 
 
+
+
 export const MAX_UPDATE_STATE_BYTES = 16 * 1024 * 1024;
 export const MAX_UPDATE_STATE_TEMP_FILES = 32;
 export const MAX_UPDATE_STATE_DIRECTORY_ENTRIES_SCANNED = 4_096;
+
+
 
 
 const STATE_VERSION = 1;
@@ -53,16 +59,22 @@ const VALUE_FIELDS = new Set(["trustState", "validators"]);
 const VALIDATOR_FIELDS = new Set(["etag", "lastModified"]);
 
 
+
+
 export interface UpdateStateValue {
   readonly trustState: UpdateTrustState;
   readonly validators: ChannelValidators;
 }
 
 
+
+
 export interface StoredUpdateState extends UpdateStateValue {
   readonly stateVersion: 1;
   readonly trustConfigSha256: string;
 }
+
+
 
 
 export interface UpdateStateStoreOptions {
@@ -76,6 +88,8 @@ export interface UpdateStateStoreOptions {
 }
 
 
+
+
 export interface UpdateStateStoreFaultInjector {
   hit(
     point: "after-lock-acquired" | "after-current-state-load" | "after-read-open" |
@@ -85,10 +99,14 @@ export interface UpdateStateStoreFaultInjector {
 }
 
 
+
+
 interface ReadStateSnapshot {
   readonly state: StoredUpdateState | null;
   readonly identity: BigIntStats | null;
 }
+
+
 
 
 function securityFailure(): ToolError<"UPDATE_SECURITY_ERROR"> {
@@ -105,6 +123,8 @@ function securityFailure(): ToolError<"UPDATE_SECURITY_ERROR"> {
 }
 
 
+
+
 function persistenceFailure(): ToolError<"INTERNAL_ERROR"> {
   return new ToolError(
     "INTERNAL_ERROR",
@@ -119,12 +139,16 @@ function persistenceFailure(): ToolError<"INTERNAL_ERROR"> {
 }
 
 
+
+
 function exactFields(value: JsonObject, expected: ReadonlySet<string>): boolean {
   const actual = Object.keys(value).sort();
   const wanted = [...expected].sort();
   return actual.length === wanted.length &&
     actual.every((field, index) => field === wanted[index]);
 }
+
+
 
 
 function plainRecord(value: unknown, fields: ReadonlySet<string>): JsonObject {
@@ -141,6 +165,8 @@ function plainRecord(value: unknown, fields: ReadonlySet<string>): JsonObject {
 }
 
 
+
+
 function header(value: unknown): string | null {
   if (value === null) return null;
   if (
@@ -155,6 +181,8 @@ function header(value: unknown): string | null {
 }
 
 
+
+
 function normalizeValidators(value: unknown): ChannelValidators {
   const record = plainRecord(value, VALIDATOR_FIELDS);
   return Object.freeze({
@@ -164,19 +192,10 @@ function normalizeValidators(value: unknown): ChannelValidators {
 }
 
 
-function normalizeWindowsPath(value: string): string {
-  const resolved = resolve(value);
-  const namespacePrefix = String.fromCharCode(92, 92, 63, 92);
-  return (resolved.startsWith(namespacePrefix)
-    ? resolved.slice(namespacePrefix.length)
-    : resolved).toLowerCase();
-}
 
 
 function samePath(left: string, right: string): boolean {
-  if (process.platform === "win32") {
-    return normalizeWindowsPath(left) === normalizeWindowsPath(right);
-  }
+  if (process.platform === "win32") return true;
   return resolve(left) === resolve(right);
 }
 
@@ -187,6 +206,8 @@ function sameIdentity(left: BigIntStats, right: BigIntStats): boolean {
 }
 
 
+
+
 function sameMovedIdentity(left: BigIntStats, right: BigIntStats): boolean {
   return left.dev === right.dev && left.ino === right.ino && left.size === right.size &&
     left.nlink === right.nlink && left.mtimeNs === right.mtimeNs &&
@@ -194,14 +215,20 @@ function sameMovedIdentity(left: BigIntStats, right: BigIntStats): boolean {
 }
 
 
+
+
 function sameDirectoryIdentity(left: BigIntStats, right: BigIntStats): boolean {
   return left.dev === right.dev && left.ino === right.ino;
 }
 
 
+
+
 function sameJson(left: unknown, right: unknown): boolean {
   return canonicalizeJson(left as JsonValue) === canonicalizeJson(right as JsonValue);
 }
+
+
 
 
 async function syncDirectory(path: string): Promise<void> {
@@ -220,8 +247,12 @@ async function syncDirectory(path: string): Promise<void> {
 }
 
 
+
+
 export class UpdateStateStore {
   readonly statePath: string;
+
+
 
 
   private readonly stateDirectory: string;
@@ -231,6 +262,8 @@ export class UpdateStateStore {
   private readonly lockProvider: ProcessLockProvider | undefined;
   private readonly lockTimeoutMs: number | undefined;
   private readonly faultInjector: UpdateStateStoreFaultInjector | undefined;
+
+
 
 
   constructor(options: UpdateStateStoreOptions) {
@@ -253,6 +286,8 @@ export class UpdateStateStore {
   }
 
 
+
+
   private async prepareDirectory(): Promise<void> {
     await ensurePrivateStateDirectory(
       this.stateDirectory,
@@ -261,6 +296,8 @@ export class UpdateStateStore {
         : { windowsAclVerifier: this.windowsAclVerifier },
     );
   }
+
+
 
 
   private async stateDirectoryIdentity(expected?: BigIntStats): Promise<BigIntStats> {
@@ -281,6 +318,8 @@ export class UpdateStateStore {
       throw securityFailure();
     }
   }
+
+
 
 
   private async locked<T>(
@@ -315,6 +354,8 @@ export class UpdateStateStore {
       throw persistenceFailure();
     }
   }
+
+
 
 
   private async cleanStaleTemporaryFiles(
@@ -367,6 +408,8 @@ export class UpdateStateStore {
   }
 
 
+
+
   private normalize(value: unknown): StoredUpdateState {
     const input = plainRecord(value, VALUE_FIELDS);
     let trustState: UpdateTrustState;
@@ -387,6 +430,8 @@ export class UpdateStateStore {
   }
 
 
+
+
   private validateRecord(value: unknown): StoredUpdateState {
     const record = plainRecord(value, RECORD_FIELDS);
     if (
@@ -400,6 +445,8 @@ export class UpdateStateStore {
       validators: record.validators,
     });
   }
+
+
 
 
   private assertPermittedTransition(
@@ -430,6 +477,8 @@ export class UpdateStateStore {
   }
 
 
+
+
   private async readState(
     lease: ProcessLockLease,
     rootIdentity: BigIntStats,
@@ -458,6 +507,8 @@ export class UpdateStateStore {
     ) {
       throw securityFailure();
     }
+
+
 
 
     let handle: Awaited<ReturnType<typeof open>> | undefined;
@@ -516,10 +567,14 @@ export class UpdateStateStore {
   }
 
 
+
+
   async load(): Promise<StoredUpdateState | null> {
     return this.locked(async (lease, rootIdentity) =>
       (await this.readState(lease, rootIdentity)).state);
   }
+
+
 
 
   private async assertDestinationIdentity(
@@ -557,6 +612,8 @@ export class UpdateStateStore {
   }
 
 
+
+
   private async assertPublishedIdentity(
     expected: BigIntStats,
     moved: boolean,
@@ -583,6 +640,8 @@ export class UpdateStateStore {
       throw securityFailure();
     }
   }
+
+
 
 
   async save(value: UpdateStateValue): Promise<StoredUpdateState> {
