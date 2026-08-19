@@ -1,0 +1,130 @@
+name: Publish Stable Channel
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Channel to publish
+        required: true
+        default: stable
+        type: choice
+        options: [stable]
+      cli_tag:
+        description: Immutable CLI release tag
+        required: true
+        type: string
+      template_tag:
+        description: Immutable Template release tag
+        required: true
+        type: string
+      skill_tag:
+        description: Immutable Skill release tag
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  verify-cli:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.16.0
+      - run: npm ci --ignore-scripts
+      - name: Require an immutable CLI release and download its exact assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_TAG: ${{ inputs.cli_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$CLI_TAG"
+          gh release view "$CLI_TAG" --json isDraft,isImmutable
+          test "$(gh release view "$CLI_TAG" --json isDraft --jq .isDraft)" = false
+          test "$(gh release view "$CLI_TAG" --json isImmutable --jq .isImmutable)" = true
+          gh release download "$CLI_TAG" --dir cli-release --pattern 'harness-mrtool-portable.zip' --pattern 'bundle-receipt.envelope.json'
+          node --input-type=module -e "import {readFile} from 'node:fs/promises'; import {unzipSync} from 'fflate'; import {validateReleaseArchive} from './scripts/package-portable.mjs'; validateReleaseArchive(unzipSync(await readFile('cli-release/harness-mrtool-portable.zip')));"
+  verify-template:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.16.0
+      - run: npm ci
+      - name: Require an immutable Template release and verify its receipt asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TEMPLATE_TAG: ${{ inputs.template_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$TEMPLATE_TAG"
+          gh release view "$TEMPLATE_TAG" --json isDraft,isImmutable
+          test "$(gh release view "$TEMPLATE_TAG" --json isDraft --jq .isDraft)" = false
+          test "$(gh release view "$TEMPLATE_TAG" --json isImmutable --jq .isImmutable)" = true
+          gh release download "$TEMPLATE_TAG" --dir template-release --pattern 'template-bundle.zip' --pattern 'bundle-receipt.envelope.json' --pattern 'SHA256SUMS'
+          (cd template-release && sha256sum -c SHA256SUMS)
+  verify-skill:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.16.0
+      - run: npm ci
+      - name: Require an immutable Skill release and verify its receipt asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SKILL_TAG: ${{ inputs.skill_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$SKILL_TAG"
+          gh release view "$SKILL_TAG" --json isDraft,isImmutable
+          test "$(gh release view "$SKILL_TAG" --json isDraft --jq .isDraft)" = false
+          test "$(gh release view "$SKILL_TAG" --json isImmutable --jq .isImmutable)" = true
+          gh release download "$SKILL_TAG" --dir skill-release --pattern 'skill-bundle.zip' --pattern 'bundle-receipt.envelope.json' --pattern 'SHA256SUMS'
+          (cd skill-release && sha256sum -c SHA256SUMS)
+  publish:
+    needs: [verify-cli, verify-template, verify-skill]
+    if: ${{ inputs.channel == 'stable' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Materialize the externally signed channel envelope
+        env:
+          CHANNEL_ENVELOPE_B64: ${{ secrets.CHANNEL_ENVELOPE_B64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${CHANNEL_ENVELOPE_B64:-}"
+          mkdir -p dist/channel
+          printf '%s' "$CHANNEL_ENVELOPE_B64" | base64 --decode > dist/channel/stable.envelope.json
+          test -s dist/channel/stable.envelope.json
+          node --input-type=module -e "JSON.parse(await (await import('node:fs/promises')).readFile('dist/channel/stable.envelope.json', 'utf8'))"
+      - name: Create a draft channel release after all immutable component checks
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "stable-${GITHUB_SHA}" --draft --title "stable channel ${GITHUB_SHA}" --notes "Verified immutable CLI, Template, and Skill release inputs." dist/channel/stable.envelope.json
+      - name: Download the draft channel envelope
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "stable-${GITHUB_SHA}" --dir draft-channel --pattern 'stable.envelope.json'
+      - name: Publish the verified channel draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "stable-${GITHUB_SHA}" --draft=false
+      - name: Verify immutable channel release state
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release view "stable-${GITHUB_SHA}" --json isDraft,isImmutable
+          test "$(gh release view "stable-${GITHUB_SHA}" --json isDraft --jq .isDraft)" = false
+          test "$(gh release view "stable-${GITHUB_SHA}" --json isImmutable --jq .isImmutable)" = true

@@ -1,0 +1,86 @@
+name: Release Skill Bundle
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Immutable skill release tag
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.16.0
+      - run: npm ci
+      - name: Require an immutable semantic release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]
+      - run: npm run typecheck
+      - run: npm test -- test/contract/skill.test.ts
+      - name: Verify skill tree has no links
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f skill/harness-mr/SKILL.md
+          if find skill/harness-mr -type l -print -quit | grep -q .; then exit 1; fi
+          test -n "${BUNDLE_RECEIPT_B64:-}"
+          mkdir -p dist/skill-bundle
+          (cd skill/harness-mr && zip -X -q -r ../../dist/skill-bundle/skill-bundle.zip .)
+          printf '%s' "$BUNDLE_RECEIPT_B64" | base64 --decode > dist/skill-bundle/bundle-receipt.envelope.json
+          (cd dist/skill-bundle && sha256sum skill-bundle.zip bundle-receipt.envelope.json > SHA256SUMS)
+          test -s dist/skill-bundle/skill-bundle.zip
+          test -s dist/skill-bundle/bundle-receipt.envelope.json
+        env:
+          BUNDLE_RECEIPT_B64: ${{ secrets.SKILL_BUNDLE_RECEIPT_B64 }}
+      - name: Attest the verified skill archive
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/skill-bundle/skill-bundle.zip
+      - name: Upload verified skill assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-skill-${{ github.sha }}
+          path: dist/skill-bundle
+      - name: Publish a draft after verification
+        if: ${{ inputs.tag != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${RELEASE_TAG}-skill" --draft --target "${GITHUB_SHA}" --title "${RELEASE_TAG} skill" --generate-notes dist/skill-bundle/skill-bundle.zip dist/skill-bundle/bundle-receipt.envelope.json dist/skill-bundle/SHA256SUMS
+      - name: Download and verify the draft assets
+        if: ${{ inputs.tag != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf draft-skill
+          gh release download "${RELEASE_TAG}-skill" --dir draft-skill --pattern 'skill-bundle.zip' --pattern 'bundle-receipt.envelope.json' --pattern 'SHA256SUMS'
+          (cd draft-skill && sha256sum -c SHA256SUMS)
+      - name: Publish the verified skill draft
+        if: ${{ inputs.tag != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "${RELEASE_TAG}-skill" --draft=false
+      - name: Verify immutable skill release
+        if: ${{ inputs.tag != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(gh release view "${RELEASE_TAG}-skill" --json isDraft --jq .isDraft)" = false
+          test "$(gh release view "${RELEASE_TAG}-skill" --json isImmutable --jq .isImmutable)" = true
