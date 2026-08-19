@@ -1,0 +1,80 @@
+[
+  {
+    "name": "docs paths are case and separator normalized",
+    "items": [
+      {
+        "status": "modified",
+        "newPath": ".GITLAB\\MERGE_REQUEST_TEMPLATES\\DEFAULT.MD",
+        "binary": false,
+        "submodule": false
+      }
+    ],
+    "expected": { "kind": "detected", "profileIds": ["docs"] }
+  },
+  {
+    "name": "code source and test files",
+    "items": [
+      {
+        "status": "added",
+        "newPath": "src/main.ts",
+        "binary": false,
+        "submodule": false
+      },
+      {
+        "status": "modified",
+        "newPath": "tests/main.test.ts",
+        "binary": false,
+        "submodule": false
+      }
+    ],
+    "expected": { "kind": "detected", "profileIds": ["code"] }
+  },
+  {
+    "name": "ops paths",
+    "items": [
+      {
+        "status": "modified",
+        "newPath": "Dockerfile.dev",
+        "binary": false,
+        "submodule": false
+      }
+    ],
+    "expected": { "kind": "detected", "profileIds": ["ops"] }
+  },
+  {
+    "name": "code docs ops union",
+    "items": [
+      {
+        "status": "modified",
+        "newPath": "README.md",
+        "binary": false,
+        "submodule": false
+      },
+      {
+        "status": "modified",
+        "newPath": ".github/workflows/ci.yml",
+        "binary": false,
+        "submodule": false
+      },
+      {
+        "status": "modified",
+        "newPath": "src/main.cpp",
+        "binary": false,
+        "submodule": false
+      }
+    ],
+    "expected": { "kind": "detected", "profileIds": ["code", "docs", "ops"] }
+  },
+  {
+    "name": "known general path",
+    "items": [
+      {
+        "status": "modified",
+        "newPath": ".gitignore",
+        "binary": false,
+        "submodule": false
+      }
+    ],
+    "expected": { "kind": "detected", "profileIds": ["general"] }
+  }
+]
