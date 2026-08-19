@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { lstat, mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import test from "node:test";
 
+
 import { isToolError } from "../../src/contracts/errors.ts";
+
 
 import {
   ACTIVATION_CRASH_POINTS,
@@ -38,9 +40,31 @@ import {
   type WindowsPersistenceResult,
 } from "../../src/update/windows-helper.ts";
 
+
+async function removeFixtureDirectory(directory: string): Promise<void> {
+  const pending = [directory];
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    let info;
+    try {
+      info = await lstat(current);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw error;
+    }
+    if (info.isSymbolicLink() || !info.isDirectory()) continue;
+    await chmod(current, 0o700).catch(() => undefined);
+    for (const entry of await readdir(current, { withFileTypes: true })) {
+      if (entry.isDirectory() && !entry.isSymbolicLink()) pending.push(resolve(current, entry.name));
+    }
+  }
+  await rm(directory, { recursive: true, force: true });
+}
+
 function sha256(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
+
 
 function releaseSnapshot(
   transactionId: string,
@@ -69,11 +93,13 @@ function releaseSnapshot(
   return Object.freeze({ record, cliBytes, templateBytes, receiptBytes });
 }
 
+
 const OLD_RELEASE = releaseSnapshot("tx-41", "stable-41", "1.4.1", 41);
 const NEW_RELEASE = releaseSnapshot("tx-42", "stable-42", "1.5.0", 42);
 const SAME_SEQUENCE_RELEASE = releaseSnapshot("tx-42-alt", "stable-42-alt", "1.5.1", 42);
 const allowTestAcl = { verify: async (_path: string): Promise<void> => undefined };
 const allowTestVerification = { verify: async (_snapshot: ReleaseSetSnapshot): Promise<void> => undefined };
+
 
 test("recovery rejects a missing or malformed snapshot verifier at runtime", async (t) => {
   const invalidVerifiers: readonly unknown[] = [
@@ -83,7 +109,7 @@ test("recovery rejects a missing or malformed snapshot verifier at runtime", asy
   ];
   for (const [index, verifier] of invalidVerifiers.entries()) {
     const directory = await mkdtemp(resolve(tmpdir(), `harness-mrtool-updater-verifier-${index}-`));
-    t.after(async () => rm(directory, { recursive: true, force: true }));
+    t.after(async () => removeFixtureDirectory(directory));
     await assert.rejects(
       recoverReleaseSet(directory, {
         windowsAclVerifier: allowTestAcl,
@@ -94,9 +120,10 @@ test("recovery rejects a missing or malformed snapshot verifier at runtime", asy
   }
 });
 
+
 test("recovery rejects a staging journal that rolls back the accepted sequence", async (t) => {
   const directory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-updater-sequence-rollback-"));
-  t.after(async () => rm(directory, { recursive: true, force: true }));
+  t.after(async () => removeFixtureDirectory(directory));
   await activateReleaseSet({
     stateDirectory: directory,
     next: OLD_RELEASE,
@@ -120,6 +147,7 @@ test("recovery rejects a staging journal that rolls back the accepted sequence",
     }),
   );
 
+
   await assert.rejects(
     recoverReleaseSet(directory, {
       windowsAclVerifier: allowTestAcl,
@@ -137,9 +165,10 @@ test("recovery rejects a staging journal that rolls back the accepted sequence",
   assert.equal(active.record.manifestSequence, NEW_RELEASE.record.manifestSequence);
 });
 
+
 test("recovery preserves a staging journal when its next release assets are missing", async (t) => {
   const directory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-updater-missing-staged-"));
-  t.after(async () => rm(directory, { recursive: true, force: true }));
+  t.after(async () => removeFixtureDirectory(directory));
   await activateReleaseSet({
     stateDirectory: directory,
     next: OLD_RELEASE,
@@ -173,10 +202,11 @@ test("recovery preserves a staging journal when its next release assets are miss
   assert.equal(active.record.transactionId, OLD_RELEASE.record.transactionId);
 });
 
+
 test("activation rejects lower or same-sequence different release tuples but replays the exact tuple", async (t) => {
   for (const [index, candidate] of [OLD_RELEASE, SAME_SEQUENCE_RELEASE].entries()) {
     const directory = await mkdtemp(resolve(tmpdir(), `harness-mrtool-updater-activation-sequence-${index}-`));
-    t.after(async () => rm(directory, { recursive: true, force: true }));
+    t.after(async () => removeFixtureDirectory(directory));
     await activateReleaseSet({
       stateDirectory: directory,
       next: OLD_RELEASE,
@@ -208,6 +238,7 @@ test("activation rejects lower or same-sequence different release tuples but rep
   }
 });
 
+
 function assertExactRelease(
   actual: LoadedReleaseSet | null,
   expected: ReleaseSetSnapshot,
@@ -220,10 +251,12 @@ function assertExactRelease(
   assert.deepEqual(actual?.receiptBytes, expected.receiptBytes, `receipt mismatch after ${crashPoint}`);
 }
 
+
 test("activation exposes either old or new release tuple, never a mixed tuple", async (t) => {
   for (const crashPoint of ACTIVATION_CRASH_POINTS) {
     const directory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-updater-"));
-    t.after(async () => rm(directory, { recursive: true, force: true }));
+    t.after(async () => removeFixtureDirectory(directory));
+
 
     await activateReleaseSet({
       stateDirectory: directory,
@@ -244,6 +277,7 @@ test("activation exposes either old or new release tuple, never a mixed tuple", 
         },
       }),
     );
+
 
     let recovered: LoadedReleaseSet | null;
     try {
@@ -273,6 +307,7 @@ test("activation exposes either old or new release tuple, never a mixed tuple", 
       : NEW_RELEASE;
     assertExactRelease(recovered, expected, crashPoint);
 
+
     const retried = await activateReleaseSet({
       stateDirectory: directory,
       next: NEW_RELEASE,
@@ -283,9 +318,10 @@ test("activation exposes either old or new release tuple, never a mixed tuple", 
   }
 });
 
+
 test("a committed activation journal cannot be discarded while the old pointer is active", async (t) => {
   const directory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-updater-phase-"));
-  t.after(async () => rm(directory, { recursive: true, force: true }));
+  t.after(async () => removeFixtureDirectory(directory));
   await activateReleaseSet({
     stateDirectory: directory,
     next: OLD_RELEASE,
@@ -311,9 +347,10 @@ test("a committed activation journal cannot be discarded while the old pointer i
   );
 });
 
+
 test("activation removes a bounded plain stale staging directory under the update lock", async (t) => {
   const directory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-updater-stale-"));
-  t.after(async () => rm(directory, { recursive: true, force: true }));
+  t.after(async () => removeFixtureDirectory(directory));
   await activateReleaseSet({
     stateDirectory: directory,
     next: OLD_RELEASE,
@@ -323,6 +360,7 @@ test("activation removes a bounded plain stale staging directory under the updat
   const stale = resolve(directory, "releases", `.staging-${"a".repeat(24)}`);
   await mkdir(stale);
 
+
   const activated = await activateReleaseSet({
     stateDirectory: directory,
     next: NEW_RELEASE,
@@ -330,13 +368,15 @@ test("activation removes a bounded plain stale staging directory under the updat
     windowsAclVerifier: allowTestAcl,
   });
 
+
   assertExactRelease(activated, NEW_RELEASE, "stale staging cleanup");
   await assert.rejects(lstat(stale), /ENOENT/u);
 });
 
+
 test("activation reclaims a rename-leftover stale directory on the next recovery", async (t) => {
   const directory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-updater-stale-leftover-"));
-  t.after(async () => rm(directory, { recursive: true, force: true }));
+  t.after(async () => removeFixtureDirectory(directory));
   await activateReleaseSet({
     stateDirectory: directory,
     next: OLD_RELEASE,
@@ -346,6 +386,7 @@ test("activation reclaims a rename-leftover stale directory on the next recovery
   const stale = resolve(directory, "releases", `.stale-${"b".repeat(24)}`);
   await mkdir(stale);
 
+
   await recoverReleaseSet(directory, {
     windowsAclVerifier: allowTestAcl,
     verifySnapshot: allowTestVerification,
@@ -353,9 +394,11 @@ test("activation reclaims a rename-leftover stale directory on the next recovery
   await assert.rejects(lstat(stale), /ENOENT/u);
 });
 
+
 test("concurrent activation attempts serialize complete release sets", async (t) => {
   const directory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-updater-concurrent-"));
-  t.after(async () => rm(directory, { recursive: true, force: true }));
+  t.after(async () => removeFixtureDirectory(directory));
+
 
   const outcomes = await Promise.allSettled([
     activateReleaseSet({
@@ -377,6 +420,7 @@ test("concurrent activation attempts serialize complete release sets", async (t)
     }
   }
 
+
   const recovered = await recoverReleaseSet(directory, {
     windowsAclVerifier: allowTestAcl,
     verifySnapshot: allowTestVerification,
@@ -385,9 +429,10 @@ test("concurrent activation attempts serialize complete release sets", async (t)
   await assert.rejects(lstat(resolve(directory, "activation-journal.json")), /ENOENT/u);
 });
 
+
 test("activation rejects a linked state directory before writing its journal", async (t) => {
   const root = await mkdtemp(resolve(tmpdir(), "harness-mrtool-updater-linked-"));
-  t.after(async () => rm(root, { recursive: true, force: true }));
+  t.after(async () => removeFixtureDirectory(root));
   const target = resolve(root, "target");
   const linked = resolve(root, "state");
   await mkdir(target);
@@ -401,6 +446,7 @@ test("activation rejects a linked state directory before writing its journal", a
     throw error;
   }
 
+
   await assert.rejects(
     activateReleaseSet({
       stateDirectory: linked,
@@ -412,6 +458,7 @@ test("activation rejects a linked state directory before writing its journal", a
   );
   await assert.rejects(lstat(resolve(target, "activation-journal.json")), /ENOENT/u);
 });
+
 
 class EchoChild implements HandoffChild {
   readonly writes: Uint8Array[] = [];
@@ -430,6 +477,7 @@ class EchoChild implements HandoffChild {
   }
 }
 
+
 test("JSON stdin is consumed once and child exit/stdout are forwarded exactly", async () => {
   let reads = 0;
   const input = (async function* (): AsyncIterable<Uint8Array> {
@@ -439,11 +487,13 @@ test("JSON stdin is consumed once and child exit/stdout are forwarded exactly", 
   const child = new EchoChild();
   const result = await runUpdateHandoff(input, async () => child);
 
+
   assert.equal(reads, 1);
   assert.deepEqual(result.parentStdout, result.childStdout);
   assert.equal(result.parentExit, result.childExit);
   assert.equal(result.parentExit, 17);
 });
+
 
 test("bounded downloads enforce byte and wall-clock budgets before accepting assets", async () => {
   let now = 0;
@@ -461,6 +511,7 @@ test("bounded downloads enforce byte and wall-clock budgets before accepting ass
     /budget/u,
   );
 
+
   await assert.rejects(
     downloadBounded((async function* () {
       yield new Uint8Array(ASSET_UPDATE_BUDGET_MS > 0 ? 17 : 1);
@@ -468,6 +519,7 @@ test("bounded downloads enforce byte and wall-clock budgets before accepting ass
     /size/u,
   );
 });
+
 
 test("archive entry validation rejects traversal, duplicates, and links", () => {
   assert.deepEqual(validateArchiveEntries([
@@ -486,6 +538,7 @@ test("archive entry validation rejects traversal, duplicates, and links", () => 
   }
 });
 
+
 test("Windows persistence waits for the parent and preserves the business exit on pending install", async () => {
   const order: string[] = [];
   let result: WindowsPersistenceResult = await runWindowsPersistence({
@@ -497,6 +550,7 @@ test("Windows persistence waits for the parent and preserves the business exit o
   assert.deepEqual(order, ["parent", "rotate", "commit"]);
   assert.equal(result.businessExit, 23);
   assert.equal(result.persistencePending, true);
+
 
   result = await runWindowsPersistence({
     parentExit: async () => 0,
