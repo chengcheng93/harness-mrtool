@@ -6,6 +6,8 @@ import { resolve } from "node:path";
 import test from "node:test";
 
 
+
+
 import { isToolError } from "../../src/contracts/errors.ts";
 import {
   createDefaultUpdaterCommandServices,
@@ -15,11 +17,38 @@ import { UpdateCache, type ReleaseSetSnapshot } from "../../src/update/cache.ts"
 import { parseCliInvocation, type CliCommand } from "../../src/cli/program.ts";
 
 
+
+
 // The production default intentionally performs a real Windows ACL check.
 // This contract fixture uses an injected platform adapter so the test remains
 // deterministic when the full suite runs concurrently with other PowerShell
 // ACL probes.
-const allowTestAcl = { verify: async (_path: string): Promise<void> => undefined };\n\nasync function removeFixtureDirectory(directory: string): Promise<void> {\n  const pending = [directory];\n  while (pending.length > 0) {\n    const current = pending.pop()!;\n    let info;\n    try {\n      info = await lstat(current);\n    } catch (error) {\n      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;\n      throw error;\n    }\n    if (info.isSymbolicLink() || !info.isDirectory()) continue;\n    await chmod(current, 0o700).catch(() => undefined);\n    for (const entry of await readdir(current, { withFileTypes: true })) {\n      if (entry.isDirectory() && !entry.isSymbolicLink()) {\n        pending.push(resolve(current, entry.name));\n      }\n    }\n  }\n  await rm(directory, { recursive: true, force: true });\n}\n
+const allowTestAcl = { verify: async (_path: string): Promise<void> => undefined };
+
+async function removeFixtureDirectory(directory: string): Promise<void> {
+  const pending = [directory];
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    let info;
+    try {
+      info = await lstat(current);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw error;
+    }
+    if (info.isSymbolicLink() || !info.isDirectory()) continue;
+    await chmod(current, 0o700).catch(() => undefined);
+    for (const entry of await readdir(current, { withFileTypes: true })) {
+      if (entry.isDirectory() && !entry.isSymbolicLink()) {
+        pending.push(resolve(current, entry.name));
+      }
+    }
+  }
+  await rm(directory, { recursive: true, force: true });
+}
+
+
+
 
 
 const ROUTES: readonly (readonly string[])[] = [
@@ -28,6 +57,8 @@ const ROUTES: readonly (readonly string[])[] = [
   ["self-update.check"], ["self-update.status"], ["self-update.apply"], ["self-update.rollback", "--version", "1.2.3"],
   ["skill.install", "--path", "skill"], ["skill.activate", "--version", "1.2.3", "--path", "skill"], ["skill.status"],
 ];
+
+
 
 
 function routeToArgs(route: readonly string[]): readonly string[] {
@@ -42,6 +73,8 @@ function routeToArgs(route: readonly string[]): readonly string[] {
 }
 
 
+
+
 test("production handler factory registers every non-local V1 route", () => {
   const handlers = createProductionCommandHandlers({ cliVersion: "1.0.0" });
   for (const route of ROUTES) {
@@ -50,6 +83,8 @@ test("production handler factory registers every non-local V1 route", () => {
     assert.equal(typeof handler, "function", `missing handler for ${invocation.command.kind}`);
   }
 });
+
+
 
 
 test("missing production runtime dependencies are classified and do not claim success", async () => {
@@ -62,6 +97,8 @@ test("missing production runtime dependencies are classified and do not claim su
     (error: unknown) => isToolError(error) && error.code !== "INTERNAL_ERROR",
   );
 });
+
+
 
 
 test("self-update status reads the real cache and reports an empty bootstrap safely", async (t) => {
@@ -79,6 +116,8 @@ test("self-update status reads the real cache and reports an empty bootstrap saf
   assert.equal(execution.context?.update?.checked, true);
   assert.equal(execution.output?.data?.state, "empty");
 });
+
+
 
 
 test("self-update status requires a verifier for existing cache and reads verified LKG when injected", async (t) => {
@@ -113,6 +152,8 @@ test("self-update status requires a verifier for existing cache and reads verifi
   await new UpdateCache({ stateDirectory: directory, verifySnapshot: verifier, windowsAclVerifier: allowTestAcl }).storeVerifiedReleaseSet(snapshot);
 
 
+
+
   const unverifiedHandlers = createProductionCommandHandlers({
     cliVersion: "1.0.0",
     ...createDefaultUpdaterCommandServices({ stateDirectory: directory, windowsAclVerifier: allowTestAcl }),
@@ -122,6 +163,8 @@ test("self-update status requires a verifier for existing cache and reads verifi
     () => Promise.resolve(unverifiedHandlers[invocation.command.kind]!(invocation as never)),
     (error: unknown) => isToolError(error, "UPDATE_SECURITY_ERROR"),
   );
+
+
 
 
   const verifiedHandlers = createProductionCommandHandlers({
