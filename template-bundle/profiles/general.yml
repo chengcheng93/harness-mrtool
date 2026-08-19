@@ -1,0 +1,35 @@
+id: general
+requiredBaseFields:
+  - changes.summary
+  - changes.technicalChanges
+  - changes.outOfScope
+  - motivation.background
+  - motivation.whyNeeded
+  - workItem
+  - impact.details
+  - verification.items
+  - verification.acceptanceEvidence
+  - verification.knownGaps
+  - documentation.details
+  - risk.items
+  - risk.compatibilityImpact
+  - risk.rollbackPlan
+  - review.reviewerFocus
+  - review.additionalNotes
+requiredFieldIds: []
+requiredCheckboxIds: []
+constraints:
+  - at-least-one-verification-evidence-state
+matchRules:
+  paths:
+    - LICENSE
+    - LICENSE.*
+    - NOTICE
+    - NOTICE.*
+    - CODEOWNERS
+    - .editorconfig
+    - .gitattributes
+    - .gitignore
+  extensions: []
+suggestedTitleTypes:
+  - chore
