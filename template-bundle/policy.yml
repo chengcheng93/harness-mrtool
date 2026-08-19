@@ -1,0 +1,41 @@
+policySchema: 1
+labels:
+  categories:
+    week:
+      match: "^week::"
+      required: true
+      max: 1
+    type:
+      match: "^type::"
+      required: true
+      max: 1
+    priority:
+      match: "^priority::"
+      required: true
+      max: 1
+    status:
+      match: "^status::"
+      required: true
+      max: 1
+  lifecycle:
+    statusCategory: status
+    expectedNames:
+      draft: "status::doing"
+      ready: "status::review"
+      merge: "status::review"
+title:
+  typeRegistry: "registries/fields.json#titleTypes"
+  typeLabelCompatibility:
+    feat: "^type::feature$"
+    fix: "^type::bug$"
+    docs: "^type::doc$"
+    test: "^type::test$"
+    refactor: "^type::refactor$"
+    perf: "^type::performance$"
+    build: "^type::build$"
+    ci: "^type::ci$"
+    chore: "^type::chore$"
+review:
+  draftMinimumReviewers: 0
+  readyMinimumReviewers: 1
+  highRiskMinimumReviewers: 2
