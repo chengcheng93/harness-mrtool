@@ -6,14 +6,21 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 
+
 // @ts-expect-error The packaging helper intentionally has no declaration file.
 import { packagePortableRelease, validateReleaseArchive } from "../../scripts/package-portable.mjs";
+
 
 const run = promisify(execFile);
 const repositoryRoot = resolve(import.meta.dirname, "../..");
 const scripts = resolve(repositoryRoot, "scripts");
 
-test("PowerShell installer entrypoints parse without executing", async () => {
+
+test("PowerShell installer entrypoints parse without executing", async (t) => {
+  if (process.platform !== "win32") {
+    t.skip("PowerShell syntax gate runs on Windows");
+    return;
+  }
   for (const name of ["install.ps1", "uninstall.ps1", "repair.ps1"]) {
     const path = join(scripts, name);
     const escaped = path.replaceAll("'", "''");
@@ -24,6 +31,7 @@ test("PowerShell installer entrypoints parse without executing", async () => {
     });
   }
 });
+
 
 test("installers pin the repository and enforce bounded verified extraction", async () => {
   const windows = await readFile(join(scripts, "install.ps1"), "utf8");
@@ -38,6 +46,7 @@ test("installers pin the repository and enforce bounded verified extraction", as
   assert.doesNotMatch(windows, /Expand-Archive|Invoke-Expression/u);
   assert.doesNotMatch(portable, /\beval\b|curl[^\n]*\|[^\n]*(?:sh|bash)/u);
 });
+
 
 test("POSIX installer creates a missing parent before canonicalizing the destination", async () => {
   const portable = await readFile(join(scripts, "install.sh"), "utf8");
@@ -55,6 +64,7 @@ test("POSIX installer creates a missing parent before canonicalizing the destina
   );
 });
 
+
 test("POSIX installer bounds archive expansion before extraction", async () => {
   const portable = await readFile(join(scripts, "install.sh"), "utf8");
   assert.match(portable, /MAX_ENTRY_BYTES[\s\S]*MAX_ENTRY_BYTES/u);
@@ -71,6 +81,7 @@ test("POSIX installer bounds archive expansion before extraction", async () => {
   );
 });
 
+
 test("uninstall and repair require the manager-owned installation marker", async () => {
   const uninstall = await readFile(join(scripts, "uninstall.ps1"), "utf8");
   const repair = await readFile(join(scripts, "repair.ps1"), "utf8");
@@ -81,6 +92,7 @@ test("uninstall and repair require the manager-owned installation marker", async
   }
   assert.match(repair, /self-update\s+status/u);
 });
+
 
 test("release archive validation rejects tampering and packaging refuses overwrite", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "harness-installer-contract-"));
