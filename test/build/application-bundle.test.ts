@@ -5,15 +5,19 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 
+
 import { build } from "esbuild";
+
 
 // @ts-expect-error The build helper intentionally has no declaration file.
 import { createApplicationBuildOptions } from "../../scripts/build.mjs";
 import { canonicalizeJson } from "../../src/contracts/jcs.ts";
 import { runProcess } from "../helpers/process.ts";
 
+
 const repositoryRoot = resolve(import.meta.dirname, "../..");
 const templateBundlePath = resolve(repositoryRoot, "template-bundle");
+
 
 test("application bundle executes Bundle validation without external modules", async (context) => {
   const outputDirectory = mkdtempSync(join(tmpdir(), "harness-app-bundle-"));
@@ -24,6 +28,7 @@ test("application bundle executes Bundle validation without external modules", a
     outfile: outputPath,
     logLevel: "silent",
   });
+
 
   const result = runProcess(
     process.execPath,
@@ -81,6 +86,7 @@ test("application bundle executes Bundle validation without external modules", a
   assert.equal(result.stdout.trimEnd().split(/\r?\n/u).length, 1, diagnostic);
 });
 
+
 test("application bundle exposes verified local commands and atomic template export", async (context) => {
   const outputDirectory = mkdtempSync(join(tmpdir(), "harness-app-commands-"));
   context.after(() => rmSync(outputDirectory, { recursive: true, force: true }));
@@ -91,11 +97,12 @@ test("application bundle exposes verified local commands and atomic template exp
     logLevel: "silent",
   });
 
+
   for (const [arguments_, expectedCommand] of [
-    [["version", "--output", "json"], "version"],
-    [["profiles", "list", "--output", "json"], "profiles.list"],
-    [["schema", "show", "--output", "json"], "schema.show"],
-    [["template", "show", "--output", "json"], "template.show"],
+    [["version", "--no-update", "--output", "json"], "version"],
+    [["profiles", "list", "--no-update", "--output", "json"], "profiles.list"],
+    [["schema", "show", "--no-update", "--output", "json"], "schema.show"],
+    [["template", "show", "--no-update", "--output", "json"], "template.show"],
   ] as const) {
     const result = runProcess(process.execPath, [outputPath, ...arguments_], {
       cwd: outputDirectory,
@@ -114,11 +121,13 @@ test("application bundle exposes verified local commands and atomic template exp
     assert.equal(result.stdout.trimEnd().split(/\r?\n/u).length, 1, diagnostic);
   }
 
+
   const destination = resolve(outputDirectory, "Docs.md");
   const exported = runProcess(process.execPath, [
     outputPath,
     "template",
     "export",
+    "--no-update",
     "--profile",
     "docs",
     "--destination",
@@ -132,10 +141,12 @@ test("application bundle exposes verified local commands and atomic template exp
   assert.equal(existsSync(destination), true, diagnostic);
   assert.match(readFileSync(destination, "utf8"), /^## 1\. Changes$/mu);
 
+
   const noOverwrite = runProcess(process.execPath, [
     outputPath,
     "template",
     "export",
+    "--no-update",
     "--profile",
     "docs",
     "--destination",
