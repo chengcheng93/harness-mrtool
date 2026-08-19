@@ -16,6 +16,8 @@ import { resolve } from "node:path";
 import test from "node:test";
 
 
+
+
 import { isToolError, ToolError } from "../../src/contracts/errors.ts";
 import { canonicalizeJson, sha256Utf8 } from "../../src/contracts/jcs.ts";
 import {
@@ -36,13 +38,19 @@ import {
 } from "../helpers/signing.ts";
 
 
+
+
 const allowTestAcl = { verify: async (_path: string): Promise<void> => undefined };
 const allowTestVerification = { verify: async (_snapshot: ReleaseSetSnapshot): Promise<void> => undefined };
+
+
 
 
 function sha256(bytes: Uint8Array): string {
   return sha256Utf8(new TextDecoder().decode(bytes));
 }
+
+
 
 
 function record(overrides: Partial<ReleaseSetRecord> = {}): ReleaseSetRecord {
@@ -68,6 +76,8 @@ function record(overrides: Partial<ReleaseSetRecord> = {}): ReleaseSetRecord {
 }
 
 
+
+
 function snapshot(overrides: {
   readonly record?: Partial<ReleaseSetRecord>;
   readonly cliBytes?: Uint8Array;
@@ -84,6 +94,8 @@ function snapshot(overrides: {
     receiptBytes,
   };
 }
+
+
 
 
 async function removeFixtureDirectory(directory: string): Promise<void> {
@@ -108,6 +120,7 @@ async function removeFixtureDirectory(directory: string): Promise<void> {
   await rm(directory, { recursive: true, force: true });
 }
 
+
 async function fixture(t: { after(callback: () => void | Promise<void>): void }): Promise<{
   readonly directory: string;
   readonly cache: UpdateCache;
@@ -123,9 +136,13 @@ async function fixture(t: { after(callback: () => void | Promise<void>): void })
 }
 
 
+
+
 function securityFailure(error: unknown): boolean {
   return isToolError(error, "UPDATE_SECURITY_ERROR");
 }
+
+
 
 
 function verifiedChannelSecurity(
@@ -192,6 +209,8 @@ function verifiedChannelSecurity(
 }
 
 
+
+
 test("exports the one exact frozen release-set record validator", () => {
   const input = record();
   const validated = validateReleaseSetRecord(input);
@@ -202,6 +221,8 @@ test("exports the one exact frozen release-set record validator", () => {
 });
 
 
+
+
 test("release records reject numeric prerelease leading zeroes", () => {
   assert.throws(
     () => validateReleaseSetRecord(record({ cliVersion: "1.0.0-01" })),
@@ -209,6 +230,8 @@ test("release records reject numeric prerelease leading zeroes", () => {
   );
   assert.doesNotThrow(() => validateReleaseSetRecord(record({ cliVersion: "1.0.0-rc.1+build.7" })));
 });
+
+
 
 
 test("release records reject platform device names used as cache directories", () => {
@@ -225,9 +248,13 @@ test("release records reject platform device names used as cache directories", (
 });
 
 
+
+
 test("stores one canonical active record and returns locally verified snapshots", async (t) => {
   const { cache } = await fixture(t);
   const input = snapshot();
+
+
 
 
   const stored = await cache.storeVerifiedReleaseSet(input);
@@ -238,6 +265,8 @@ test("stores one canonical active record and returns locally verified snapshots"
   assert.deepEqual(stored.receiptBytes, input.receiptBytes);
 
 
+
+
   const pointer = await readFile(cache.activeRecordPath, "utf8");
   assert.equal(pointer, `${canonicalizeJson(input.record)}\n`);
   assert.equal((await lstat(stored.releaseDirectory)).isDirectory(), true);
@@ -246,12 +275,16 @@ test("stores one canonical active record and returns locally verified snapshots"
   assert.equal((await lstat(stored.receiptPath)).isFile(), true);
 
 
+
+
   const loaded = await cache.loadLastKnownGood();
   assert.deepEqual(loaded.record, input.record);
   assert.deepEqual(loaded.cliBytes, input.cliBytes);
   assert.deepEqual(loaded.templateBytes, input.templateBytes);
   assert.deepEqual(loaded.receiptBytes, input.receiptBytes);
 });
+
+
 
 
 test("passes only the four-field release snapshot to the verifier on reads", async (t) => {
@@ -278,8 +311,12 @@ test("passes only the four-field release snapshot to the verifier on reads", asy
 });
 
 
+
+
 test("returns null only for a genuinely empty bootstrap cache", async (t) => {
   const { cache } = await fixture(t);
+
+
 
 
   assert.equal(await cache.loadLastKnownGoodOrNull(), null);
@@ -288,6 +325,8 @@ test("returns null only for a genuinely empty bootstrap cache", async (t) => {
   assert.notEqual(loaded, null);
   assert.deepEqual(loaded?.record, stored.record);
 });
+
+
 
 
 test("never presents a self-consistent but unverified release as LKG", async (t) => {
@@ -308,13 +347,19 @@ test("never presents a self-consistent but unverified release as LKG", async (t)
 });
 
 
+
+
 test("requires complete byte snapshots whose hashes match the canonical record", async (t) => {
   const { cache } = await fixture(t);
   const input = snapshot({ cliBytes: new TextEncoder().encode("different cli\n") });
 
 
+
+
   await assert.rejects(cache.storeVerifiedReleaseSet(input), securityFailure);
   await assert.rejects(lstat(cache.activeRecordPath), /ENOENT/u);
+
+
 
 
   const malformed = {
@@ -325,6 +370,8 @@ test("requires complete byte snapshots whose hashes match the canonical record",
 });
 
 
+
+
 test("rejects traversal, duplicate transaction publication, and noncanonical record bytes", async (t) => {
   const { cache } = await fixture(t);
   await assert.rejects(
@@ -333,6 +380,8 @@ test("rejects traversal, duplicate transaction publication, and noncanonical rec
   );
   await cache.storeVerifiedReleaseSet(snapshot());
   await assert.rejects(cache.storeVerifiedReleaseSet(snapshot()), securityFailure);
+
+
 
 
   const noncanonical = snapshot();
@@ -346,9 +395,13 @@ test("rejects traversal, duplicate transaction publication, and noncanonical rec
 });
 
 
+
+
 test("independent cache writers serialize through the shared update lock", async (t) => {
   const directory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-cache-lock-"));
-  t.after(async () => rm(directory, { recursive: true, force: true }));
+  t.after(async () => removeFixtureDirectory(directory));
+
+
 
 
   let entered = 0;
@@ -380,6 +433,8 @@ test("independent cache writers serialize through the shared update lock", async
   });
 
 
+
+
   const firstWrite = first.storeVerifiedReleaseSet(snapshot({
     record: { transactionId: "tx-lock-a", releaseSetId: "stable-lock-a", manifestSequence: 51 },
   }));
@@ -397,10 +452,14 @@ test("independent cache writers serialize through the shared update lock", async
 });
 
 
+
+
 test("quarantines a corrupt active pointer instead of treating it as an empty cache", async (t) => {
   const { cache } = await fixture(t);
   await mkdir(cache.cacheDirectory, { recursive: true });
   await writeFile(cache.activeRecordPath, "{not-json\n", "utf8");
+
+
 
 
   await assert.rejects(cache.loadLastKnownGood(), securityFailure);
@@ -408,6 +467,8 @@ test("quarantines a corrupt active pointer instead of treating it as an empty ca
   assert.equal(entries.some((entry) => entry.startsWith("active-release-set.json.corrupt.")), true);
   await assert.rejects(lstat(cache.activeRecordPath), /ENOENT/u);
 });
+
+
 
 
 test("never treats a corrupt active pointer as an empty bootstrap cache", async (t) => {
@@ -416,10 +477,14 @@ test("never treats a corrupt active pointer as an empty bootstrap cache", async 
   await writeFile(cache.activeRecordPath, "{not-json\n", "utf8");
 
 
+
+
   await assert.rejects(cache.loadLastKnownGoodOrNull(), securityFailure);
   const entries = await readdir(cache.cacheDirectory);
   assert.equal(entries.some((entry) => entry.startsWith("active-release-set.json.corrupt.")), true);
 });
+
+
 
 
 test("bounds pointer reads before parsing and isolates an oversized pointer", async (t) => {
@@ -428,10 +493,14 @@ test("bounds pointer reads before parsing and isolates an oversized pointer", as
   await writeFile(cache.activeRecordPath, "{" + "x".repeat(MAX_CACHE_POINTER_BYTES) + "}", "utf8");
 
 
+
+
   await assert.rejects(cache.loadLastKnownGood(), securityFailure);
   const entries = await readdir(cache.cacheDirectory);
   assert.equal(entries.some((entry) => entry.startsWith("active-release-set.json.corrupt.")), true);
 });
+
+
 
 
 test("rejects duplicate JSON pointer keys and quarantines the pointer", async (t) => {
@@ -440,11 +509,15 @@ test("rejects duplicate JSON pointer keys and quarantines the pointer", async (t
   await writeFile(cache.activeRecordPath, '{"cacheVersion":1,"cacheVersion":1}\n', "utf8");
 
 
+
+
   await assert.rejects(cache.loadLastKnownGood(), securityFailure);
   const entries = await readdir(cache.cacheDirectory);
   assert.equal(entries.some((entry) => entry.startsWith("active-release-set.json.corrupt.")), true);
   await assert.rejects(lstat(cache.activeRecordPath), /ENOENT/u);
 });
+
+
 
 
 test("rejects an active pointer symlink without reading or changing its target", async (t) => {
@@ -463,11 +536,15 @@ test("rejects an active pointer symlink without reading or changing its target",
   }
 
 
+
+
   await assert.rejects(cache.loadLastKnownGood(), securityFailure);
   assert.equal(await readFile(outside, "utf8"), "sentinel\n");
   const entries = await readdir(cache.cacheDirectory);
   assert.equal(entries.some((entry) => entry.startsWith("active-release-set.json.corrupt.")), true);
 });
+
+
 
 
 test("detects a tampered read-only release directory and quarantines it", async (t) => {
@@ -477,22 +554,31 @@ test("detects a tampered read-only release directory and quarantines it", async 
   await writeFile(stored.cliPath, "tampered\n", "utf8");
 
 
+
+
   await assert.rejects(cache.loadLastKnownGood(), securityFailure);
   const entries = await readdir(cache.releaseRoot);
   assert.equal(entries.some((entry) => entry.startsWith(`${stored.record.transactionId}.corrupt.`)), true);
 });
+
+
 
 
 test("bounds release-directory enumeration and quarantines unexpected entries", async (t) => {
   const { cache } = await fixture(t);
   const stored = await cache.storeVerifiedReleaseSet(snapshot());
+  await chmod(stored.releaseDirectory, 0o700);
   await writeFile(resolve(stored.releaseDirectory, "unexpected.tmp"), "unexpected\n", "utf8");
+
+
 
 
   await assert.rejects(cache.loadLastKnownGood(), securityFailure);
   const entries = await readdir(cache.releaseRoot);
   assert.equal(entries.some((entry) => entry.startsWith(`${stored.record.transactionId}.corrupt.`)), true);
 });
+
+
 
 
 test("rejects a release directory replaced with a symbolic link without touching its target", async (t) => {
@@ -515,9 +601,13 @@ test("rejects a release directory replaced with a symbolic link without touching
   }
 
 
+
+
   await assert.rejects(cache.loadLastKnownGood(), securityFailure);
   assert.equal((await lstat(outside)).isDirectory(), true);
 });
+
+
 
 
 test("fails closed when the initialized release root is replaced before a write", async (t) => {
@@ -542,12 +632,16 @@ test("fails closed when the initialized release root is replaced before a write"
   }
 
 
+
+
   await assert.rejects(
     cache.storeVerifiedReleaseSet(snapshot({ record: { transactionId: "tx-43", manifestSequence: 43 } })),
     securityFailure,
   );
   assert.deepEqual(await readdir(outside), []);
 });
+
+
 
 
 test("derives writesBlocked only from a verified manifest security projection", async (t) => {
@@ -565,8 +659,12 @@ test("derives writesBlocked only from a verified manifest security projection", 
   };
 
 
+
+
   const project = (manifest: VerifiedManifestSecurityView["manifest"]["security"]): VerifiedManifestSecurityView =>
     projectVerifiedManifestSecurity(verifiedChannelSecurity(manifest));
+
+
 
 
   const allowed = await cache.loadLastKnownGood({ verifiedManifest: project(baseManifest.security) });
@@ -590,12 +688,16 @@ test("derives writesBlocked only from a verified manifest security projection", 
   assert.deepEqual(revoked.writeBlockReasons, ["active-release-set-revoked"]);
 
 
+
+
   const minimum = await cache.loadLastKnownGood({
     verifiedManifest: project({ ...baseManifest.security, minimumAllowedCliVersion: "2.0.0" }),
   });
   assert.equal(minimum.writesBlocked, true);
   assert.deepEqual(minimum.writeBlockReasons, ["active-cli-version-below-minimum"]);
 });
+
+
 
 
 test("preserves the active pointer when a release read reports transient I/O", async (t) => {
@@ -624,6 +726,8 @@ test("preserves the active pointer when a release read reports transient I/O", a
   const entries = await readdir(directory);
   assert.equal(entries.some((entry) => entry.includes(".corrupt.")), false);
 });
+
+
 
 
 test("failed pointer replacement leaves the previous active tuple intact", async (t) => {
@@ -657,6 +761,8 @@ test("failed pointer replacement leaves the previous active tuple intact", async
 });
 
 
+
+
 test("a verified orphan release directory requires the explicit staged commit path", async (t) => {
   const { directory } = await fixture(t);
   const base = new UpdateCache({ stateDirectory: directory, windowsAclVerifier: allowTestAcl, verifySnapshot: allowTestVerification });
@@ -681,6 +787,8 @@ test("a verified orphan release directory requires the explicit staged commit pa
   });
   await assert.rejects(crashing.storeVerifiedReleaseSet(next), securityFailure);
   assert.equal((await base.loadLastKnownGood()).record.releaseSetId, "stable-42");
+
+
 
 
   await assert.rejects(base.storeVerifiedReleaseSet(next), securityFailure);
