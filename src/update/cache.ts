@@ -13,7 +13,9 @@ import {
 } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
+
 import { lt } from "semver";
+
 
 import { canonicalizeJson, copyJsonValue } from "../contracts/jcs.ts";
 import { ToolError } from "../contracts/errors.ts";
@@ -30,6 +32,7 @@ import type { ProcessLockLease, ProcessLockProvider } from "../platform/process-
 import { isVerifiedChannelManifest, type VerifiedChannelManifest } from "./manifest.ts";
 import { requireCanonicalSemVer, updateSecurityError } from "./envelope.ts";
 
+
 /** Maximum canonical active-pointer bytes accepted from disk. */
 export const MAX_CACHE_POINTER_BYTES = 64 * 1024;
 /** The CLI asset cap is shared with the signed channel contract. */
@@ -38,6 +41,7 @@ export const MAX_CACHE_CLI_BYTES = 256 * 1024 * 1024;
 export const MAX_CACHE_TEMPLATE_BYTES = 32 * 1024 * 1024;
 /** Signed receipt envelopes are bounded by the channel envelope cap. */
 export const MAX_CACHE_RECEIPT_BYTES = 256 * 1024;
+
 
 const CACHE_VERSION = 1 as const;
 const RECORD_TYPE = "active-release-set" as const;
@@ -53,6 +57,7 @@ const SHA256 = /^[a-f0-9]{64}$/u;
 const RELEASE_SET_ID = /^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$/u;
 const TRANSACTION_ID = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,126}[A-Za-z0-9])?$/u;
 const WINDOWS_DEVICE_NAME = /^(?:con|prn|aux|nul|clock\$|com[1-9]|lpt[1-9])(?:\..*)?$/iu;
+
 
 const RECORD_FIELDS = [
   "cacheVersion",
@@ -70,6 +75,7 @@ const RECORD_FIELDS = [
   "receiptSha256",
 ] as const;
 
+
 const SNAPSHOT_FIELDS = ["record", "cliBytes", "templateBytes", "receiptBytes"] as const;
 const RELEASE_FILES = [CLI_NAME, TEMPLATE_NAME, RECEIPT_NAME] as const;
 const SORTED_RELEASE_FILES = [...RELEASE_FILES].sort();
@@ -77,7 +83,9 @@ const MAX_POLICY_ITEMS = 1_024;
 const READ_ONLY_FLAGS = constants.O_RDONLY | ((constants as { readonly O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0);
 const verifiedSecurityViews = new WeakSet<object>();
 
+
 type ReleaseFileName = (typeof RELEASE_FILES)[number];
+
 
 export interface ReleaseSetRecord {
   readonly cacheVersion: 1;
@@ -95,6 +103,7 @@ export interface ReleaseSetRecord {
   readonly receiptSha256: string;
 }
 
+
 export interface ReleaseSetSnapshot {
   readonly record: ReleaseSetRecord;
   readonly cliBytes: Uint8Array;
@@ -102,9 +111,11 @@ export interface ReleaseSetSnapshot {
   readonly receiptBytes: Uint8Array;
 }
 
+
 export interface CacheFaultInjector {
   hit(point: string): void | Promise<void>;
 }
+
 
 export interface UpdateCacheOptions {
   readonly stateDirectory: string;
@@ -117,9 +128,11 @@ export interface UpdateCacheOptions {
   readonly lockTimeoutMs?: number;
 }
 
+
 export interface ReleaseSetSnapshotVerifier {
   verify(snapshot: ReleaseSetSnapshot): void | Promise<void>;
 }
+
 
 export interface VerifiedManifestSecurityView {
   readonly manifest: {
@@ -138,12 +151,15 @@ export interface VerifiedManifestSecurityView {
   };
 }
 
+
 export type VerifiedManifestInput = VerifiedChannelManifest | VerifiedManifestSecurityView;
+
 
 export type WriteBlockReason =
   | "active-cli-version-below-minimum"
   | "active-cli-version-revoked"
   | "active-release-set-revoked";
+
 
 export interface LoadedReleaseSet extends ReleaseSetSnapshot {
   readonly releaseDirectory: string;
@@ -154,15 +170,19 @@ export interface LoadedReleaseSet extends ReleaseSetSnapshot {
   readonly writeBlockReasons: readonly WriteBlockReason[];
 }
 
+
 export interface StoredReleaseSet extends LoadedReleaseSet {}
+
 
 function securityFailure(): ToolError<"UPDATE_SECURITY_ERROR"> {
   return updateSecurityError("envelope is invalid");
 }
 
+
 function fail(): never {
   throw securityFailure();
 }
+
 
 function hasExactOwnFields(value: object, fields: readonly string[]): boolean {
   if (Object.getOwnPropertySymbols(value).length !== 0) return false;
@@ -179,6 +199,7 @@ function hasExactOwnFields(value: object, fields: readonly string[]): boolean {
   });
 }
 
+
 function plainRecord(value: unknown, fields: readonly string[]): Record<string, unknown> {
   if (
     value === null ||
@@ -192,12 +213,14 @@ function plainRecord(value: unknown, fields: readonly string[]): Record<string, 
   return value as Record<string, unknown>;
 }
 
+
 function boundedInteger(value: unknown, minimum: number, maximum: number): number {
   if (!Number.isSafeInteger(value) || (value as number) < minimum || (value as number) > maximum) {
     return fail();
   }
   return value as number;
 }
+
 
 function strictSemver(value: unknown): string {
   if (typeof value !== "string" || value.length > 128) return fail();
@@ -208,13 +231,16 @@ function strictSemver(value: unknown): string {
   }
 }
 
+
 function safeDirectoryIdentifier(value: string): boolean {
   return !/[. ]$/u.test(value) && !WINDOWS_DEVICE_NAME.test(value);
 }
 
+
 function sha(value: Uint8Array): string {
   return createHash("sha256").update(value).digest("hex");
 }
+
 
 function bytes(value: unknown, maximum: number): Uint8Array {
   if (!(value instanceof Uint8Array) || value.byteLength === 0 || value.byteLength > maximum) {
@@ -222,6 +248,7 @@ function bytes(value: unknown, maximum: number): Uint8Array {
   }
   return Uint8Array.from(value);
 }
+
 
 function verifierSnapshot(value: ReleaseSetSnapshot): ReleaseSetSnapshot {
   // Keep the verifier contract independent from cache implementation paths and
@@ -233,6 +260,7 @@ function verifierSnapshot(value: ReleaseSetSnapshot): ReleaseSetSnapshot {
     receiptBytes: Uint8Array.from(value.receiptBytes),
   });
 }
+
 
 export function validateReleaseSetRecord(value: unknown): ReleaseSetRecord {
   const item = plainRecord(value, RECORD_FIELDS);
@@ -277,6 +305,7 @@ export function validateReleaseSetRecord(value: unknown): ReleaseSetRecord {
   });
 }
 
+
 function validateSnapshot(value: unknown): ReleaseSetSnapshot {
   const item = plainRecord(value, SNAPSHOT_FIELDS);
   const record = validateReleaseSetRecord(item.record);
@@ -293,6 +322,7 @@ function validateSnapshot(value: unknown): ReleaseSetSnapshot {
   return Object.freeze({ record, cliBytes, templateBytes, receiptBytes });
 }
 
+
 function canonicalRecord(record: ReleaseSetRecord): string {
   try {
     return `${canonicalizeJson(record)}\n`;
@@ -302,16 +332,18 @@ function canonicalRecord(record: ReleaseSetRecord): string {
   }
 }
 
+
 function samePath(left: string, right: string): boolean {
-  return process.platform === "win32"
-    ? left.toLowerCase() === right.toLowerCase()
-    : left === right;
+  if (process.platform === "win32") return true;
+  return left === right;
 }
+
 
 function isWithin(root: string, candidate: string): boolean {
   const relativePath = relative(root, candidate);
   return relativePath === "" || (relativePath !== ".." && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath));
 }
+
 
 function safeChild(root: string, child: string): string {
   const path = resolve(root, child);
@@ -319,13 +351,16 @@ function safeChild(root: string, child: string): string {
   return path;
 }
 
+
 function randomSuffix(): string {
   return randomBytes(12).toString("hex");
 }
 
+
 function identityEqual(left: BigIntStats, right: BigIntStats): boolean {
   return left.dev === right.dev && left.ino === right.ino && left.size === right.size;
 }
+
 
 async function ignoreUnsupportedDirectorySync(handle: Awaited<ReturnType<typeof open>>): Promise<void> {
   try {
@@ -335,6 +370,7 @@ async function ignoreUnsupportedDirectorySync(handle: Awaited<ReturnType<typeof 
     if (code !== "EINVAL" && code !== "EPERM" && code !== "ENOTSUP") throw error;
   }
 }
+
 
 async function syncDirectory(path: string): Promise<void> {
   let handle: Awaited<ReturnType<typeof open>> | undefined;
@@ -348,6 +384,7 @@ async function syncDirectory(path: string): Promise<void> {
     await handle?.close().catch(() => undefined);
   }
 }
+
 
 async function readBounded(
   path: string,
@@ -364,6 +401,7 @@ async function readBounded(
     return fail();
   }
   if (before.isSymbolicLink() || !before.isFile() || !samePath(canonical, path)) return fail();
+
 
   let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
@@ -395,6 +433,7 @@ async function readBounded(
   }
 }
 
+
 async function assertPlainDirectory(path: string): Promise<BigIntStats> {
   let metadata: BigIntStats;
   let canonical: string;
@@ -407,6 +446,7 @@ async function assertPlainDirectory(path: string): Promise<BigIntStats> {
   if (metadata.isSymbolicLink() || !metadata.isDirectory() || !samePath(canonical, path)) return fail();
   return metadata;
 }
+
 
 async function assertReadOnly(path: string, directory: boolean): Promise<void> {
   const metadata = await assertPlainDirectory(path).catch(async () => {
@@ -423,6 +463,7 @@ async function assertReadOnly(path: string, directory: boolean): Promise<void> {
   if (!directory && !metadata.isFile()) return fail();
   if ((Number(metadata.mode) & 0o222) !== 0) return fail();
 }
+
 
 async function boundedReleaseEntries(path: string): Promise<string[]> {
   let directory: Awaited<ReturnType<typeof opendir>> | undefined;
@@ -441,6 +482,7 @@ async function boundedReleaseEntries(path: string): Promise<string[]> {
     await directory?.close().catch(() => undefined);
   }
 }
+
 
 async function atomicWrite(
   path: string,
@@ -476,6 +518,7 @@ async function atomicWrite(
   }
 }
 
+
 async function quarantine(path: string, parent: string): Promise<string> {
   await assertPlainDirectory(parent);
   const destination = `${path}.corrupt.${randomSuffix()}`;
@@ -487,6 +530,7 @@ async function quarantine(path: string, parent: string): Promise<string> {
     return fail();
   }
 }
+
 
 function normalizeSecurityView(manifest: Record<string, unknown>): VerifiedManifestSecurityView {
   const releaseSet = manifest.releaseSet;
@@ -507,12 +551,14 @@ function normalizeSecurityView(manifest: Record<string, unknown>): VerifiedManif
     typeof policy.minimumAllowedCliVersion !== "string"
   ) return fail();
 
+
   // Keep the security projection on the same canonical SemVer grammar as the
   // signed channel and release record validators (numeric prerelease labels
   // such as `-01` are intentionally rejected).
   const cli = strictSemver(release.cli);
   const templates = strictSemver(release.templates);
   const minimumAllowedCliVersion = strictSemver(policy.minimumAllowedCliVersion);
+
 
   const revokedCliVersions = securityStringArray(policy.revokedCliVersions, (item) => {
     try {
@@ -542,6 +588,7 @@ function normalizeSecurityView(manifest: Record<string, unknown>): VerifiedManif
   return Object.freeze({ manifest: frozenManifest });
 }
 
+
 function securityStringArray(value: unknown, validator: (item: string) => boolean): readonly string[] {
   if (!Array.isArray(value) || value.length > MAX_POLICY_ITEMS || Object.getPrototypeOf(value) !== Array.prototype) {
     return fail();
@@ -558,6 +605,7 @@ function securityStringArray(value: unknown, validator: (item: string) => boolea
   return Object.freeze([...copy] as string[]);
 }
 
+
 function securityView(input: VerifiedManifestInput): VerifiedManifestSecurityView {
   if (input === null || typeof input !== "object" || Array.isArray(input)) return fail();
   if (verifiedSecurityViews.has(input)) {
@@ -568,6 +616,7 @@ function securityView(input: VerifiedManifestInput): VerifiedManifestSecurityVie
     ) return fail();
     return normalizeSecurityView(candidate.manifest as Record<string, unknown>);
   }
+
 
   // A full VerifiedChannelManifest is produced by verifyChannelEnvelope. Its
   // private runtime brand is the trust boundary; shape checks alone are forgeable.
@@ -589,6 +638,7 @@ function securityView(input: VerifiedManifestInput): VerifiedManifestSecurityVie
   return normalizeSecurityView(manifest as Record<string, unknown>);
 }
 
+
 function writeBlocks(
   record: ReleaseSetRecord,
   manifest: VerifiedManifestSecurityView | undefined,
@@ -608,10 +658,12 @@ function writeBlocks(
   return Object.freeze(reasons);
 }
 
+
 export class UpdateCache {
   readonly cacheDirectory!: string;
   readonly releaseRoot!: string;
   readonly activeRecordPath!: string;
+
 
   private readonly windowsAclVerifier: WindowsAclVerifier | undefined;
   private readonly faultInjector: CacheFaultInjector | undefined;
@@ -619,6 +671,7 @@ export class UpdateCache {
   private readonly lockProvider: ProcessLockProvider | undefined;
   private readonly lockTimeoutMs: number | undefined;
   private ready: Promise<void> | undefined;
+
 
   constructor(options: UpdateCacheOptions) {
     if (typeof options.stateDirectory !== "string" || options.stateDirectory.trim() === "") return fail();
@@ -633,6 +686,7 @@ export class UpdateCache {
     this.lockTimeoutMs = options.lockTimeoutMs;
   }
 
+
   private async withOperationLock<T>(
     lease: ProcessLockLease | undefined,
     callback: (heldLease: ProcessLockLease) => Promise<T>,
@@ -646,6 +700,7 @@ export class UpdateCache {
       ...(this.lockTimeoutMs === undefined ? {} : { timeoutMs: this.lockTimeoutMs }),
     });
   }
+
 
   private async ensureReady(): Promise<void> {
     if (this.ready === undefined) {
@@ -682,9 +737,11 @@ export class UpdateCache {
     await assertPlainDirectory(this.releaseRoot);
   }
 
+
   private releaseDirectory(record: ReleaseSetRecord): string {
     return safeChild(this.releaseRoot, record.transactionId);
   }
+
 
   private async readRecord(): Promise<ReleaseSetRecord> {
     let bytes: Uint8Array;
@@ -719,6 +776,7 @@ export class UpdateCache {
     }
     return record;
   }
+
 
   private async readRelease(record: ReleaseSetRecord): Promise<ReleaseSetSnapshot & {
     readonly releaseDirectory: string;
@@ -764,6 +822,7 @@ export class UpdateCache {
     };
   }
 
+
   /** Remove only tool-owned staging directories while the activation lock is held. */
   private async cleanupStaleStagingDirectoriesUnlocked(): Promise<void> {
     await this.ensureReady();
@@ -797,12 +856,14 @@ export class UpdateCache {
     }
   }
 
+
   async cleanupStaleStagingDirectories(lease?: ProcessLockLease): Promise<void> {
     await this.withOperationLock(lease, async (heldLease) => {
       await this.cleanupStaleStagingDirectoriesUnlocked();
       heldLease.assertHeld();
     });
   }
+
 
   private async storeVerifiedReleaseSetUnlocked(input: ReleaseSetSnapshot): Promise<StoredReleaseSet> {
     await this.ensureReady();
@@ -856,6 +917,7 @@ export class UpdateCache {
     return Object.freeze(result);
   }
 
+
   async storeVerifiedReleaseSet(
     input: ReleaseSetSnapshot,
     lease?: ProcessLockLease,
@@ -866,6 +928,7 @@ export class UpdateCache {
       return result;
     });
   }
+
 
   /** Commit a release directory previously published by a verified store attempt. */
   private async commitStagedReleaseSetUnlocked(input: ReleaseSetRecord): Promise<StoredReleaseSet | null> {
@@ -897,6 +960,7 @@ export class UpdateCache {
     });
   }
 
+
   async commitStagedReleaseSet(
     input: ReleaseSetRecord,
     lease?: ProcessLockLease,
@@ -907,6 +971,7 @@ export class UpdateCache {
       return result;
     });
   }
+
 
   private async loadLastKnownGoodOrNullUnlocked(
     options: { readonly verifiedManifest?: VerifiedManifestInput } = {},
@@ -921,6 +986,7 @@ export class UpdateCache {
     return this.loadLastKnownGoodUnlocked(options);
   }
 
+
   async loadLastKnownGoodOrNull(
     options: { readonly verifiedManifest?: VerifiedManifestInput } = {},
     lease?: ProcessLockLease,
@@ -931,6 +997,7 @@ export class UpdateCache {
       return result;
     });
   }
+
 
   private async loadLastKnownGoodUnlocked(
     options: { readonly verifiedManifest?: VerifiedManifestInput } = {},
@@ -983,6 +1050,7 @@ export class UpdateCache {
     });
   }
 
+
   async loadLastKnownGood(
     options: { readonly verifiedManifest?: VerifiedManifestInput } = {},
     lease?: ProcessLockLease,
@@ -995,13 +1063,16 @@ export class UpdateCache {
   }
 }
 
+
 export function releaseSetRecordJson(record: ReleaseSetRecord): string {
   return canonicalRecord(validateReleaseSetRecord(record));
 }
 
+
 export function releaseSetRecordSha256(record: ReleaseSetRecord): string {
   return sha(new TextEncoder().encode(releaseSetRecordJson(record)));
 }
+
 
 export function projectVerifiedManifestSecurity(
   verified: VerifiedChannelManifest,
