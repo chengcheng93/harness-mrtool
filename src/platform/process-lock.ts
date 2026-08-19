@@ -3,16 +3,20 @@ import { constants } from "node:fs";
 import { chmod, lstat, open, realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 
+
 import { resolveWindowsPowerShellPath } from "./state-path.ts";
+
 
 export interface ProcessLockLease {
   assertHeld(): void;
   release(): Promise<void>;
 }
 
+
 export interface ProcessLockProvider {
   acquire(path: string, timeoutMs: number): Promise<ProcessLockLease>;
 }
+
 
 export class ProcessLockError extends Error {
   constructor(readonly reason: "timeout" | "unsafe" | "unavailable") {
@@ -20,18 +24,22 @@ export class ProcessLockError extends Error {
   }
 }
 
+
 interface LockFileIdentity {
   readonly dev: bigint;
   readonly ino: bigint;
 }
 
+
 const NOFOLLOW = (constants as { readonly O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
+
 
 function samePath(left: string, right: string): boolean {
   const a = resolve(left);
   const b = resolve(right);
   return process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
 }
+
 
 async function lockFileIdentity(path: string): Promise<LockFileIdentity> {
   let item: Awaited<ReturnType<typeof lstat>>;
@@ -43,11 +51,13 @@ async function lockFileIdentity(path: string): Promise<LockFileIdentity> {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") throw error;
     throw new ProcessLockError("unsafe");
   }
-  if (!item.isFile() || item.isSymbolicLink() || !samePath(physical, path)) {
+  if (!item.isFile() || item.isSymbolicLink() ||
+      (process.platform !== "win32" && !samePath(physical, path))) {
     throw new ProcessLockError("unsafe");
   }
   return { dev: item.dev, ino: item.ino };
 }
+
 
 async function prepareLockFile(path: string): Promise<LockFileIdentity> {
   try {
@@ -76,12 +86,14 @@ async function prepareLockFile(path: string): Promise<LockFileIdentity> {
   }
 }
 
+
 async function assertLockIdentity(path: string, expected: LockFileIdentity): Promise<void> {
   const actual = await lockFileIdentity(path);
   if (actual.dev !== expected.dev || actual.ino !== expected.ino) {
     throw new ProcessLockError("unsafe");
   }
 }
+
 
 function waitForHelper(
   child: ChildProcessWithoutNullStreams,
@@ -155,6 +167,7 @@ function waitForHelper(
   });
 }
 
+
 async function acquireWindows(path: string, timeoutMs: number): Promise<ProcessLockLease> {
   const script = [
     "$ErrorActionPreference = 'Stop'",
@@ -181,6 +194,7 @@ async function acquireWindows(path: string, timeoutMs: number): Promise<ProcessL
   return waitForHelper(child, timeoutMs);
 }
 
+
 async function acquireLinux(path: string, timeoutMs: number): Promise<ProcessLockLease> {
   const child = spawn(
     "/usr/bin/flock",
@@ -189,6 +203,7 @@ async function acquireLinux(path: string, timeoutMs: number): Promise<ProcessLoc
   );
   return waitForHelper(child, timeoutMs);
 }
+
 
 export const systemProcessLockProvider: ProcessLockProvider = {
   async acquire(path, timeoutMs) {
