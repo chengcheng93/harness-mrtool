@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
 
+
 import { ToolError } from "../../src/contracts/errors.ts";
 import {
   MAX_HANDOFF_BYTES,
@@ -9,9 +10,13 @@ import {
   type BoundedUpdateHandoffOptions,
 } from "../../src/update/invocation-handoff.ts";
 
+
 const encoder = new TextEncoder();
+const childExecutable = process.platform === "win32" ? "C:\\Program Files\\harness-mrtool\\harness-mrtool.exe" : "/usr/local/bin/harness-mrtool";
+const childCwd = process.platform === "win32" ? "C:\\workspace\\repo" : "/workspace/repo";
 const bytes = (value: string): Uint8Array => encoder.encode(value);
 const sha256 = (value: Uint8Array): string => createHash("sha256").update(value).digest("hex");
+
 
 function options(
   input: AsyncIterable<Uint8Array>,
@@ -20,9 +25,9 @@ function options(
   return {
     input,
     child: {
-      executable: "C:\\Program Files\\harness-mrtool\\harness-mrtool.exe",
+      executable: childExecutable,
       arguments: ["internal", "apply-update"],
-      cwd: "C:\\workspace\\repo",
+      cwd: childCwd,
       environment: { HMR_CHILD_MODE: "1" },
     },
     release: {
@@ -41,6 +46,7 @@ function options(
     ...overrides,
   };
 }
+
 
 test("bounded update handoff consumes stdin once and binds its exact hash", async () => {
   let iteratorCalls = 0;
@@ -66,6 +72,7 @@ test("bounded update handoff consumes stdin once and binds its exact hash", asyn
     },
   }));
 
+
   assert.equal(iteratorCalls, 1);
   assert.equal(result.envelope.inputLength, 7);
   assert.equal(result.envelope.inputSha256, sha256(bytes("request")));
@@ -74,6 +81,7 @@ test("bounded update handoff consumes stdin once and binds its exact hash", asyn
   assert.deepEqual(received?.child.arguments, ["internal", "apply-update"]);
   assert.equal(Object.isFrozen(result.envelope), true);
 });
+
 
 test("bounded update handoff rejects oversized input before spawning a child", async () => {
   let spawned = false;
@@ -89,6 +97,7 @@ test("bounded update handoff rejects oversized input before spawning a child", a
   );
   assert.equal(spawned, false);
 });
+
 
 test("bounded update handoff rejects credential-shaped child arguments and environment", async () => {
   for (const bad of [
@@ -108,6 +117,7 @@ test("bounded update handoff rejects credential-shaped child arguments and envir
     );
   }
 });
+
 
 test("bounded update handoff preserves child output and exit status", async () => {
   const result = await runBoundedUpdateHandoff(options(
