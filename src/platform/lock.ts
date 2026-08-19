@@ -2,6 +2,7 @@ import type { BigIntStats } from "node:fs";
 import { lstat, mkdir, realpath } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
+
 import {
   ProcessLockError,
   systemProcessLockProvider,
@@ -9,15 +10,18 @@ import {
   type ProcessLockProvider,
 } from "./process-lock.ts";
 
+
 export interface UpdateLockOptions {
   readonly timeoutMs?: number;
   readonly provider?: ProcessLockProvider;
 }
 
+
 // Cache mutations may be invoked by the activation transaction while its
 // outer lock is already held.  The binding is kept private to this module so
 // a structurally similar object cannot forge an in-lock capability.
 const activeLeaseRoots = new WeakMap<object, string>();
+
 
 export function assertUpdateLockLease(
   lease: ProcessLockLease,
@@ -33,10 +37,12 @@ export function assertUpdateLockLease(
   lease.assertHeld();
 }
 
+
 function pathKey(path: string): string {
   const normalized = resolve(path);
   return process.platform === "win32" ? normalized.toLowerCase() : normalized;
 }
+
 
 async function assertNoLinkedAncestors(path: string): Promise<void> {
   let current = resolve(path);
@@ -44,7 +50,7 @@ async function assertNoLinkedAncestors(path: string): Promise<void> {
     try {
       const item = await lstat(current);
       const physical = await realpath(current);
-      if (item.isSymbolicLink() || pathKey(physical) !== pathKey(current)) {
+      if (item.isSymbolicLink() || (process.platform !== "win32" && pathKey(physical) !== pathKey(current))) {
         throw new ProcessLockError("unsafe");
       }
     } catch (error) {
@@ -58,6 +64,7 @@ async function assertNoLinkedAncestors(path: string): Promise<void> {
   }
 }
 
+
 async function assertPlainStateDirectory(path: string): Promise<BigIntStats> {
   try {
     const before = await lstat(path, { bigint: true }) as BigIntStats;
@@ -65,7 +72,7 @@ async function assertPlainStateDirectory(path: string): Promise<BigIntStats> {
     const after = await lstat(path, { bigint: true }) as BigIntStats;
     if (before.isSymbolicLink() || !before.isDirectory() || after.isSymbolicLink() ||
         !after.isDirectory() || before.dev !== after.dev || before.ino !== after.ino ||
-        pathKey(physical) !== pathKey(path)) {
+        (process.platform !== "win32" && pathKey(physical) !== pathKey(path))) {
       throw new ProcessLockError("unsafe");
     }
     return before;
@@ -73,6 +80,7 @@ async function assertPlainStateDirectory(path: string): Promise<BigIntStats> {
     throw error instanceof ProcessLockError ? error : new ProcessLockError("unsafe");
   }
 }
+
 
 export async function withUpdateLock<T>(
   stateDirectory: string,
