@@ -1,0 +1,1 @@
+[fix][luban-studio] Preserve é and 中文 text

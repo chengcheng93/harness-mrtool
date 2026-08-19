@@ -1,0 +1,109 @@
+{
+  "schemaVersion": 1,
+  "contextId": "context:render-code-docs",
+  "intent": "ready",
+  "profileIds": ["code", "docs"],
+  "targetBranch": "develop",
+  "title": {
+    "type": "fix",
+    "module": "luban-studio",
+    "titleSummary": "Preserve WebEngine-compatible CSS output"
+  },
+  "changes": {
+    "summary": [
+      "Preserve WebEngine-compatible CSS output.",
+      "Keep the login page renderable in Debug and Release."
+    ],
+    "technicalChanges": [
+      "Run the PostCSS transform during Vite generateBundle.",
+      "Fail closed when Tailwind fallback semantics are incomplete."
+    ],
+    "outOfScope": []
+  },
+  "motivation": {
+    "background": ["Qt WebEngine rejected Tailwind custom property registrations."],
+    "whyNeeded": ["One shared frontend artifact must work in Debug and Release."]
+  },
+  "workItem": { "relation": "related", "iid": 51 },
+  "impact": {
+    "areaIds": ["app", "qa"],
+    "nature": "non-functional",
+    "details": ["Frontend build compatibility only; application APIs remain unchanged."]
+  },
+  "verification": {
+    "items": [
+      {
+        "id": "local-build",
+        "state": "checked",
+        "evidenceKind": "command-output",
+        "command": "npm run build",
+        "result": "Build completed successfully",
+        "evidence": "Local build output captured in the verification log."
+      },
+      {
+        "id": "unit-tests",
+        "state": "checked",
+        "evidenceKind": "command-output",
+        "command": "npm test",
+        "result": "All renderer tests passed",
+        "evidence": "Test runner output captured in the verification log."
+      },
+      {
+        "id": "integration-tests",
+        "state": "pending",
+        "evidenceKind": "pending-reason",
+        "command": null,
+        "result": null,
+        "evidence": "Integration environment is not currently available."
+      },
+      {
+        "id": "core-behavior",
+        "state": "checked",
+        "evidenceKind": "manual-verification",
+        "command": null,
+        "result": "Login page remained renderable",
+        "evidence": "Manual Debug and Release launch verification completed."
+      },
+      {
+        "id": "docs-links-format",
+        "state": "checked",
+        "evidenceKind": "file-inspection",
+        "command": null,
+        "result": "Documentation formatting is valid",
+        "evidence": "Updated design documentation was inspected locally."
+      }
+    ],
+    "acceptanceEvidence": ["Generated HTML contains no incompatible Tailwind registrations."],
+    "knownGaps": []
+  },
+  "documentation": {
+    "itemIds": ["design-documentation"],
+    "details": ["Updated the frontend compatibility design notes."]
+  },
+  "risk": {
+    "level": "medium",
+    "items": ["Future Tailwind output changes can invalidate the structural transform."],
+    "compatibilityImpact": ["Only Tailwind-owned custom property registrations are removed."],
+    "rollbackPlan": ["Revert the compatibility transform and restore the prior frontend artifact."]
+  },
+  "profileFields": {
+    "docs.target-audience": ["Luban Studio maintainers and reviewers."],
+    "docs.content-impact": ["Update compatibility behavior documentation."]
+  },
+  "review": {
+    "reviewerCandidateTokens": ["candidate:reviewer-bob"],
+    "reviewerFocus": ["Review structural PostCSS selection and fallback validation."],
+    "additionalNotes": ["中文内容保持原样。"]
+  },
+  "mergeRequest": {
+    "assigneeCandidateToken": "candidate:assignee-alice",
+    "labelCandidateTokens": [
+      "candidate:label-week",
+      "candidate:label-type",
+      "candidate:label-priority",
+      "candidate:label-status"
+    ],
+    "removeSourceBranch": true,
+    "squash": true
+  }
+}
