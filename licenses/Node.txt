@@ -1,0 +1,8 @@
+Node.js runtime license notice
+
+The Node.js runtime is distributed under the MIT License. The applicable Node.js
+license text and bundled dependency notices are obtained from the exact Node.js
+24.16.0 distribution used by the release workflow and are verified before a
+release is published.
+
+Reference: https://github.com/nodejs/node/blob/v24.16.0/LICENSE
