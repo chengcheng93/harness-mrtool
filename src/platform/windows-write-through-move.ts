@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { lstat } from "node:fs/promises";
 import type { Readable } from "node:stream";
 import { dirname, isAbsolute, resolve } from "node:path";
 
@@ -14,19 +15,53 @@ const DESTINATION_ENVIRONMENT_NAME = "HMRTOOL_MOVE_DESTINATION";
 const POWERSHELL_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-$source = $env:HMRTOOL_MOVE_SOURCE
-$destination = $env:HMRTOOL_MOVE_DESTINATION
-try {
-  [System.IO.File]::Move($source, $destination)
-  [Console]::Out.WriteLine("OK")
-} catch {
-  if (Test-Path -LiteralPath $destination) {
-    [Console]::Out.WriteLine("ERR:183")
-  } else {
-    [Console]::Out.WriteLine("ERR:1")
-  }
+$assemblyName = New-Object Reflection.AssemblyName('HarnessMrtool.NativeMove.Dynamic')
+$assembly = [AppDomain]::CurrentDomain.DefineDynamicAssembly(
+  $assemblyName,
+  [Reflection.Emit.AssemblyBuilderAccess]::Run
+)
+$module = $assembly.DefineDynamicModule('HarnessMrtool.NativeMove.Dynamic')
+$type = $module.DefineType(
+  'HarnessMrtool.NativeMove',
+  [Reflection.TypeAttributes]'Public, Sealed, Abstract'
+)
+$method = $type.DefinePInvokeMethod(
+  'MoveFileExW',
+  'kernel32.dll',
+  [Reflection.MethodAttributes]'Public, Static',
+  [Reflection.CallingConventions]::Standard,
+  [bool],
+  [Type[]]@([string], [string], [uint32]),
+  [Runtime.InteropServices.CallingConvention]::Winapi,
+  [Runtime.InteropServices.CharSet]::Unicode
+)
+$method.SetImplementationFlags(
+  $method.GetMethodImplementationFlags() -bor [Reflection.MethodImplAttributes]::PreserveSig
+)
+$getLastError = $type.DefinePInvokeMethod(
+  'GetLastError',
+  'kernel32.dll',
+  [Reflection.MethodAttributes]'Public, Static',
+  [Reflection.CallingConventions]::Standard,
+  [uint32],
+  [Type[]]@(),
+  [Runtime.InteropServices.CallingConvention]::Winapi,
+  [Runtime.InteropServices.CharSet]::Auto
+)
+$getLastError.SetImplementationFlags(
+  $getLastError.GetMethodImplementationFlags() -bor [Reflection.MethodImplAttributes]::PreserveSig
+)
+$native = $type.CreateType()
+if (-not $native::MoveFileExW(
+  $env:HMRTOOL_MOVE_SOURCE,
+  $env:HMRTOOL_MOVE_DESTINATION,
+  [uint32]8
+)) {
+  $code = $native::GetLastError()
+  [Console]::Out.WriteLine("ERR:$code")
   exit 25
 }
+[Console]::Out.WriteLine("OK")
 `;
 
 export type WindowsWriteThroughMoveFailure = "exists" | "timeout" | "unavailable";
@@ -128,6 +163,17 @@ export function createWindowsWriteThroughMover(
   return Object.freeze({
     async moveNoReplace(sourcePath: string, destinationPath: string): Promise<void> {
       validateMovePaths(sourcePath, destinationPath);
+      if (options.spawnChild === undefined) {
+        try {
+          await lstat(destinationPath);
+          throw new WindowsWriteThroughMoveError("exists");
+        } catch (error) {
+          if (error instanceof WindowsWriteThroughMoveError) throw error;
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+            throw new WindowsWriteThroughMoveError("unavailable");
+          }
+        }
+      }
       let executable: string;
       try {
         executable = options.executablePath ?? resolveWindowsPowerShellPath(environment);
