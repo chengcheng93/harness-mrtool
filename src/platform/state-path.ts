@@ -5,10 +5,16 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 
+
+
 import { ToolError } from "../contracts/errors.ts";
 
 
+
+
 const execFileAsync = promisify(execFile);
+
+
 
 
 export interface WindowsAclVerifier {
@@ -16,9 +22,13 @@ export interface WindowsAclVerifier {
 }
 
 
+
+
 export interface PrivateStateDirectoryOptions {
   readonly windowsAclVerifier?: WindowsAclVerifier;
 }
+
+
 
 
 function stateError(reason: string): ToolError<"INTERNAL_ERROR"> {
@@ -29,6 +39,8 @@ function stateError(reason: string): ToolError<"INTERNAL_ERROR"> {
     safeNextStep: "Inspect or remove the unsafe state path, then retry.",
   });
 }
+
+
 
 
 export function defaultStateDirectory(environment: NodeJS.ProcessEnv = process.env): string {
@@ -44,9 +56,13 @@ export function defaultStateDirectory(environment: NodeJS.ProcessEnv = process.e
 }
 
 
+
+
 function powershellSingleQuoted(value: string): string {
   return `'${value.replaceAll("'", "''")}'`;
 }
+
+
 
 
 export function resolveWindowsPowerShellPath(environment: NodeJS.ProcessEnv = process.env): string {
@@ -61,6 +77,8 @@ export function resolveWindowsPowerShellPath(environment: NodeJS.ProcessEnv = pr
 }
 
 
+
+
 export const systemWindowsAclVerifier: WindowsAclVerifier = {
   async verify(path) {
     const script = [
@@ -72,15 +90,15 @@ export const systemWindowsAclVerifier: WindowsAclVerifier = {
       "$propagation = [System.Security.AccessControl.PropagationFlags]::None",
       "$allow = [System.Security.AccessControl.AccessControlType]::Allow",
       "$rights = [System.Security.AccessControl.FileSystemRights]::FullControl",
-      "$acl = Get-Acl -LiteralPath $path",
+      "$acl = New-Object System.Security.AccessControl.DirectorySecurity",
       "$acl.SetAccessRuleProtection($true, $false)",
-      "foreach ($rule in @($acl.Access)) { $acl.RemoveAccessRuleSpecific($rule) | Out-Null }",
       "foreach ($sid in @($current, $system, $admins)) { $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sid, $rights, $inheritance, $propagation, $allow))) }",
       "Set-Acl -LiteralPath $path -AclObject $acl",
       "$acl = Get-Acl -LiteralPath $path",
-      "$allowed = @($current.Value, [System.Security.Principal.WindowsIdentity]::GetCurrent().Name, $system.Value, $admins.Value, 'NT AUTHORITY\\SYSTEM', 'BUILTIN\\Administrators')",
-      "if ($acl.Owner -notin $allowed) { exit 21 }",
-      "$unsafe = $acl.Access | Where-Object { $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Value -notin $allowed }",
+      "$allowed = @($current.Value, $system.Value, $admins.Value)",
+      "$owner = (New-Object System.Security.Principal.NTAccount($acl.Owner)).Translate([System.Security.Principal.SecurityIdentifier]).Value",
+      "if ($owner -notin $allowed) { exit 21 }",
+      "$unsafe = $acl.Access | Where-Object { $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -notin $allowed }",
       "if ($unsafe) { exit 22 }",
       "if (-not $acl.AreAccessRulesProtected) { exit 23 }",
     ].join("; ");
@@ -95,6 +113,8 @@ export const systemWindowsAclVerifier: WindowsAclVerifier = {
     }
   },
 };
+
+
 
 
 async function assertNoReparseAncestors(path: string): Promise<void> {
@@ -115,6 +135,8 @@ async function assertNoReparseAncestors(path: string): Promise<void> {
     current = parent;
   }
 }
+
+
 
 
 export async function ensurePrivateStateDirectory(
