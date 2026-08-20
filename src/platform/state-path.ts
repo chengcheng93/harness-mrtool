@@ -96,9 +96,10 @@ export const systemWindowsAclVerifier: WindowsAclVerifier = {
       "if ($LASTEXITCODE -ne 0) { exit 24 }",
       "$acl = Get-Acl -LiteralPath $path",
       "$allowed = @($current.Value, $system.Value, $admins.Value)",
-      "$owner = (New-Object System.Security.Principal.NTAccount($acl.Owner)).Translate([System.Security.Principal.SecurityIdentifier]).Value",
+      "$owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value",
       "if ($owner -notin $allowed) { exit 21 }",
-      "$unsafe = $acl.Access | Where-Object { $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -notin $allowed }",
+      "$rules = $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])",
+      ""$unsafe = $rules | Where-Object { $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Value -notin $allowed }",
       "if ($unsafe) { exit 22 }",
       "if (-not $acl.AreAccessRulesProtected) { exit 23 }",
     ].join("; ");
