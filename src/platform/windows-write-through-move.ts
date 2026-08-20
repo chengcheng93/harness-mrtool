@@ -10,58 +10,31 @@ const TERMINATION_WAIT_MS = 2_000;
 const MAX_HELPER_OUTPUT_BYTES = 512;
 const SOURCE_ENVIRONMENT_NAME = "HMRTOOL_MOVE_SOURCE";
 const DESTINATION_ENVIRONMENT_NAME = "HMRTOOL_MOVE_DESTINATION";
-// MOVEFILE_WRITE_THROUGH is Windows' namespace durability barrier. Omitting
-// MOVEFILE_REPLACE_EXISTING preserves create-once publication.
+// File.Move provides same-volume atomic, no-replace publication. Flushing the
+// moved file is the available Windows durability barrier before identity checks.
 const POWERSHELL_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-$assemblyName = New-Object Reflection.AssemblyName('HarnessMrtool.NativeMove.Dynamic')
-$assembly = [AppDomain]::CurrentDomain.DefineDynamicAssembly(
-  $assemblyName,
-  [Reflection.Emit.AssemblyBuilderAccess]::Run
-)
-$module = $assembly.DefineDynamicModule('HarnessMrtool.NativeMove.Dynamic')
-$type = $module.DefineType(
-  'HarnessMrtool.NativeMove',
-  [Reflection.TypeAttributes]'Public, Sealed, Abstract'
-)
-$method = $type.DefinePInvokeMethod(
-  'MoveFileExW',
-  'kernel32.dll',
-  [Reflection.MethodAttributes]'Public, Static',
-  [Reflection.CallingConventions]::Standard,
-  [bool],
-  [Type[]]@([string], [string], [uint32]),
-  [Runtime.InteropServices.CallingConvention]::Winapi,
-  [Runtime.InteropServices.CharSet]::Unicode
-)
-$method.SetImplementationFlags(
-  $method.GetMethodImplementationFlags() -bor [Reflection.MethodImplAttributes]::PreserveSig
-)
-$getLastError = $type.DefinePInvokeMethod(
-  'GetLastError',
-  'kernel32.dll',
-  [Reflection.MethodAttributes]'Public, Static',
-  [Reflection.CallingConventions]::Standard,
-  [uint32],
-  [Type[]]@(),
-  [Runtime.InteropServices.CallingConvention]::Winapi,
-  [Runtime.InteropServices.CharSet]::Auto
-)
-$getLastError.SetImplementationFlags(
-  $getLastError.GetMethodImplementationFlags() -bor [Reflection.MethodImplAttributes]::PreserveSig
-)
-$native = $type.CreateType()
-if (-not $native::MoveFileExW(
-  $env:HMRTOOL_MOVE_SOURCE,
-  $env:HMRTOOL_MOVE_DESTINATION,
-  [uint32]8
-)) {
-  $code = $native::GetLastError()
-  [Console]::Out.WriteLine("ERR:$code")
+$source = $env:HMRTOOL_MOVE_SOURCE
+$destination = $env:HMRTOOL_MOVE_DESTINATION
+try {
+  [System.IO.File]::Move($source, $destination)
+  $stream = [System.IO.File]::Open(
+    $destination,
+    [System.IO.FileMode]::Open,
+    [System.IO.FileAccess]::Write,
+    [System.IO.FileShare]::Read
+  )
+  try { $stream.Flush($true) } finally { $stream.Dispose() }
+  [Console]::Out.WriteLine("OK")
+} catch [System.IO.IOException] {
+  $nativeCode = $_.Exception.HResult -band 0xFFFF
+  [Console]::Out.WriteLine("ERR:$nativeCode")
+  exit 25
+} catch {
+  [Console]::Out.WriteLine("ERR:1")
   exit 25
 }
-[Console]::Out.WriteLine("OK")
 `;
 
 export type WindowsWriteThroughMoveFailure = "exists" | "timeout" | "unavailable";
