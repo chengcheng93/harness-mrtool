@@ -85,6 +85,7 @@ export const systemWindowsAclVerifier: WindowsAclVerifier = {
       `$path = ${powershellSingleQuoted(path)}`,
       "$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()",
       "$current = $identity.User",
+      "$currentName = $identity.Name",
       "$tokenOwner = $identity.Owner",
       "$system = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')",
       "$admins = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')",
@@ -96,6 +97,8 @@ export const systemWindowsAclVerifier: WindowsAclVerifier = {
       "$args = @($path, '/inheritance:r', '/grant:r', \"*$currentValue`:(OI)(CI)(F)\", '*S-1-5-18:(OI)(CI)(F)', '*S-1-5-32-544:(OI)(CI)(F)')",
       "& icacls.exe @args | Out-Null",
       "if ($LASTEXITCODE -ne 0) { exit 24 }",
+      "& icacls.exe $path /setowner $currentName | Out-Null",
+      "if ($LASTEXITCODE -ne 0) { exit 25 }",
 
       "$acl = Get-Acl -LiteralPath $path",
       "$allowed = @($current.Value, $tokenOwner.Value, $system.Value, $admins.Value)",
@@ -124,7 +127,9 @@ export const systemWindowsAclVerifier: WindowsAclVerifier = {
             ? "inheritance"
             : code === 24 || code === "24"
               ? "setup"
-              : "execution";
+              : code === 25 || code === "25"
+                ? "owner-setup"
+                : "execution";
       throw stateError(`Windows ACL verification failed at ${stage} stage`);
     }
   },
