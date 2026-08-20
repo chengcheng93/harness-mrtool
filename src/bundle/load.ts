@@ -9,7 +9,11 @@ import {
 import { relative, resolve, sep } from "node:path";
 
 
+
+
 import { SemVer } from "semver";
+
+
 
 
 import { isToolError, ToolError } from "../contracts/errors.ts";
@@ -29,9 +33,13 @@ import {
 import { validateTemplateBundle } from "./validate.ts";
 
 
+
+
 export const MAX_BUNDLE_MANIFEST_BYTES = 64 * 1024;
 export const MAX_BUNDLE_PAYLOAD_BYTES = 2 * 1024 * 1024;
 export const MAX_BUNDLE_TOTAL_PAYLOAD_BYTES = 8 * 1024 * 1024;
+
+
 
 
 export const REQUIRED_H2_HEADINGS = [
@@ -46,6 +54,8 @@ export const REQUIRED_H2_HEADINGS = [
 ] as const;
 
 
+
+
 export interface BundleFileMetadata {
   readonly dev: bigint;
   readonly ino: bigint;
@@ -54,6 +64,8 @@ export interface BundleFileMetadata {
   isDirectory(): boolean;
   isSymbolicLink(): boolean;
 }
+
+
 
 
 export interface TemplateBundleFileHandle {
@@ -68,12 +80,16 @@ export interface TemplateBundleFileHandle {
 }
 
 
+
+
 export interface TemplateBundleIo {
   openFile(path: string): Promise<TemplateBundleFileHandle>;
   listDirectory(path: string): Promise<readonly string[]>;
   lstat(path: string): Promise<BundleFileMetadata>;
   realpath(path: string): Promise<string>;
 }
+
+
 
 
 export const nodeTemplateBundleIo: TemplateBundleIo = {
@@ -92,6 +108,8 @@ export const nodeTemplateBundleIo: TemplateBundleIo = {
 };
 
 
+
+
 export interface LoadedTemplateBundle {
   readonly manifest: TemplateBundleManifest;
   readonly layout: {
@@ -106,6 +124,8 @@ export interface LoadedTemplateBundle {
   };
   readonly profiles: Readonly<Record<"code" | "docs" | "general" | "ops", JsonObject>>;
 }
+
+
 
 
 const MANIFEST_PATH = "bundle-manifest.json";
@@ -129,6 +149,8 @@ const REQUEST_SCHEMA_V1_BYTES_SHA256 =
   "b1b8fd17c81119946abae5c4c30ed7b6b64fca9b72a8bbc939628294ba300e0e";
 
 
+
+
 function templateError(
   reason: string,
   field: string | null = null,
@@ -142,12 +164,16 @@ function templateError(
 }
 
 
+
+
 function asRecord(value: JsonValue, subject: string): JsonObject {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw templateError(`${subject} must be an object`, subject);
   }
   return value;
 }
+
+
 
 
 function assertExactFields(
@@ -164,6 +190,8 @@ function assertExactFields(
     throw templateError(`${subject} has missing or unknown fields`, subject);
   }
 }
+
+
 
 
 function decodeUtf8(bytes: Uint8Array, subject: string): string {
@@ -183,6 +211,8 @@ function decodeUtf8(bytes: Uint8Array, subject: string): string {
 }
 
 
+
+
 function parseBundleJson(bytes: Uint8Array, subject: string): JsonValue {
   try {
     return parseStrictJson(decodeUtf8(bytes, subject));
@@ -193,6 +223,8 @@ function parseBundleJson(bytes: Uint8Array, subject: string): JsonValue {
     throw templateError(`${subject} is not strict JSON`, subject);
   }
 }
+
+
 
 
 function parseBundleYaml(bytes: Uint8Array, subject: string): JsonObject {
@@ -207,6 +239,8 @@ function parseBundleYaml(bytes: Uint8Array, subject: string): JsonObject {
 }
 
 
+
+
 function deepFreeze<T>(value: T): T {
   if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
     for (const child of Object.values(value)) {
@@ -218,9 +252,13 @@ function deepFreeze<T>(value: T): T {
 }
 
 
+
+
 function portableRelative(root: string, path: string): string {
   return relative(root, path).split(sep).join("/");
 }
+
+
 
 
 function samePath(left: string, right: string): boolean {
@@ -230,6 +268,8 @@ function samePath(left: string, right: string): boolean {
 }
 
 
+
+
 async function assertPlainPath(
   root: string,
   path: string,
@@ -237,13 +277,17 @@ async function assertPlainPath(
   io: TemplateBundleIo,
 ): Promise<BundleFileMetadata> {
   let metadata: BundleFileMetadata;
-  let canonicalMetadata: BundleFileMetadata;
   let canonicalPath: string;
   try {
     [metadata, canonicalPath] = await Promise.all([io.lstat(path), io.realpath(path)]);
-    canonicalMetadata = await io.lstat(canonicalPath);
   } catch {
     throw templateError("bundle file set is missing an expected entry");
+  }
+  let canonicalMetadata: BundleFileMetadata;
+  try {
+    canonicalMetadata = await io.lstat(canonicalPath);
+  } catch {
+    throw templateError("bundle contains a symbolic link, reparse point, or path escape");
   }
   if (
     metadata.isSymbolicLink() ||
@@ -261,6 +305,7 @@ async function assertPlainPath(
   }
   return metadata;
 }
+
 
 async function scanExactFileSet(
   root: string,
@@ -314,6 +359,8 @@ async function scanExactFileSet(
   }
   return entries;
 }
+
+
 
 
 function validateManifest(value: JsonValue, serialized: string): TemplateBundleManifest {
@@ -390,6 +437,8 @@ function validateManifest(value: JsonValue, serialized: string): TemplateBundleM
 }
 
 
+
+
 async function readBounded(
   root: string,
   relativePath: string,
@@ -455,6 +504,8 @@ async function readBounded(
 }
 
 
+
+
 function assertSameRegularFile(
   expected: BundleFileMetadata,
   actual: BundleFileMetadata,
@@ -472,9 +523,13 @@ function assertSameRegularFile(
 }
 
 
+
+
 function sha256(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
+
+
 
 
 async function loadVerifiedBundle(
@@ -505,6 +560,8 @@ async function loadVerifiedBundle(
   );
 
 
+
+
   const payloadBytes = new Map<TemplateBundlePayloadPath, Uint8Array>();
   for (const file of manifest.files) {
     const fileMetadata = metadata.get(file.path);
@@ -528,8 +585,12 @@ async function loadVerifiedBundle(
   }
 
 
+
+
   // A second metadata-only scan catches additions and path swaps during loading.
   await scanExactFileSet(root, io);
+
+
 
 
   const payload = (path: TemplateBundlePayloadPath): Uint8Array => {
@@ -562,6 +623,8 @@ async function loadVerifiedBundle(
   };
 
 
+
+
   const loaded = {
     manifest: copyJsonValue(manifest) as unknown as TemplateBundleManifest,
     layout: {
@@ -576,6 +639,8 @@ async function loadVerifiedBundle(
   validateTemplateBundle(loaded);
   return deepFreeze(loaded);
 }
+
+
 
 
 export async function loadTemplateBundle(
