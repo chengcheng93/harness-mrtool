@@ -35,7 +35,6 @@ try {
   exit 25
 }
 `;
-const ENCODED_POWERSHELL_SCRIPT = Buffer.from(POWERSHELL_SCRIPT, "utf16le").toString("base64");
 
 export type WindowsWriteThroughMoveFailure = "exists" | "timeout" | "unavailable";
 
@@ -155,8 +154,12 @@ export function createWindowsWriteThroughMover(
             "-NonInteractive",
             "-ExecutionPolicy",
             "Bypass",
-            "-EncodedCommand",
-            ENCODED_POWERSHELL_SCRIPT,
+            "-InputFormat",
+            "Text",
+            "-OutputFormat",
+            "Text",
+            "-Command",
+            POWERSHELL_SCRIPT,
           ],
           { env: childEnvironment, stdio: ["ignore", "pipe", "pipe"], windowsHide: true },
         );
