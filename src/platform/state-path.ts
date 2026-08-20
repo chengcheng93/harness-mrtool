@@ -83,7 +83,9 @@ export const systemWindowsAclVerifier: WindowsAclVerifier = {
   async verify(path) {
     const script = [
       `$path = ${powershellSingleQuoted(path)}`,
-      "$current = [System.Security.Principal.WindowsIdentity]::GetCurrent().User",
+      "$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()",
+      "$current = $identity.User",
+      "$tokenOwner = $identity.Owner",
       "$system = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')",
       "$admins = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')",
       "$inheritance = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'",
@@ -94,10 +96,9 @@ export const systemWindowsAclVerifier: WindowsAclVerifier = {
       "$args = @($path, '/inheritance:r', '/grant:r', \"*$currentValue`:(OI)(CI)(F)\", '*S-1-5-18:(OI)(CI)(F)', '*S-1-5-32-544:(OI)(CI)(F)')",
       "& icacls.exe @args | Out-Null",
       "if ($LASTEXITCODE -ne 0) { exit 24 }",
-      "& icacls.exe $path /setowner \"*$currentValue\" | Out-Null",
-      "if ($LASTEXITCODE -ne 0) { exit 25 }",
+
       "$acl = Get-Acl -LiteralPath $path",
-      "$allowed = @($current.Value, $system.Value, $admins.Value)",
+      "$allowed = @($current.Value, $tokenOwner.Value, $system.Value, $admins.Value)",
       "$owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value",
       "if ($owner -notin $allowed) { exit 21 }",
       "$rules = $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])",
@@ -123,9 +124,7 @@ export const systemWindowsAclVerifier: WindowsAclVerifier = {
             ? "inheritance"
             : code === 24 || code === "24"
               ? "setup"
-              : code === 25 || code === "25"
-                ? "owner-setup"
-                : "execution";
+              : "execution";
       throw stateError(`Windows ACL verification failed at ${stage} stage`);
     }
   },
