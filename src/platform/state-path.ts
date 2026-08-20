@@ -101,7 +101,12 @@ export const systemWindowsAclVerifier: WindowsAclVerifier = {
       "$acl = Get-Acl -LiteralPath $path",
       "$allowed = @($current.Value, $system.Value, $admins.Value)",
       "$owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value",
-      "if ($owner -notin $allowed) { exit 21 }",
+      "if ($owner -notin $allowed) {",
+      "  if ($owner -eq 'S-1-5-32-545') { exit 27 }",
+      "  if ($owner -like 'S-1-5-21-*') { exit 26 }",
+      "  if ($owner -like 'S-1-5-80-*') { exit 28 }",
+      "  exit 21",
+      "}",
       "$rules = $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])",
       "$unsafe = $rules | Where-Object { $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Value -notin $allowed }",
       "if ($unsafe) { exit 22 }",
@@ -118,8 +123,14 @@ export const systemWindowsAclVerifier: WindowsAclVerifier = {
         ? (error as { readonly code?: unknown }).code
         : undefined;
       const stage = code === 21 || code === "21"
-        ? "owner"
-        : code === 22 || code === "22"
+        ? "owner-other"
+        : code === 26 || code === "26"
+          ? "owner-local-account"
+          : code === 27 || code === "27"
+            ? "owner-users"
+            : code === 28 || code === "28"
+              ? "owner-service"
+              : code === 22 || code === "22"
           ? "rules"
           : code === 23 || code === "23"
             ? "inheritance"
