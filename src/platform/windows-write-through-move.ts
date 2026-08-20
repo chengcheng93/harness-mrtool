@@ -14,53 +14,26 @@ const DESTINATION_ENVIRONMENT_NAME = "HMRTOOL_MOVE_DESTINATION";
 const POWERSHELL_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-$assemblyName = New-Object Reflection.AssemblyName('HarnessMrtool.NativeMove.Dynamic')
-$assembly = [AppDomain]::CurrentDomain.DefineDynamicAssembly(
-  $assemblyName,
-  [Reflection.Emit.AssemblyBuilderAccess]::Run
-)
-$module = $assembly.DefineDynamicModule('HarnessMrtool.NativeMove.Dynamic')
-$type = $module.DefineType(
-  'HarnessMrtool.NativeMove',
-  [Reflection.TypeAttributes]'Public, Sealed, Abstract'
-)
-$method = $type.DefinePInvokeMethod(
-  'MoveFileExW',
-  'kernel32.dll',
-  [Reflection.MethodAttributes]'Public, Static',
-  [Reflection.CallingConventions]::Standard,
-  [bool],
-  [Type[]]@([string], [string], [uint32]),
-  [Runtime.InteropServices.CallingConvention]::Winapi,
-  [Runtime.InteropServices.CharSet]::Unicode
-)
-$method.SetImplementationFlags(
-  $method.GetMethodImplementationFlags() -bor [Reflection.MethodImplAttributes]::PreserveSig
-)
-$getLastError = $type.DefinePInvokeMethod(
-  'GetLastError',
-  'kernel32.dll',
-  [Reflection.MethodAttributes]'Public, Static',
-  [Reflection.CallingConventions]::Standard,
-  [uint32],
-  [Type[]]@(),
-  [Runtime.InteropServices.CallingConvention]::Winapi,
-  [Runtime.InteropServices.CharSet]::Auto
-)
-$getLastError.SetImplementationFlags(
-  $getLastError.GetMethodImplementationFlags() -bor [Reflection.MethodImplAttributes]::PreserveSig
-)
-$native = $type.CreateType()
-if (-not $native::MoveFileExW(
-  $env:HMRTOOL_MOVE_SOURCE,
-  $env:HMRTOOL_MOVE_DESTINATION,
-  [uint32]8
-)) {
-  $code = $native::GetLastError()
-  [Console]::Out.WriteLine("ERR:$code")
+$source = $env:HMRTOOL_MOVE_SOURCE
+$destination = $env:HMRTOOL_MOVE_DESTINATION
+try {
+  [System.IO.File]::Move($source, $destination)
+  $stream = [System.IO.File]::Open(
+    $destination,
+    [System.IO.FileMode]::Open,
+    [System.IO.FileAccess]::Read,
+    [System.IO.FileShare]::Read
+  )
+  try { $stream.Flush($true) } finally { $stream.Dispose() }
+  [Console]::Out.WriteLine("OK")
+} catch {
+  if (Test-Path -LiteralPath $destination) {
+    [Console]::Out.WriteLine("ERR:183")
+  } else {
+    [Console]::Out.WriteLine("ERR:1")
+  }
   exit 25
 }
-[Console]::Out.WriteLine("OK")
 `;
 const ENCODED_POWERSHELL_SCRIPT = Buffer.from(POWERSHELL_SCRIPT, "utf16le").toString("base64");
 
