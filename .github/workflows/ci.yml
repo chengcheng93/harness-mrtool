@@ -1,13 +1,16 @@
 name: CI
 
+
 on:
   push:
     branches: [main, feature/production-composition]
   pull_request:
   workflow_dispatch:
 
+
 permissions:
   contents: read
+
 
 jobs:
   portable:
@@ -23,10 +26,11 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - name: Run the portable suite without Windows-only SEA smoke tests
-        run: npm test -- $(find test -name '*.test.ts' ! -path 'test/contract/sea-smoke.test.ts' -print)
+        run: npm test -- --test-concurrency=1 $(find test -name '*.test.ts' ! -path 'test/contract/sea-smoke.test.ts' -print)
       - run: npm test -- test/contract/release-assets.test.ts test/integration/installer.test.ts
       - name: Check the portable installer syntax
         run: bash -n scripts/install.sh
+
 
   secret-scan:
     name: Secret scan
@@ -37,6 +41,7 @@ jobs:
         with:
           fetch-depth: 0
       - uses: gitleaks/gitleaks-action@v2
+
 
   windows-sea:
     name: Windows SEA gate
@@ -54,7 +59,7 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build:sea
-      - run: npm test
+      - run: npm test -- --test-concurrency=1
       - name: Check PowerShell installer syntax
         shell: pwsh
         run: |
