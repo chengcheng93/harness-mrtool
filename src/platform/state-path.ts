@@ -99,7 +99,7 @@ export const systemWindowsAclVerifier: WindowsAclVerifier = {
       "$owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value",
       "if ($owner -notin $allowed) { exit 21 }",
       "$rules = $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])",
-      ""$unsafe = $rules | Where-Object { $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Value -notin $allowed }",
+      "$unsafe = $rules | Where-Object { $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Value -notin $allowed }",
       "if ($unsafe) { exit 22 }",
       "if (-not $acl.AreAccessRulesProtected) { exit 23 }",
     ].join("; ");
