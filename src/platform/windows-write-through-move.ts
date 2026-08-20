@@ -2,9 +2,11 @@ import { spawn } from "node:child_process";
 import type { Readable } from "node:stream";
 import { dirname, isAbsolute, resolve } from "node:path";
 
+
 import { resolveWindowsPowerShellPath } from "./state-path.ts";
 
-const MOVE_TIMEOUT_MS = 5_000;
+
+const MOVE_TIMEOUT_MS = 15_000;
 const TERMINATION_WAIT_MS = 2_000;
 const MAX_HELPER_OUTPUT_BYTES = 512;
 const SOURCE_ENVIRONMENT_NAME = "HMRTOOL_MOVE_SOURCE";
@@ -39,10 +41,13 @@ if (-not [HarnessMrtool.NativeMove]::MoveFileExW(
 `;
 const ENCODED_POWERSHELL_SCRIPT = Buffer.from(POWERSHELL_SCRIPT, "utf16le").toString("base64");
 
+
 export type WindowsWriteThroughMoveFailure = "exists" | "timeout" | "unavailable";
+
 
 export class WindowsWriteThroughMoveError extends Error {
   readonly reason: WindowsWriteThroughMoveFailure;
+
 
   constructor(reason: WindowsWriteThroughMoveFailure) {
     super(reason === "exists"
@@ -55,9 +60,11 @@ export class WindowsWriteThroughMoveError extends Error {
   }
 }
 
+
 export interface WindowsWriteThroughMover {
   moveNoReplace(sourcePath: string, destinationPath: string): Promise<void>;
 }
+
 
 export interface WindowsMoveChild {
   readonly stdout: Readable;
@@ -70,11 +77,13 @@ export interface WindowsMoveChild {
   kill(signal?: NodeJS.Signals): boolean;
 }
 
+
 export interface WindowsMoveSpawnOptions {
   readonly env: NodeJS.ProcessEnv;
   readonly stdio: ["ignore", "pipe", "pipe"];
   readonly windowsHide: true;
 }
+
 
 export type WindowsMoveChildSpawner = (
   executable: string,
@@ -82,12 +91,14 @@ export type WindowsMoveChildSpawner = (
   options: WindowsMoveSpawnOptions,
 ) => WindowsMoveChild;
 
+
 export interface WindowsWriteThroughMoverOptions {
   readonly executablePath?: string;
   readonly environment?: NodeJS.ProcessEnv;
   readonly timeoutMs?: number;
   readonly spawnChild?: WindowsMoveChildSpawner;
 }
+
 
 function copyAllowedEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const scrubbed: NodeJS.ProcessEnv = {};
@@ -97,6 +108,7 @@ function copyAllowedEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessE
   }
   return scrubbed;
 }
+
 
 function validateMovePaths(sourcePath: string, destinationPath: string): void {
   if (typeof sourcePath !== "string" || typeof destinationPath !== "string" ||
@@ -110,6 +122,7 @@ function validateMovePaths(sourcePath: string, destinationPath: string): void {
   }
 }
 
+
 function defaultSpawnChild(
   executable: string,
   arguments_: readonly string[],
@@ -118,12 +131,14 @@ function defaultSpawnChild(
   return spawn(executable, [...arguments_], options) as WindowsMoveChild;
 }
 
+
 function appendBounded(chunks: Buffer[], chunk: Buffer | string, currentBytes: number): number {
   const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
   const nextBytes = currentBytes + bytes.length;
   if (nextBytes <= MAX_HELPER_OUTPUT_BYTES) chunks.push(bytes);
   return nextBytes;
 }
+
 
 export function createWindowsWriteThroughMover(
   options: WindowsWriteThroughMoverOptions = {},
@@ -134,6 +149,7 @@ export function createWindowsWriteThroughMover(
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30_000) {
     throw new TypeError("timeoutMs must be an integer between 1 and 30000");
   }
+
 
   return Object.freeze({
     async moveNoReplace(sourcePath: string, destinationPath: string): Promise<void> {
@@ -166,6 +182,7 @@ export function createWindowsWriteThroughMover(
         throw new WindowsWriteThroughMoveError("unavailable");
       }
 
+
       await new Promise<void>((resolveMove, rejectMove) => {
         const stdout: Buffer[] = [];
         const stderr: Buffer[] = [];
@@ -174,6 +191,7 @@ export function createWindowsWriteThroughMover(
         let requestedFailure: WindowsWriteThroughMoveFailure | undefined;
         let settled = false;
         let closeWait: NodeJS.Timeout | undefined;
+
 
         const settle = (failure?: WindowsWriteThroughMoveFailure): void => {
           if (settled) return;
@@ -199,6 +217,7 @@ export function createWindowsWriteThroughMover(
         };
         const executionTimeout = setTimeout(() => terminate("timeout"), timeoutMs);
         executionTimeout.unref();
+
 
         child.stdout.on("data", (chunk: Buffer | string) => {
           stdoutBytes = appendBounded(stdout, chunk, stdoutBytes);
@@ -231,5 +250,6 @@ export function createWindowsWriteThroughMover(
     },
   });
 }
+
 
 export const systemWindowsWriteThroughMover = createWindowsWriteThroughMover();
