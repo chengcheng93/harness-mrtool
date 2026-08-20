@@ -9,13 +9,17 @@ import {
 } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 
+
 import { isToolError, ToolError } from "../contracts/errors.ts";
 
+
 const MAX_PROJECT_TEMPLATE_BYTES = 2 * 1024 * 1024;
+
 
 export interface ProjectTemplateWriterHooks {
   readonly beforePublish?: () => Promise<void> | void;
 }
+
 
 function inputError(reason: string): ToolError<"INPUT_ERROR"> {
   return new ToolError("INPUT_ERROR", "Project template export failed safely", {
@@ -26,24 +30,30 @@ function inputError(reason: string): ToolError<"INPUT_ERROR"> {
   });
 }
 
+
 function samePath(left: string, right: string): boolean {
   return process.platform === "win32"
     ? left.toLowerCase() === right.toLowerCase()
     : left === right;
 }
 
+
 async function assertSafeParent(parent: string): Promise<void> {
   let metadata: Awaited<ReturnType<typeof lstat>>;
+  let canonicalMetadata: Awaited<ReturnType<typeof lstat>>;
   let canonical: string;
   try {
     [metadata, canonical] = await Promise.all([lstat(parent), realpath(parent)]);
+    canonicalMetadata = await lstat(canonical);
   } catch {
     throw inputError("destination directory is missing or unreadable");
   }
   if (
     !metadata.isDirectory() ||
     metadata.isSymbolicLink() ||
-    !samePath(canonical, parent)
+    metadata.dev !== canonicalMetadata.dev ||
+    metadata.ino !== canonicalMetadata.ino ||
+    (process.platform !== "win32" && !samePath(canonical, parent))
   ) {
     throw inputError("destination directory is indirect or not a regular directory");
   }
@@ -58,6 +68,7 @@ async function assertDestinationAbsent(destination: string): Promise<void> {
   }
   throw inputError("destination already exists");
 }
+
 
 async function syncDirectory(parent: string): Promise<void> {
   if (process.platform === "win32") return;
@@ -75,6 +86,7 @@ async function syncDirectory(parent: string): Promise<void> {
   }
   if (failure !== undefined) throw failure;
 }
+
 
 function validateInputs(destination: string, contents: string): {
   readonly destination: string;
@@ -97,6 +109,7 @@ function validateInputs(destination: string, contents: string): {
   }
   return { destination: resolve(destination), contents: bytes };
 }
+
 
 export async function writeProjectTemplate(
   destinationValue: string,

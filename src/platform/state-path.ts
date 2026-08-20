@@ -4,17 +4,22 @@ import { dirname, resolve, win32 } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
+
 import { ToolError } from "../contracts/errors.ts";
 
+
 const execFileAsync = promisify(execFile);
+
 
 export interface WindowsAclVerifier {
   verify(path: string): Promise<void>;
 }
 
+
 export interface PrivateStateDirectoryOptions {
   readonly windowsAclVerifier?: WindowsAclVerifier;
 }
+
 
 function stateError(reason: string): ToolError<"INTERNAL_ERROR"> {
   return new ToolError("INTERNAL_ERROR", `Private state path is unsafe: ${reason}`, {
@@ -24,6 +29,7 @@ function stateError(reason: string): ToolError<"INTERNAL_ERROR"> {
     safeNextStep: "Inspect or remove the unsafe state path, then retry.",
   });
 }
+
 
 export function defaultStateDirectory(environment: NodeJS.ProcessEnv = process.env): string {
   if (process.platform === "win32") {
@@ -37,9 +43,11 @@ export function defaultStateDirectory(environment: NodeJS.ProcessEnv = process.e
   return resolve(base, "harness-mrtool");
 }
 
+
 function powershellSingleQuoted(value: string): string {
   return `'${value.replaceAll("'", "''")}'`;
 }
+
 
 export function resolveWindowsPowerShellPath(environment: NodeJS.ProcessEnv = process.env): string {
   const systemRoot = environment.SystemRoot;
@@ -51,6 +59,7 @@ export function resolveWindowsPowerShellPath(environment: NodeJS.ProcessEnv = pr
   }
   return win32.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
 }
+
 
 export const systemWindowsAclVerifier: WindowsAclVerifier = {
   async verify(path) {
@@ -67,11 +76,10 @@ export const systemWindowsAclVerifier: WindowsAclVerifier = {
       "$acl.SetAccessRuleProtection($true, $false)",
       "foreach ($rule in @($acl.Access)) { $acl.RemoveAccessRuleSpecific($rule) | Out-Null }",
       "foreach ($sid in @($current, $system, $admins)) { $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sid, $rights, $inheritance, $propagation, $allow))) }",
-      "$acl.SetOwner($current)",
       "Set-Acl -LiteralPath $path -AclObject $acl",
       "$acl = Get-Acl -LiteralPath $path",
-      "if ($acl.Owner -ne $current.Value -and $acl.Owner -ne ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)) { exit 21 }",
       "$allowed = @($current.Value, [System.Security.Principal.WindowsIdentity]::GetCurrent().Name, $system.Value, $admins.Value, 'NT AUTHORITY\\SYSTEM', 'BUILTIN\\Administrators')",
+      "if ($acl.Owner -notin $allowed) { exit 21 }",
       "$unsafe = $acl.Access | Where-Object { $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Value -notin $allowed }",
       "if ($unsafe) { exit 22 }",
       "if (-not $acl.AreAccessRulesProtected) { exit 23 }",
@@ -87,6 +95,7 @@ export const systemWindowsAclVerifier: WindowsAclVerifier = {
     }
   },
 };
+
 
 async function assertNoReparseAncestors(path: string): Promise<void> {
   let current = resolve(path);
@@ -106,6 +115,7 @@ async function assertNoReparseAncestors(path: string): Promise<void> {
     current = parent;
   }
 }
+
 
 export async function ensurePrivateStateDirectory(
   path: string,
