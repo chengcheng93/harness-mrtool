@@ -21,7 +21,7 @@ try {
   $stream = [System.IO.File]::Open(
     $destination,
     [System.IO.FileMode]::Open,
-    [System.IO.FileAccess]::Read,
+    [System.IO.FileAccess]::Write,
     [System.IO.FileShare]::Read
   )
   try { $stream.Flush($true) } finally { $stream.Dispose() }
