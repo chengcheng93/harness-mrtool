@@ -60,7 +60,7 @@ jobs:
       - run: npm run typecheck
       - run: npm run build:sea
       - name: Run Windows durability smoke tests
-        run: npm test -- --test-concurrency=1 --test-name-pattern="MoveFileExW publishes once|default Windows ACL adapter secures" test/integration/windows-write-through-move.test.ts test/unit/context-store.test.ts
+        run: npm test -- --test-concurrency=1 --test-name-pattern="Windows publisher flushes once|default Windows ACL adapter secures" test/integration/windows-write-through-move.test.ts test/unit/context-store.test.ts
       - run: npm test -- --test-concurrency=1
       - name: Check PowerShell installer syntax
         shell: pwsh
