@@ -94,6 +94,8 @@ export const systemWindowsAclVerifier: WindowsAclVerifier = {
       "$args = @($path, '/inheritance:r', '/grant:r', \"*$currentValue`:(OI)(CI)(F)\", '*S-1-5-18:(OI)(CI)(F)', '*S-1-5-32-544:(OI)(CI)(F)')",
       "& icacls.exe @args | Out-Null",
       "if ($LASTEXITCODE -ne 0) { exit 24 }",
+      "& icacls.exe $path /setowner \"*$currentValue\" | Out-Null",
+      "if ($LASTEXITCODE -ne 0) { exit 25 }",
       "$acl = Get-Acl -LiteralPath $path",
       "$allowed = @($current.Value, $system.Value, $admins.Value)",
       "$owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value",
@@ -121,7 +123,9 @@ export const systemWindowsAclVerifier: WindowsAclVerifier = {
             ? "inheritance"
             : code === 24 || code === "24"
               ? "setup"
-              : "execution";
+              : code === 25 || code === "25"
+                ? "owner-setup"
+                : "execution";
       throw stateError(`Windows ACL verification failed at ${stage} stage`);
     }
   },
