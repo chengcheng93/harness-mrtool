@@ -18,13 +18,6 @@ $source = $env:HMRTOOL_MOVE_SOURCE
 $destination = $env:HMRTOOL_MOVE_DESTINATION
 try {
   [System.IO.File]::Move($source, $destination)
-  $stream = [System.IO.File]::Open(
-    $destination,
-    [System.IO.FileMode]::Open,
-    [System.IO.FileAccess]::Write,
-    [System.IO.FileShare]::Read
-  )
-  try { $stream.Flush($true) } finally { $stream.Dispose() }
   [Console]::Out.WriteLine("OK")
 } catch {
   if (Test-Path -LiteralPath $destination) {
