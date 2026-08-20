@@ -1,16 +1,13 @@
 name: CI
 
-
 on:
   push:
     branches: [main, feature/production-composition]
   pull_request:
   workflow_dispatch:
 
-
 permissions:
   contents: read
-
 
 jobs:
   portable:
@@ -31,7 +28,6 @@ jobs:
       - name: Check the portable installer syntax
         run: bash -n scripts/install.sh
 
-
   secret-scan:
     name: Secret scan
     runs-on: ubuntu-latest
@@ -41,7 +37,8 @@ jobs:
         with:
           fetch-depth: 0
       - uses: gitleaks/gitleaks-action@v2
-
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   windows-sea:
     name: Windows SEA gate
