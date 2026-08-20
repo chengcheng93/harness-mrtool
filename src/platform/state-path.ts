@@ -109,8 +109,20 @@ export const systemWindowsAclVerifier: WindowsAclVerifier = {
         ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
         { windowsHide: true, timeout: 5_000, encoding: "utf8" },
       );
-    } catch {
-      throw stateError("Windows ACL verification failed");
+    } catch (error) {
+      const code = typeof error === "object" && error !== null && "code" in error
+        ? (error as { readonly code?: unknown }).code
+        : undefined;
+      const stage = code === 21 || code === "21"
+        ? "owner"
+        : code === 22 || code === "22"
+          ? "rules"
+          : code === 23 || code === "23"
+            ? "inheritance"
+            : code === 24 || code === "24"
+              ? "setup"
+              : "execution";
+      throw stateError(`Windows ACL verification failed at ${stage} stage`);
     }
   },
 };
