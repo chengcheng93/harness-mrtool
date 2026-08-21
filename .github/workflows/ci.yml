@@ -75,3 +75,16 @@ jobs:
           }
       - shell: pwsh
         run: .\dist\harness-mrtool.exe self-test --output json
+      - name: Record verified development executable hash
+        shell: pwsh
+        run: |
+          (Get-FileHash .\dist\harness-mrtool.exe -Algorithm SHA256).Hash.ToLowerInvariant() | Set-Content .\dist\harness-mrtool.exe.sha256 -NoNewline
+      - name: Upload verified development SEA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: harness-mrtool-dev-${{ github.sha }}
+          if-no-files-found: error
+          path: |
+            dist/harness-mrtool.exe
+            dist/harness-mrtool.exe.sha256
+            dist/sea-build-receipt.json
