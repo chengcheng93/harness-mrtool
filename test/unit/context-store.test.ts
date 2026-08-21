@@ -1269,7 +1269,7 @@ test("default Windows ACL adapter secures and verifies a newly created directory
     return;
   }
   const { directory } = await fixture(context);
-  await ensurePrivateStateDirectory(resolve(directory, "acl-default"), { windowsAclVerifier: undefined });
+  await ensurePrivateStateDirectory(resolve(directory, "acl-default"));
 });
 
 test("lost lock ownership fences an old writer before atomic replace", async (context) => {
