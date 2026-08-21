@@ -1268,7 +1268,15 @@ test("default Windows ACL adapter secures and verifies a newly created directory
     context.skip("Windows ACL integration contract");
     return;
   }
-  const { directory } = await fixture(context);
+  const localAppData = process.env.LOCALAPPDATA?.trim();
+  assert.ok(localAppData, "LOCALAPPDATA is required for the Windows ACL integration contract");
+  const directory = await import("node:fs/promises").then(({ mkdtemp }) =>
+    mkdtemp(resolve(localAppData, "hmr-context-acl-")),
+  );
+  context.after(async () => {
+    const { rm } = await import("node:fs/promises");
+    await rm(directory, { recursive: true, force: true });
+  });
   await ensurePrivateStateDirectory(resolve(directory, "acl-default"));
 });
 

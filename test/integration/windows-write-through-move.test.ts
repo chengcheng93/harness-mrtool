@@ -264,7 +264,7 @@ test("terminates a helper whose stdout or stderr exceeds the fixed bound", async
   assert.equal((caught as WindowsWriteThroughMoveError).reason, "unavailable");
 });
 
-test("MoveFileExW publishes once with write-through and never replaces an existing destination", async (t) => {
+test("the Windows publisher flushes once and never replaces an existing destination", async (t) => {
   if (process.platform !== "win32") {
     t.skip("MoveFileExW contract requires Windows");
     return;

@@ -83,22 +83,43 @@ export const systemWindowsAclVerifier: WindowsAclVerifier = {
   async verify(path) {
     const script = [
       `$path = ${powershellSingleQuoted(path)}`,
-      "$current = [System.Security.Principal.WindowsIdentity]::GetCurrent().User",
+      "$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()",
+      "$current = $identity.User",
       "$system = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')",
       "$admins = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')",
       "$inheritance = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'",
       "$propagation = [System.Security.AccessControl.PropagationFlags]::None",
       "$allow = [System.Security.AccessControl.AccessControlType]::Allow",
       "$rights = [System.Security.AccessControl.FileSystemRights]::FullControl",
-      "$acl = New-Object System.Security.AccessControl.DirectorySecurity",
-      "$acl.SetAccessRuleProtection($true, $false)",
-      "foreach ($sid in @($current, $system, $admins)) { $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sid, $rights, $inheritance, $propagation, $allow))) }",
-      "Set-Acl -LiteralPath $path -AclObject $acl",
+      "$currentValue = $current.Value",
+      "$args = @($path, '/inheritance:r', '/grant:r', \"*$currentValue`:(OI)(CI)(F)\", '*S-1-5-18:(OI)(CI)(F)', '*S-1-5-32-544:(OI)(CI)(F)')",
+      "& icacls.exe @args | Out-Null",
+      "if ($LASTEXITCODE -ne 0) { exit 24 }",
+      "& icacls.exe $path /setowner \"*$currentValue\" /C | Out-Null",
+      "if ($LASTEXITCODE -ne 0) { exit 25 }",
       "$acl = Get-Acl -LiteralPath $path",
       "$allowed = @($current.Value, $system.Value, $admins.Value)",
-      "$owner = (New-Object System.Security.Principal.NTAccount($acl.Owner)).Translate([System.Security.Principal.SecurityIdentifier]).Value",
-      "if ($owner -notin $allowed) { exit 21 }",
-      "$unsafe = $acl.Access | Where-Object { $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -notin $allowed }",
+      "$owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value",
+      "if ($owner -notin $allowed) {",
+      "  & takeown.exe /F $path | Out-Null",
+      "  if ($LASTEXITCODE -ne 0) { exit 25 }",
+      "  $acl = Get-Acl -LiteralPath $path",
+      "  $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value",
+      "}",
+      "if ($owner -notin $allowed) {",
+      "  & takeown.exe /F $path /A | Out-Null",
+      "  if ($LASTEXITCODE -ne 0) { exit 25 }",
+      "  $acl = Get-Acl -LiteralPath $path",
+      "  $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value",
+      "}",
+      "if ($owner -notin $allowed) {",
+      "  if ($owner -eq 'S-1-5-32-545') { exit 27 }",
+      "  if ($owner -like 'S-1-5-21-*') { exit 26 }",
+      "  if ($owner -like 'S-1-5-80-*') { exit 28 }",
+      "  exit 21",
+      "}",
+      "$rules = $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])",
+      "$unsafe = $rules | Where-Object { $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Value -notin $allowed }",
       "if ($unsafe) { exit 22 }",
       "if (-not $acl.AreAccessRulesProtected) { exit 23 }",
     ].join("; ");
@@ -108,8 +129,28 @@ export const systemWindowsAclVerifier: WindowsAclVerifier = {
         ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
         { windowsHide: true, timeout: 5_000, encoding: "utf8" },
       );
-    } catch {
-      throw stateError("Windows ACL verification failed");
+    } catch (error) {
+      const code = typeof error === "object" && error !== null && "code" in error
+        ? (error as { readonly code?: unknown }).code
+        : undefined;
+      const stage = code === 21 || code === "21"
+        ? "owner-other"
+        : code === 26 || code === "26"
+          ? "owner-local-account"
+          : code === 27 || code === "27"
+            ? "owner-users"
+            : code === 28 || code === "28"
+              ? "owner-service"
+              : code === 22 || code === "22"
+          ? "rules"
+          : code === 23 || code === "23"
+            ? "inheritance"
+            : code === 24 || code === "24"
+              ? "setup"
+              : code === 25 || code === "25"
+                ? "owner-setup"
+                : "execution";
+      throw stateError(`Windows ACL verification failed at ${stage} stage`);
     }
   },
 };

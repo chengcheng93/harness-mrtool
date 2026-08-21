@@ -1,53 +1,46 @@
 import { spawn } from "node:child_process";
+import { lstat } from "node:fs/promises";
 import type { Readable } from "node:stream";
 import { dirname, isAbsolute, resolve } from "node:path";
 
-
 import { resolveWindowsPowerShellPath } from "./state-path.ts";
-
 
 const MOVE_TIMEOUT_MS = 15_000;
 const TERMINATION_WAIT_MS = 2_000;
 const MAX_HELPER_OUTPUT_BYTES = 512;
 const SOURCE_ENVIRONMENT_NAME = "HMRTOOL_MOVE_SOURCE";
 const DESTINATION_ENVIRONMENT_NAME = "HMRTOOL_MOVE_DESTINATION";
-// MOVEFILE_WRITE_THROUGH is Windows' namespace durability barrier. Omitting
-// MOVEFILE_REPLACE_EXISTING preserves create-once publication.
+// File.Move provides same-volume atomic, no-replace publication. Flushing the
+// moved file is the available Windows durability barrier before identity checks.
 const POWERSHELL_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-namespace HarnessMrtool {
-  public static class NativeMove {
-    public const uint MOVEFILE_WRITE_THROUGH = 0x00000008;
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    public static extern bool MoveFileExW(string existingName, string newName, uint flags);
-  }
-}
-'@ | Out-Null
-if (-not [HarnessMrtool.NativeMove]::MoveFileExW(
-  $env:HMRTOOL_MOVE_SOURCE,
-  $env:HMRTOOL_MOVE_DESTINATION,
-  [HarnessMrtool.NativeMove]::MOVEFILE_WRITE_THROUGH
-)) {
-  $code = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-  [Console]::Out.WriteLine("ERR:$code")
+$source = $env:HMRTOOL_MOVE_SOURCE
+$destination = $env:HMRTOOL_MOVE_DESTINATION
+try {
+  [System.IO.File]::Move($source, $destination)
+  $stream = [System.IO.File]::Open(
+    $destination,
+    [System.IO.FileMode]::Open,
+    [System.IO.FileAccess]::Write,
+    [System.IO.FileShare]::Read
+  )
+  try { $stream.Flush($true) } finally { $stream.Dispose() }
+  [Console]::Out.WriteLine("OK")
+} catch [System.IO.IOException] {
+  $nativeCode = $_.Exception.HResult -band 0xFFFF
+  [Console]::Out.WriteLine("ERR:$nativeCode")
+  exit 25
+} catch {
+  [Console]::Out.WriteLine("ERR:1")
   exit 25
 }
-[Console]::Out.WriteLine("OK")
 `;
-const ENCODED_POWERSHELL_SCRIPT = Buffer.from(POWERSHELL_SCRIPT, "utf16le").toString("base64");
-
 
 export type WindowsWriteThroughMoveFailure = "exists" | "timeout" | "unavailable";
 
-
 export class WindowsWriteThroughMoveError extends Error {
   readonly reason: WindowsWriteThroughMoveFailure;
-
 
   constructor(reason: WindowsWriteThroughMoveFailure) {
     super(reason === "exists"
@@ -60,11 +53,9 @@ export class WindowsWriteThroughMoveError extends Error {
   }
 }
 
-
 export interface WindowsWriteThroughMover {
   moveNoReplace(sourcePath: string, destinationPath: string): Promise<void>;
 }
-
 
 export interface WindowsMoveChild {
   readonly stdout: Readable;
@@ -77,13 +68,11 @@ export interface WindowsMoveChild {
   kill(signal?: NodeJS.Signals): boolean;
 }
 
-
 export interface WindowsMoveSpawnOptions {
   readonly env: NodeJS.ProcessEnv;
   readonly stdio: ["ignore", "pipe", "pipe"];
   readonly windowsHide: true;
 }
-
 
 export type WindowsMoveChildSpawner = (
   executable: string,
@@ -91,14 +80,12 @@ export type WindowsMoveChildSpawner = (
   options: WindowsMoveSpawnOptions,
 ) => WindowsMoveChild;
 
-
 export interface WindowsWriteThroughMoverOptions {
   readonly executablePath?: string;
   readonly environment?: NodeJS.ProcessEnv;
   readonly timeoutMs?: number;
   readonly spawnChild?: WindowsMoveChildSpawner;
 }
-
 
 function copyAllowedEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const scrubbed: NodeJS.ProcessEnv = {};
@@ -108,7 +95,6 @@ function copyAllowedEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessE
   }
   return scrubbed;
 }
-
 
 function validateMovePaths(sourcePath: string, destinationPath: string): void {
   if (typeof sourcePath !== "string" || typeof destinationPath !== "string" ||
@@ -122,7 +108,6 @@ function validateMovePaths(sourcePath: string, destinationPath: string): void {
   }
 }
 
-
 function defaultSpawnChild(
   executable: string,
   arguments_: readonly string[],
@@ -131,14 +116,12 @@ function defaultSpawnChild(
   return spawn(executable, [...arguments_], options) as WindowsMoveChild;
 }
 
-
 function appendBounded(chunks: Buffer[], chunk: Buffer | string, currentBytes: number): number {
   const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
   const nextBytes = currentBytes + bytes.length;
   if (nextBytes <= MAX_HELPER_OUTPUT_BYTES) chunks.push(bytes);
   return nextBytes;
 }
-
 
 export function createWindowsWriteThroughMover(
   options: WindowsWriteThroughMoverOptions = {},
@@ -150,10 +133,20 @@ export function createWindowsWriteThroughMover(
     throw new TypeError("timeoutMs must be an integer between 1 and 30000");
   }
 
-
   return Object.freeze({
     async moveNoReplace(sourcePath: string, destinationPath: string): Promise<void> {
       validateMovePaths(sourcePath, destinationPath);
+      if (options.spawnChild === undefined) {
+        try {
+          await lstat(destinationPath);
+          throw new WindowsWriteThroughMoveError("exists");
+        } catch (error) {
+          if (error instanceof WindowsWriteThroughMoveError) throw error;
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+            throw new WindowsWriteThroughMoveError("unavailable");
+          }
+        }
+      }
       let executable: string;
       try {
         executable = options.executablePath ?? resolveWindowsPowerShellPath(environment);
@@ -173,15 +166,18 @@ export function createWindowsWriteThroughMover(
             "-NonInteractive",
             "-ExecutionPolicy",
             "Bypass",
-            "-EncodedCommand",
-            ENCODED_POWERSHELL_SCRIPT,
+            "-InputFormat",
+            "Text",
+            "-OutputFormat",
+            "Text",
+            "-Command",
+            POWERSHELL_SCRIPT,
           ],
           { env: childEnvironment, stdio: ["ignore", "pipe", "pipe"], windowsHide: true },
         );
       } catch {
         throw new WindowsWriteThroughMoveError("unavailable");
       }
-
 
       await new Promise<void>((resolveMove, rejectMove) => {
         const stdout: Buffer[] = [];
@@ -191,7 +187,6 @@ export function createWindowsWriteThroughMover(
         let requestedFailure: WindowsWriteThroughMoveFailure | undefined;
         let settled = false;
         let closeWait: NodeJS.Timeout | undefined;
-
 
         const settle = (failure?: WindowsWriteThroughMoveFailure): void => {
           if (settled) return;
@@ -217,7 +212,6 @@ export function createWindowsWriteThroughMover(
         };
         const executionTimeout = setTimeout(() => terminate("timeout"), timeoutMs);
         executionTimeout.unref();
-
 
         child.stdout.on("data", (chunk: Buffer | string) => {
           stdoutBytes = appendBounded(stdout, chunk, stdoutBytes);
@@ -250,6 +244,5 @@ export function createWindowsWriteThroughMover(
     },
   });
 }
-
 
 export const systemWindowsWriteThroughMover = createWindowsWriteThroughMover();
