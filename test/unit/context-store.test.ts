@@ -14,7 +14,7 @@ import {
   utimes,
   writeFile,
 } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import test from "node:test";
 
@@ -1269,7 +1269,7 @@ test("default Windows ACL adapter secures and verifies a newly created directory
     return;
   }
   const directory = await import("node:fs/promises").then(({ mkdtemp }) =>
-    mkdtemp(resolve(homedir(), "hmr-context-acl-")),
+    mkdtemp(resolve(process.cwd(), ".hmr-context-acl-")),
   );
   context.after(async () => {
     const { rm } = await import("node:fs/promises");
