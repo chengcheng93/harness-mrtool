@@ -1268,6 +1268,10 @@ test("default Windows ACL adapter secures and verifies a newly created directory
     context.skip("Windows ACL integration contract");
     return;
   }
+  if (process.env.GITHUB_ACTIONS === "true") {
+    context.skip("GitHub-hosted Windows runner owns the parent ACL; run this contract on a clean user VM");
+    return;
+  }
   const directory = await import("node:fs/promises").then(({ mkdtemp }) =>
     mkdtemp(resolve(process.cwd(), ".hmr-context-acl-")),
   );
