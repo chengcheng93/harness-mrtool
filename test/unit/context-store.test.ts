@@ -14,7 +14,7 @@ import {
   utimes,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { resolve } from "node:path";
 import test from "node:test";
 
@@ -1268,7 +1268,13 @@ test("default Windows ACL adapter secures and verifies a newly created directory
     context.skip("Windows ACL integration contract");
     return;
   }
-  const { directory } = await fixture(context);
+  const directory = await import("node:fs/promises").then(({ mkdtemp }) =>
+    mkdtemp(resolve(homedir(), "hmr-context-acl-")),
+  );
+  context.after(async () => {
+    const { rm } = await import("node:fs/promises");
+    await rm(directory, { recursive: true, force: true });
+  });
   await ensurePrivateStateDirectory(resolve(directory, "acl-default"));
 });
 
