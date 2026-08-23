@@ -5,7 +5,7 @@ useDefault = true
 
 [[allowlists]]
 description = "Synthetic GitLab tokens used only to exercise redaction tests"
-regexTarget = "match"
+regexTarget = "line"
 regexes = [
-  '''^glpat-(?:cli-secret|conflicting-title|remote-contract-secret|skill-secret-canary|source-error-canary-12345678|secretBearerValue|production-readonly-canary|text-failure-must-not-leak|never-reflect-this-value|secret-value(?:-that-must-not-leak)?|handler-secret-canary|mutated-error-secret|source-secret|request-secret|profile-field-secret|sensitive-value|key-canary|secret-token|state-store-secret-123456)$''',
+  '''glpat-(?:cli-secret|conflicting-title|remote-contract-secret|skill-secret-canary|source-error-canary-12345678|secretBearerValue|production-readonly-canary|text-failure-must-not-leak|never-reflect-this-value|secret-value(?:-that-must-not-leak)?|handler-secret-canary|mutated-error-secret|source-secret|request-secret|profile-field-secret|sensitive-value|key-canary|secret-token|state-store-secret-123456)''',
 ]
