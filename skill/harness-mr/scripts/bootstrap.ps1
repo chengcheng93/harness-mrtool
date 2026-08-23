@@ -568,7 +568,8 @@ function Download-ReleaseArchive {
           continue
         }
         if (-not $response.IsSuccessStatusCode) { Fail-Security 'The Skill release could not be downloaded.' }
-        if ($response.Content.Headers.ContentLength.HasValue -and $response.Content.Headers.ContentLength.Value -gt $MaxArchiveBytes) {
+        $contentLength = $response.Content.Headers.ContentLength
+        if ($null -ne $contentLength -and [Int64]$contentLength -gt $MaxArchiveBytes) {
           Fail-Security 'The Skill release archive is too large.'
         }
         $stream = [IO.File]::Open($DestinationPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)

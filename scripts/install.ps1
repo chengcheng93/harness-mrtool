@@ -93,7 +93,8 @@ function Download-Bounded { param([Uri]$Uri, [string]$DestinationPath)
       try {
         if ([int]$response.StatusCode -ge 300 -and [int]$response.StatusCode -lt 400) { if ($null -eq $response.Headers.Location) { Fail-Safe 'Release redirect has no location.' }; $current = [Uri]$response.Headers.Location; continue }
         if (-not $response.IsSuccessStatusCode) { Fail-Safe 'Release download failed.' }
-        if ($response.Content.Headers.ContentLength.HasValue -and $response.Content.Headers.ContentLength.Value -gt $MaxArchiveBytes) { Fail-Safe 'Release archive is too large.' }
+        $contentLength = $response.Content.Headers.ContentLength
+        if ($null -ne $contentLength -and [Int64]$contentLength -gt $MaxArchiveBytes) { Fail-Safe 'Release archive is too large.' }
         $stream = [IO.File]::Open($DestinationPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
         $input = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult(); $buffer = New-Object byte[] 65536; [Int64]$total = 0
         try { while (($read = $input.Read($buffer, 0, $buffer.Length)) -gt 0) { $total += $read; if ($total -gt $MaxArchiveBytes) { Fail-Safe 'Release archive is too large.' }; $stream.Write($buffer, 0, $read) }; if ($total -lt 1) { Fail-Safe 'Release archive is empty.' }; $stream.Flush($true) }

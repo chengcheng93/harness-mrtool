@@ -145,6 +145,20 @@ test("POSIX installer enforces the exact four checksum entries", async () => {
   assert.doesNotMatch(portable, /declare\s+-A/u);
 });
 
+test("PowerShell download guards work across nullable and plain ContentLength implementations", async () => {
+  const sources = await Promise.all([
+    readFile(join(import.meta.dirname, "../../scripts/install.ps1"), "utf8"),
+    readFile(join(import.meta.dirname, "../../skill/harness-mr/scripts/bootstrap.ps1"), "utf8"),
+    readFile(join(import.meta.dirname, "../../plugins/harness-mrtool/scripts/install-cli.ps1"), "utf8"),
+    readFile(join(import.meta.dirname, "../../plugins/harness-mrtool/skills/harness-mr/scripts/bootstrap.ps1"), "utf8"),
+  ]);
+  for (const source of sources) {
+    assert.match(source, /\$contentLength\s*=\s*\$response\.Content\.Headers\.ContentLength/u);
+    assert.match(source, /\$null\s*-ne\s*\$contentLength/u);
+    assert.doesNotMatch(source, /ContentLength\.HasValue|ContentLength\.Value/u);
+  }
+});
+
 test("repair verifies the manager marker before executing the installed binary", async () => {
   const repair = await readFile(join(import.meta.dirname, "../../scripts/repair.ps1"), "utf8");
   assert.match(repair, /archiveSha256|executableSha256/u);
