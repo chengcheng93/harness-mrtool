@@ -2,11 +2,17 @@
 
 ## 当前结论
 
-本次提交整理了 CLI 的安装器、便携包、Skill 打包、Windows 持久化/状态目录安全检查、发布契约测试和发布工作流基础设施。正式 CLI `0.1.3` 已完成 Windows SEA 构建、字节复核并发布为 GitHub 不可变 Release；本版本在此基础上新增 CLI `0.1.4` 和 Plugin `0.1.4` 的无 Token 本地手动交接路径。
+本次提交整理了 CLI 的安装器、便携包、Skill 打包、Windows 持久化/状态目录安全检查、发布契约测试和发布工作流基础设施。正式 CLI `0.1.4` 和 Codex Plugin `0.1.4` 均已完成验证并发布为 GitHub 不可变 Release；本版本新增无 Token 本地手动交接路径。
 
-正式 Release（待本次发布）：<https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.4>
+正式 CLI Release：<https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.4>
+Codex Plugin Release：<https://github.com/chengcheng93/harness-mrtool/releases/tag/plugin-v0.1.4>
+CLI 发布工作流：<https://github.com/chengcheng93/harness-mrtool/actions/runs/32650924186>
+Plugin 发布工作流：<https://github.com/chengcheng93/harness-mrtool/actions/runs/32650924217>
 
-修复版 Portable SHA-256：`dcd873807a61c008132272ad3f49930cbec7c8b4ce60d44590523ad8b839b469`。
+Windows `.exe` SHA-256：`f74e6ed0dab19d4a4c4bd8684e2fc9f3f05886130ca3d82fc15b3714e7147d41`。
+Portable zip SHA-256：`b467068fb4b14c5e1c1b6e6de61aeae1c7a39bd78f682ea49237afb23761080b`。
+Bundle receipt SHA-256：`d96725bd495f41d6d781b4fa2e838b53e7dade38be80a2a41e8efbc75313ca96`。
+Codex Plugin zip SHA-256：`f45c673ed4c9f9b704e2010739d5fd6e9b1396322da8090ccabc23f4b38f11c1`。
 
 ## 发布候选整合状态
 
@@ -18,7 +24,7 @@
 
 ## 本次正式发布准备
 
-- 正式 CLI 版本：`0.1.3`，目标 Tag：`cli-v0.1.3`。
+- 正式 CLI 版本：`0.1.4`，Tag：`cli-v0.1.4`；Codex Plugin 版本：`0.1.4`，Tag：`plugin-v0.1.4`。
 - 已生成第一把生产 Ed25519 根：`release-key-1`。
 - 公钥指纹：`75f4bca790273aa6079eead3bb071db7cc9ead8442f3d9cb112249bec15d0eaf`。
 - Bundle receipt 已按 `templates-v1.0.0`、当前 manifest 和全部模板文件哈希生成并签名；私钥和 Base64 Secret 保存在仓库外的受限目录，未写入 Git。
@@ -39,6 +45,8 @@
 - Release CLI #4（Actions run `32644748847`）成功完成修复版构建、验收和不可变发布。
 - Release CLI #5（Actions run `32646019146`）和 Plugin #5（Actions run `32646019087`）成功完成第二次兼容性修复发布。
 - Release CLI #6（Actions run `32647676578`）成功发布 `cli-v0.1.3`，修复生产更新信任 preflight 无条件失败问题；Release 已确认 immutable。
+- Release CLI #7（Actions run `32650924186`）成功发布 `cli-v0.1.4`；构建、验收和发布三个 job 均成功，Release 已确认 immutable。
+- Release Plugin #4（Actions run `32650924217`）成功发布 `plugin-v0.1.4`；验证 job 成功，Release 已确认 immutable。
 
 ## 本次纳入提交的内容
 
@@ -52,7 +60,7 @@
 
 ## 当前未完成的内容
 
-- `templates-vX.Y.Z` 和 `skill-vX.Y.Z` 的产品 Tag/Release 仍未确定；本次只完成 CLI `0.1.0`。
+- `templates-vX.Y.Z` 和 `skill-vX.Y.Z` 的独立产品 Tag/Release 仍未确定；本次发布使用已验证的嵌入 Bundle，并已同时发布匹配的 CLI/Plugin `0.1.4`。
 - Signed GitHub Pages stable channel 尚未部署，Channel Envelope 的生产签名和端到端客户端拉取仍需单独验收。
 - portable 安装、repair、uninstall、Skill install/activate 的真实用户环境端到端验收仍需补做；Release 工作流已完成构建和归档字节门禁，但不替代这些产品流程验收。
 - 隔离 GitLab 集成和真实 Codex Skill host 仍是外部环境门禁。
@@ -62,7 +70,7 @@
 1. `release-candidate-0.1.0` 在 GitHub Actions Windows runner 上完成 Node `24.16.0` SEA 构建。
 2. `BUNDLE_RECEIPT_B64` 在构建 job 中解码，Bundle receipt、SEA receipt 和 portable archive 均通过发布前后字节复核。
 3. 仓库已启用 Release immutability；工作流先创建草稿、下载复核资产，再发布不可变 Release。
-4. Release `cli-v0.1.0` 已锁定到 `7b67ded`，正式安装资产可从 Release 页面下载。
+4. Release `cli-v0.1.4` 已锁定到提交 `2a6fa945b28c0af4e2673acd7a557091f95714ee`，正式安装资产可从 Release 页面下载。
 
 ## macOS 构建说明
 
