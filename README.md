@@ -9,6 +9,13 @@ updating, and verifying GitLab merge requests from repository changes.
 正式 Windows x64 Release：
 <https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.0>
 
+Codex Plugin 构建产物：
+<https://github.com/chengcheng93/harness-mrtool/releases/tag/plugin-v0.1.0>
+
+插件源码位于 `plugins/harness-mrtool/`，其中包含 `.codex-plugin/plugin.json`
+和 `harness-mr` Skill。插件依赖已安装的 `harness-mrtool` CLI；两者是两个
+独立产物，分别按 CLI Release 和 Plugin Release 发布。
+
 The repository requires Node `24.16.0`:
 
 ```text

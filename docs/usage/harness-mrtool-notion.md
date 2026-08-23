@@ -365,11 +365,12 @@ harness-mrtool verify 123 --level merge --output json
 
 ## 11. 当前版本的范围和未完成项
 
-`cli-v0.1.0` 已完成 Windows x64 CLI Release、portable zip、Bundle receipt、SEA receipt、不可变 GitHub Release 和发布前后字节复核。
+`cli-v0.1.0` 已完成 Windows x64 CLI Release、portable zip、Bundle receipt、SEA receipt、不可变 GitHub Release 和发布前后字节复核。`plugin-v0.1.0` 单独提供 Codex Plugin 包，插件只承载 Skill 适配层，仍依赖已安装的 CLI。
 
 以下事项仍属于后续外部门禁，不应在当前版本中当作已完成能力：
 
 - Linux/macOS 原生 SEA 和对应安装包；
+- CLI 与 Codex Plugin 的真实用户环境安装验收；
 - Signed GitHub Pages stable channel 的生产 Channel Envelope；
 - `templates-vX.Y.Z` 和 `skill-vX.Y.Z` 产品 Release；
 - 真实用户 Windows 安装、repair、uninstall、Skill activate 的完整端到端验收；

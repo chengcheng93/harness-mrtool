@@ -1,0 +1,92 @@
+name: Release Codex Plugin
+
+on:
+  push:
+    tags:
+      - 'plugin-v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Immutable Codex plugin release tag
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+      PLUGIN_DIST: dist/plugin-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.16.0
+      - run: npm ci
+      - name: Require an immutable semantic plugin release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^plugin-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]
+      - run: npm run typecheck
+      - name: Package and verify the Codex plugin
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${RELEASE_TAG#plugin-v}"
+          mkdir -p "$PLUGIN_DIST"
+          node scripts/package-plugin.mjs --input plugins/harness-mrtool --output "$PLUGIN_DIST" --version "$VERSION"
+          test -s "$PLUGIN_DIST/harness-mrtool-codex-plugin.zip"
+          test -s "$PLUGIN_DIST/SHA256SUMS"
+          (cd "$PLUGIN_DIST" && sha256sum -c SHA256SUMS)
+      - name: Attest the verified plugin archive
+        uses: actions/attest@v4
+        with:
+          subject-path: ${{ env.PLUGIN_DIST }}/harness-mrtool-codex-plugin.zip
+      - name: Upload verified plugin assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-plugin-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.PLUGIN_DIST }}
+      - name: Publish a draft after verification
+        if: ${{ env.RELEASE_TAG != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TARGET_SHA="$(git rev-list -n 1 "$RELEASE_TAG")"
+          gh release create "$RELEASE_TAG" --draft --verify-tag --target "$TARGET_SHA" --title "$RELEASE_TAG" --generate-notes "$PLUGIN_DIST/harness-mrtool-codex-plugin.zip" "$PLUGIN_DIST/SHA256SUMS"
+      - name: Download and verify the draft assets
+        if: ${{ env.RELEASE_TAG != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf draft-plugin
+          gh release download "$RELEASE_TAG" --dir draft-plugin --pattern 'harness-mrtool-codex-plugin.zip' --pattern 'SHA256SUMS'
+          cmp --silent "$PLUGIN_DIST/harness-mrtool-codex-plugin.zip" draft-plugin/harness-mrtool-codex-plugin.zip
+          cmp --silent "$PLUGIN_DIST/SHA256SUMS" draft-plugin/SHA256SUMS
+          (cd draft-plugin && sha256sum -c SHA256SUMS)
+      - name: Publish the verified plugin draft
+        if: ${{ env.RELEASE_TAG != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$RELEASE_TAG" --draft=false
+      - name: Verify immutable plugin release
+        if: ${{ env.RELEASE_TAG != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" = false
+          test "$(gh release view "$RELEASE_TAG" --json isImmutable --jq .isImmutable)" = true

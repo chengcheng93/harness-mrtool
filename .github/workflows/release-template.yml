@@ -1,6 +1,9 @@
 name: Release Template Bundle
 
 on:
+  push:
+    tags:
+      - 'templates-v*'
   workflow_dispatch:
     inputs:
       tag:
@@ -18,12 +21,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      RELEASE_TAG: ${{ inputs.tag }}
+      RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
       TEMPLATE_DIST: dist/template-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
       - uses: actions/setup-node@v4
         with:
           node-version: 24.16.0
@@ -54,7 +57,7 @@ jobs:
           test -s "$TEMPLATE_DIST/harness-mr-templates.zip"
           test -s "$TEMPLATE_DIST/bundle-receipt.envelope.json"
         env:
-          BUNDLE_RECEIPT_B64: ${{ secrets.TEMPLATE_BUNDLE_RECEIPT_B64 }}
+          BUNDLE_RECEIPT_B64: ${{ secrets.TEMPLATE_BUNDLE_RECEIPT_B64 || secrets.BUNDLE_RECEIPT_B64 }}
       - name: Attest the verified template archive
         uses: actions/attest@v4
         with:
@@ -65,12 +68,15 @@ jobs:
           name: release-template-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.TEMPLATE_DIST }}
       - name: Publish a draft after verification
-        if: ${{ inputs.tag != '' }}
+        if: ${{ env.RELEASE_TAG != '' }}
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${RELEASE_TAG}" --draft --verify-tag --target "${GITHUB_SHA}" --title "${RELEASE_TAG}" --generate-notes "$TEMPLATE_DIST/harness-mr-templates.zip" "$TEMPLATE_DIST/bundle-receipt.envelope.json" "$TEMPLATE_DIST/SHA256SUMS"
+        run: |
+          set -euo pipefail
+          TARGET_SHA="$(git rev-list -n 1 "${RELEASE_TAG}")"
+          gh release create "${RELEASE_TAG}" --draft --verify-tag --target "${TARGET_SHA}" --title "${RELEASE_TAG}" --generate-notes "$TEMPLATE_DIST/harness-mr-templates.zip" "$TEMPLATE_DIST/bundle-receipt.envelope.json" "$TEMPLATE_DIST/SHA256SUMS"
       - name: Download and verify the draft assets
-        if: ${{ inputs.tag != '' }}
+        if: ${{ env.RELEASE_TAG != '' }}
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -83,12 +89,12 @@ jobs:
           cmp --silent "$TEMPLATE_DIST/SHA256SUMS" draft-template/SHA256SUMS
           (cd draft-template && sha256sum -c SHA256SUMS)
       - name: Publish the verified template draft
-        if: ${{ inputs.tag != '' }}
+        if: ${{ env.RELEASE_TAG != '' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release edit "${RELEASE_TAG}" --draft=false
       - name: Verify immutable template release
-        if: ${{ inputs.tag != '' }}
+        if: ${{ env.RELEASE_TAG != '' }}
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash

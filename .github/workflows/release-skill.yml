@@ -1,6 +1,9 @@
 name: Release Skill Bundle
 
 on:
+  push:
+    tags:
+      - 'skill-v*'
   workflow_dispatch:
     inputs:
       tag:
@@ -18,12 +21,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      RELEASE_TAG: ${{ inputs.tag }}
+      RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
       SKILL_DIST: dist/skill-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
       - uses: actions/setup-node@v4
         with:
           node-version: 24.16.0
@@ -50,7 +53,10 @@ jobs:
             mkdir -p "$SKILL_DIST"
           fi
           mkdir -p "$SKILL_DIST/skill-bundle"
-          node scripts/package-skill.mjs --input skill/harness-mr --output "$SKILL_DIST/skill-tree" --version "$SKILL_VERSION"
+          CLI_VERSION="$(node -p "JSON.parse(require('fs').readFileSync('package.json', 'utf8')).version")"
+          CLI_MAJOR="${CLI_VERSION%%.*}"
+          NEXT_MAJOR="$((CLI_MAJOR + 1))"
+          node scripts/package-skill.mjs --input skill/harness-mr --output "$SKILL_DIST/skill-tree" --version "$SKILL_VERSION" --cli-version-range ">=$CLI_VERSION <$NEXT_MAJOR.0.0"
           (cd "$SKILL_DIST/skill-tree" && zip -X -q -r ../skill-bundle/harness-mr-skill.zip .)
           printf '%s' "$BUNDLE_RECEIPT_B64" | base64 --decode > "$SKILL_DIST/skill-bundle/bundle-receipt.envelope.json"
           (cd "$SKILL_DIST/skill-bundle" && sha256sum harness-mr-skill.zip bundle-receipt.envelope.json > SHA256SUMS)
@@ -68,12 +74,15 @@ jobs:
           name: release-skill-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.SKILL_DIST }}/skill-bundle
       - name: Publish a draft after verification
-        if: ${{ inputs.tag != '' }}
+        if: ${{ env.RELEASE_TAG != '' }}
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${RELEASE_TAG}" --draft --verify-tag --target "${GITHUB_SHA}" --title "${RELEASE_TAG}" --generate-notes "${SKILL_DIST}/skill-bundle/harness-mr-skill.zip" "${SKILL_DIST}/skill-bundle/bundle-receipt.envelope.json" "${SKILL_DIST}/skill-bundle/SHA256SUMS"
+        run: |
+          set -euo pipefail
+          TARGET_SHA="$(git rev-list -n 1 "${RELEASE_TAG}")"
+          gh release create "${RELEASE_TAG}" --draft --verify-tag --target "${TARGET_SHA}" --title "${RELEASE_TAG}" --generate-notes "${SKILL_DIST}/skill-bundle/harness-mr-skill.zip" "${SKILL_DIST}/skill-bundle/bundle-receipt.envelope.json" "${SKILL_DIST}/skill-bundle/SHA256SUMS"
       - name: Download and verify the draft assets
-        if: ${{ inputs.tag != '' }}
+        if: ${{ env.RELEASE_TAG != '' }}
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -86,12 +95,12 @@ jobs:
           cmp --silent "$SKILL_DIST/skill-bundle/SHA256SUMS" draft-skill/SHA256SUMS
           (cd draft-skill && sha256sum -c SHA256SUMS)
       - name: Publish the verified skill draft
-        if: ${{ inputs.tag != '' }}
+        if: ${{ env.RELEASE_TAG != '' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release edit "${RELEASE_TAG}" --draft=false
       - name: Verify immutable skill release
-        if: ${{ inputs.tag != '' }}
+        if: ${{ env.RELEASE_TAG != '' }}
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash

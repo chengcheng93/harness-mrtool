@@ -1,0 +1,37 @@
+{
+  "name": "harness-mrtool",
+  "version": "0.1.0",
+  "description": "Deterministic GitLab merge request workflows for Codex.",
+  "author": {
+    "name": "chengcheng93",
+    "url": "https://github.com/chengcheng93"
+  },
+  "homepage": "https://github.com/chengcheng93/harness-mrtool",
+  "repository": "https://github.com/chengcheng93/harness-mrtool",
+  "license": "MIT",
+  "keywords": [
+    "gitlab",
+    "merge-request",
+    "code-review",
+    "codex"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Harness MR",
+    "shortDescription": "Create verified GitLab merge requests from repository changes.",
+    "longDescription": "Uses the harness-mrtool CLI to gather live GitLab context, preview deterministic merge request content, and create, update, or verify managed merge requests.",
+    "developerName": "chengcheng93",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/chengcheng93/harness-mrtool",
+    "brandColor": "#2563EB",
+    "defaultPrompt": [
+      "Prepare a deterministic merge request from my changes.",
+      "Preview the GitLab merge request for this branch.",
+      "Verify the current managed merge request."
+    ]
+  }
+}

@@ -155,11 +155,18 @@ function cliArguments(argv) {
     const key = argv[index];
     const value = argv[index + 1];
     if (!key?.startsWith("--") || value === undefined || value.startsWith("--")) fail("CLI arguments are invalid");
-    const field = { "--input": "inputDirectory", "--output": "outputDirectory", "--version": "version" }[key];
+    const field = {
+      "--input": "inputDirectory",
+      "--output": "outputDirectory",
+      "--version": "version",
+      "--cli-version-range": "cliVersionRange",
+    }[key];
     if (field === undefined || result[field] !== undefined) fail("CLI arguments are invalid");
     result[field] = value;
   }
-  if (Object.keys(result).length !== 3) fail("all packaging paths are required");
+  if (result.inputDirectory === undefined || result.outputDirectory === undefined || result.version === undefined) {
+    fail("input, output, and version are required");
+  }
   return result;
 }
 
