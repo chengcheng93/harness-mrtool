@@ -379,7 +379,7 @@ harness-mrtool verify 123 --level merge --output json
 
 ## 11. 当前版本的范围和未完成项
 
-`cli-v0.1.1` 已完成 Windows x64 CLI Release、portable zip、Bundle receipt、SEA receipt、不可变 GitHub Release 和发布前后字节复核，并修复 PowerShell `ContentLength.HasValue` 兼容性问题。`plugin-v0.1.0` 单独提供 Codex Plugin 包，插件只承载 Skill 适配层，仍依赖已安装的 CLI。
+`cli-v0.1.1` 已完成 Windows x64 CLI Release、portable zip、Bundle receipt、SEA receipt、不可变 GitHub Release 和发布前后字节复核，并修复 PowerShell `ContentLength.HasValue` 兼容性问题。`plugin-v0.1.1` 单独提供包含同一修复的 Codex Plugin 包，插件只承载 Skill 适配层，仍依赖已安装的 CLI。
 
 以下事项仍属于后续外部门禁，不应在当前版本中当作已完成能力：
 

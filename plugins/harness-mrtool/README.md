@@ -8,7 +8,7 @@ profiles, rendering, labels, writes, and verification.
 
 Install the matching CLI Release first:
 
-<https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.0>
+<https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.1>
 
 The current published CLI supports Windows x64. Configure credentials only in
 the host-scoped environment variables documented by the CLI. Do not put a
