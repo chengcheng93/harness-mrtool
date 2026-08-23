@@ -3,6 +3,12 @@
 `harness-mrtool` is a deterministic CLI for preparing, previewing, creating,
 updating, and verifying GitLab merge requests from repository changes.
 
+使用说明（原理、实现逻辑、安装、配置和命令示例）：
+`docs/usage/harness-mrtool-notion.md`
+
+正式 Windows x64 Release：
+<https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.0>
+
 The repository requires Node `24.16.0`:
 
 ```text
