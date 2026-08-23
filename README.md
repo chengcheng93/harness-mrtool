@@ -16,6 +16,16 @@ Codex Plugin 构建产物：
 和 `harness-mr` Skill。插件依赖已安装的 `harness-mrtool` CLI；两者是两个
 独立产物，分别按 CLI Release 和 Plugin Release 发布。
 
+Codex CLI 安装方式（先安装 CLI，再安装插件）：
+
+```text
+codex plugin marketplace add chengcheng93/harness-mrtool --ref release-candidate-0.1.0
+codex plugin add harness-mrtool@harness-mrtool
+```
+
+安装后请新开一个 Codex task/thread，再在目标 Git 仓库中使用
+“准备当前分支的 merge request”之类的请求。
+
 The repository requires Node `24.16.0`:
 
 ```text

@@ -14,6 +14,18 @@ The current published CLI supports Windows x64. Configure credentials only in
 the host-scoped environment variables documented by the CLI. Do not put a
 GitLab token in a command line, plugin file, or prompt.
 
+## Install from the Git marketplace
+
+The repository includes a Codex marketplace entry. With Codex CLI installed,
+run:
+
+```text
+codex plugin marketplace add chengcheng93/harness-mrtool --ref release-candidate-0.1.0
+codex plugin add harness-mrtool@harness-mrtool
+```
+
+Start a new Codex thread after installation so the host discovers the Skill.
+
 ## Skill flow
 
 Every invocation follows this order:

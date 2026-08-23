@@ -232,6 +232,20 @@ $exe = Join-Path $env:LOCALAPPDATA 'HarnessMrTool\harness-mrtool.exe'
 `%LOCALAPPDATA%\HarnessMrTool` 手动加入当前用户的 PATH 后重新打开 PowerShell。
 加入 PATH 后，下面的命令示例即可直接使用 `harness-mrtool`。
 
+### 7.1.1 Codex Plugin 安装
+
+Plugin 不是 CLI 的替代品，必须先完成 CLI 安装和 GitLab 认证。Codex CLI
+可以直接从本仓库的 Marketplace 清单安装：
+
+```powershell
+codex plugin marketplace add chengcheng93/harness-mrtool --ref release-candidate-0.1.0
+codex plugin add harness-mrtool@harness-mrtool
+```
+
+安装后新开一个 Codex task/thread。进入目标 Git 仓库后，可以直接说“准备当前
+分支的 merge request”；Plugin 会按 `context -> Request -> preview ->
+确认 -> create/update` 调用 CLI。Plugin 不接收或保存 GitLab Token。
+
 也可以直接从 Release 页面下载 `harness-mrtool.exe`；但推荐使用 portable zip 和安装脚本，因为脚本会验证完整归档、receipt、SHA256SUMS 和安装目录所有权。
 
 ### 7.2 配置 GitLab 认证

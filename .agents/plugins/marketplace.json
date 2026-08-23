@@ -1,0 +1,20 @@
+{
+  "name": "harness-mrtool",
+  "interface": {
+    "displayName": "Harness MR Tool"
+  },
+  "plugins": [
+    {
+      "name": "harness-mrtool",
+      "source": {
+        "source": "local",
+        "path": "./plugins/harness-mrtool"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}
