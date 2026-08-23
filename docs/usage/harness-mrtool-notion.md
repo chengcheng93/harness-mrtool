@@ -2,9 +2,9 @@
 
 > 适合复制到 Notion 的项目说明文档
 >
-> 当前正式版本：`0.1.1`
+> 当前正式版本：`0.1.2`
 > GitHub 仓库：<https://github.com/chengcheng93/harness-mrtool>
-> Windows Release：<https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.1>
+> Windows Release：<https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.2>
 
 ## 1. 一句话理解
 
@@ -206,8 +206,8 @@ Skill 更新先进入 CLI 管理的 staging 目录，只有用户显式执行 `s
 PowerShell 示例：
 
 ```powershell
-$tag = 'cli-v0.1.1'
-$sha256 = '55ebe40b2c268d544d16915eae85e7ca0524de193ae1f94287b761c2aaddb0b8'
+$tag = 'cli-v0.1.2'
+$sha256 = '08157ff9ad5de3524891a7eff49bdda77929ded1b5b13317e23e67be8c8f6ad3'
 $installer = Join-Path $env:TEMP 'harness-mrtool-install.ps1'
 
 Invoke-WebRequest `
@@ -379,7 +379,7 @@ harness-mrtool verify 123 --level merge --output json
 
 ## 11. 当前版本的范围和未完成项
 
-`cli-v0.1.1` 已完成 Windows x64 CLI Release、portable zip、Bundle receipt、SEA receipt、不可变 GitHub Release 和发布前后字节复核，并修复 PowerShell `ContentLength.HasValue` 兼容性问题。`plugin-v0.1.1` 单独提供包含同一修复的 Codex Plugin 包，插件只承载 Skill 适配层，仍依赖已安装的 CLI。
+`cli-v0.1.2` 已完成 Windows x64 CLI Release、portable zip、Bundle receipt、SEA receipt、不可变 GitHub Release 和发布前后字节复核，并修复 PowerShell `ContentLength.HasValue` 与 `ZipArchive` 运行时兼容性问题。`plugin-v0.1.2` 单独提供包含同一修复的 Codex Plugin 包，插件只承载 Skill 适配层，仍依赖已安装的 CLI。
 
 以下事项仍属于后续外部门禁，不应在当前版本中当作已完成能力：
 

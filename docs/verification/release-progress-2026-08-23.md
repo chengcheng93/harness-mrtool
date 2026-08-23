@@ -2,11 +2,11 @@
 
 ## 当前结论
 
-本次提交整理了 CLI 的安装器、便携包、Skill 打包、Windows 持久化/状态目录安全检查、发布契约测试和发布工作流基础设施。正式 CLI `0.1.1` 已完成 Windows SEA 构建、字节复核并发布为 GitHub 不可变 Release；该版本修复 PowerShell `ContentLength.HasValue` 兼容性问题。
+本次提交整理了 CLI 的安装器、便携包、Skill 打包、Windows 持久化/状态目录安全检查、发布契约测试和发布工作流基础设施。正式 CLI `0.1.2` 已完成 Windows SEA 构建、字节复核并发布为 GitHub 不可变 Release；该版本修复 PowerShell `ContentLength.HasValue` 与 `ZipArchive` 运行时兼容性问题。
 
-正式 Release：<https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.1>
+正式 Release：<https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.2>
 
-修复版 Portable SHA-256：`55ebe40b2c268d544d16915eae85e7ca0524de193ae1f94287b761c2aaddb0b8`。
+修复版 Portable SHA-256：`08157ff9ad5de3524891a7eff49bdda77929ded1b5b13317e23e67be8c8f6ad3`。
 
 ## 发布候选整合状态
 
@@ -18,7 +18,7 @@
 
 ## 本次正式发布准备
 
-- 正式 CLI 版本：`0.1.1`，目标 Tag：`cli-v0.1.1`。
+- 正式 CLI 版本：`0.1.2`，目标 Tag：`cli-v0.1.2`。
 - 已生成第一把生产 Ed25519 根：`release-key-1`。
 - 公钥指纹：`75f4bca790273aa6079eead3bb071db7cc9ead8442f3d9cb112249bec15d0eaf`。
 - Bundle receipt 已按 `templates-v1.0.0`、当前 manifest 和全部模板文件哈希生成并签名；私钥和 Base64 Secret 保存在仓库外的受限目录，未写入 Git。
@@ -37,6 +37,7 @@
 - 全量 portable 测试已在 Windows CI 通过；macOS 本地运行仍可能受系统进程锁提供器限制，不作为发布门禁依据。
 - Release #3 的构建、验收和发布三个 job 全部成功；Release 页面包含 `.exe`、portable `.zip`、Bundle receipt、SEA build receipt 和 GitHub Release attestation。
 - Release CLI #4（Actions run `32644748847`）成功完成修复版构建、验收和不可变发布。
+- Release CLI #5（Actions run `32646019146`）和 Plugin #5（Actions run `32646019087`）成功完成第二次兼容性修复发布。
 
 ## 本次纳入提交的内容
 
