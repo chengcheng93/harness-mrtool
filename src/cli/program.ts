@@ -25,6 +25,7 @@ export type CliCommand =
     }
   | { readonly kind: "verify"; readonly iid: number | null; readonly level: VerificationLevel }
   | { readonly kind: "preview" }
+  | { readonly kind: "manual" }
   | { readonly kind: "schema.show"; readonly fromMrIid: number | null }
   | { readonly kind: "profiles.list" }
   | { readonly kind: "profiles.detect" }
@@ -141,7 +142,7 @@ function route(arguments_: readonly string[]): { readonly kind: CommandKind; rea
     return { kind: `${first}.${second}` as CommandKind, offset: 2 };
   }
   const standalone = new Set<CommandKind>([
-    "doctor", "context", "create", "update", "verify", "preview", "version",
+    "doctor", "context", "create", "update", "verify", "preview", "manual", "version",
   ]);
   if (!standalone.has(first as CommandKind)) {
     invalid("command", "a V1 command", "unknown command");
@@ -151,7 +152,7 @@ function route(arguments_: readonly string[]): { readonly kind: CommandKind; rea
 
 
 function commonFlagsFor(kind: CommandKind): ReadonlySet<string> {
-  if (kind === "create" || kind === "update" || kind === "preview") {
+  if (kind === "create" || kind === "update" || kind === "preview" || kind === "manual") {
     return REQUEST_COMMON_FLAGS;
   }
   if (kind === "template.export") {
@@ -223,6 +224,7 @@ function commandFor(
       return Object.freeze({ kind, upsert: specific.has("--upsert") });
     }
     case "preview":
+    case "manual":
     case "profiles.list":
     case "profiles.detect":
     case "labels.list":

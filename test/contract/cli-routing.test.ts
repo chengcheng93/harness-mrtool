@@ -19,6 +19,7 @@ test("parses every V1 command into one closed invocation contract", () => {
     [["update", "12", "--force-replace-description"], "update"],
     [["verify", "12", "--level", "merge"], "verify"],
     [["preview", "--input", "request.yaml"], "preview"],
+    [["manual", "--input", "request.yaml", "--push"], "manual"],
     [["schema", "show", "--from-mr", "12"], "schema.show"],
     [["profiles", "list"], "profiles.list"],
     [["profiles", "detect"], "profiles.detect"],

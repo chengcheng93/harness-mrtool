@@ -2,9 +2,9 @@
 
 ## 当前结论
 
-本次提交整理了 CLI 的安装器、便携包、Skill 打包、Windows 持久化/状态目录安全检查、发布契约测试和发布工作流基础设施。正式 CLI `0.1.3` 已完成 Windows SEA 构建、字节复核并发布为 GitHub 不可变 Release；该版本修复 PowerShell `ContentLength.HasValue`、`ZipArchive` 运行时兼容性以及生产更新信任 preflight 无条件失败的问题。
+本次提交整理了 CLI 的安装器、便携包、Skill 打包、Windows 持久化/状态目录安全检查、发布契约测试和发布工作流基础设施。正式 CLI `0.1.3` 已完成 Windows SEA 构建、字节复核并发布为 GitHub 不可变 Release；本版本在此基础上新增 CLI `0.1.4` 和 Plugin `0.1.4` 的无 Token 本地手动交接路径。
 
-正式 Release：<https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.3>
+正式 Release（待本次发布）：<https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.4>
 
 修复版 Portable SHA-256：`dcd873807a61c008132272ad3f49930cbec7c8b4ce60d44590523ad8b839b469`。
 

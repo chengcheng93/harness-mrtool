@@ -1,16 +1,18 @@
 # harness-mrtool
 
 `harness-mrtool` is a deterministic CLI for preparing, previewing, creating,
-updating, and verifying GitLab merge requests from repository changes.
+updating, and verifying GitLab merge requests from repository changes. A
+GitLab token is optional: the `manual` command generates a token-free title,
+description, and SSH push plan for a user-created MR.
 
 使用说明（原理、实现逻辑、安装、配置和命令示例）：
 [Notion-ready 使用手册](docs/usage/harness-mrtool-notion.md)
 
 正式 Windows x64 Release：
-<https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.3>
+<https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.4>
 
 Codex Plugin 构建产物：
-<https://github.com/chengcheng93/harness-mrtool/releases/tag/plugin-v0.1.2>
+<https://github.com/chengcheng93/harness-mrtool/releases/tag/plugin-v0.1.4>
 
 插件源码位于 `plugins/harness-mrtool/`，其中包含 `.codex-plugin/plugin.json`
 和 `harness-mr` Skill。插件依赖已安装的 `harness-mrtool` CLI；两者是两个

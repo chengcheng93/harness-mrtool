@@ -16,7 +16,7 @@ test("Codex plugin packaging emits a bounded, self-contained archive", async () 
     const result = await packagePlugin({
       inputDirectory: join(repositoryRoot, "plugins", "harness-mrtool"),
       outputDirectory: output,
-      version: "0.1.2",
+      version: "0.1.4",
     });
     const archive = await readFile(result.archivePath);
     const entries = unzipSync(archive);
@@ -35,7 +35,7 @@ test("Codex plugin packaging emits a bounded, self-contained archive", async () 
     );
     const manifest = JSON.parse(Buffer.from(entries[".codex-plugin/plugin.json"]!).toString("utf8")) as Record<string, unknown>;
     assert.equal(manifest.name, "harness-mrtool");
-    assert.equal(manifest.version, "0.1.2");
+    assert.equal(manifest.version, "0.1.4");
     const sums = await readFile(result.sumsPath, "utf8");
     assert.match(sums, /^[a-f0-9]{64}  harness-mrtool-codex-plugin\.zip\n$/u);
   } finally {

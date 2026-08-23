@@ -46,6 +46,8 @@ export function renderSkillInstructions(options: SkillProjectionOptions): string
     "",
     "Use the returned Schema, diff evidence, and test output to build the Request. Ask the user for values that the repository cannot establish.",
     "Use the CLI renderer and candidate tokens; do not copy template sections, label names, or user IDs into this Skill.",
+    "If context returns AUTH_ERROR or GITLAB_ERROR, read schema.show and profiles.list, then use manual to produce a token-free title, body, and SSH push plan. Manual mode never creates an MR; after optional --push, the user creates it in GitLab and selects live labels and reviewers.",
+    "harness-mrtool manual --input - --input-format json --client codex-skill --client-version <skill-semver> --skill-protocol <protocol> --output json",
     "",
     "Run the read-only preview before a side effect:",
     "",

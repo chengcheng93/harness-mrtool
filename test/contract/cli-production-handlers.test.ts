@@ -53,7 +53,7 @@ async function removeFixtureDirectory(directory: string): Promise<void> {
 
 const ROUTES: readonly (readonly string[])[] = [
   ["doctor"], ["context"], ["create"], ["update"], ["verify", "1", "--level", "structure"],
-  ["preview"], ["profiles.detect"], ["labels.list"], ["template.refresh"],
+  ["preview"], ["manual"], ["profiles.detect"], ["labels.list"], ["template.refresh"],
   ["self-update.check"], ["self-update.status"], ["self-update.apply"], ["self-update.rollback", "--version", "1.2.3"],
   ["skill.install", "--path", "skill"], ["skill.activate", "--version", "1.2.3", "--path", "skill"], ["skill.status"],
 ];

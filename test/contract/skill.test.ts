@@ -80,6 +80,8 @@ test("Skill instructions begin with context and delegate rendering/labels to the
   const contextIndex = instructions.indexOf("harness-mrtool context");
   assert.notEqual(contextIndex, -1);
   assert.ok(contextIndex < instructions.indexOf("harness-mrtool preview"));
+  assert.ok(instructions.includes("harness-mrtool manual"));
+  assert.ok(instructions.includes("AUTH_ERROR"));
   assert.ok(instructions.includes("harness-mrtool create"));
   assert.ok(instructions.includes("harness-mrtool update"));
   assert.ok(!instructions.includes("status::"));

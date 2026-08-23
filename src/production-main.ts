@@ -14,6 +14,7 @@ import {
   mergeCliCommandHandlers,
   type ProductionCommandServices,
 } from "./cli/commands/production.ts";
+import { createManualCommandServices } from "./cli/commands/manual.ts";
 import type { ProfileDetectionRepositoryRuntime } from "./cli/commands/repository.ts";
 import {
   executeCliJson,
@@ -128,6 +129,15 @@ async function publicCommandHandlers(
     current: currentBundle,
     writeProjection: writeProjectTemplate,
   });
+  const readOnly = dependencies.readOnly === undefined
+    ? createProductionReadOnlyDefaults({
+        cliVersion,
+        cwd,
+        currentBundle,
+        contextIssueIid,
+        ...dependencies.readOnlyDefaults,
+      })
+    : { ...dependencies.readOnly, contextIssueIid };
   const production = createProductionRuntime({
     cliVersion,
     cwd,
@@ -136,15 +146,7 @@ async function publicCommandHandlers(
       discover: discoverProfileDetectionRepository,
       readChangeSet: readCanonicalChangeSet,
     },
-    readOnly: dependencies.readOnly === undefined
-      ? createProductionReadOnlyDefaults({
-          cliVersion,
-          cwd,
-          currentBundle,
-          contextIssueIid,
-          ...dependencies.readOnlyDefaults,
-        })
-      : { ...dependencies.readOnly, contextIssueIid },
+    readOnly,
     targetProjectResolver: dependencies.targetProjectResolver ?? createGitLabTargetProjectResolver(),
     services: {
       ...(dependencies.updateService === undefined
@@ -153,6 +155,12 @@ async function publicCommandHandlers(
       ...(dependencies.skillService === undefined
         ? {}
         : createSkillCommandServices(dependencies.skillService)),
+      ...createManualCommandServices({
+        cliVersion,
+        cwd,
+        currentBundle,
+        requestSource: readOnly.requestSource,
+      }),
     },
   });
   return mergeCliCommandHandlers(local, production);

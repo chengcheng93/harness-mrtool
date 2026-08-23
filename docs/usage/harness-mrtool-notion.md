@@ -2,9 +2,9 @@
 
 > 适合复制到 Notion 的项目说明文档
 >
-> 当前正式版本：`0.1.3`
+> 当前正式版本：`0.1.4`
 > GitHub 仓库：<https://github.com/chengcheng93/harness-mrtool>
-> Windows Release：<https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.3>
+> Windows Release：<https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.4>
 
 ## 1. 一句话理解
 
@@ -206,7 +206,7 @@ Skill 更新先进入 CLI 管理的 staging 目录，只有用户显式执行 `s
 PowerShell 示例：
 
 ```powershell
-$tag = 'cli-v0.1.3'
+$tag = 'cli-v0.1.4'
 $sha256 = 'dcd873807a61c008132272ad3f49930cbec7c8b4ce60d44590523ad8b839b469'
 $installer = Join-Path $env:TEMP 'harness-mrtool-install.ps1'
 
@@ -234,7 +234,7 @@ $exe = Join-Path $env:LOCALAPPDATA 'HarnessMrTool\harness-mrtool.exe'
 
 ### 7.1.1 Codex Plugin 安装
 
-Plugin 不是 CLI 的替代品，必须先完成 CLI 安装和 GitLab 认证。Codex CLI
+Plugin 不是 CLI 的替代品，但 GitLab 认证是可选的。Codex CLI
 可以直接从本仓库的 Marketplace 清单安装：
 
 ```powershell
@@ -245,6 +245,12 @@ codex plugin add harness-mrtool@harness-mrtool
 安装后新开一个 Codex task/thread。进入目标 Git 仓库后，可以直接说“准备当前
 分支的 merge request”；Plugin 会按 `context -> Request -> preview ->
 确认 -> create/update` 调用 CLI。Plugin 不接收或保存 GitLab Token。
+
+如果 `context` 返回 `AUTH_ERROR` 或 `GITLAB_ERROR`，Plugin 会自动改走
+`schema/profiles -> Request -> manual`：CLI 在本地生成标题、正文和 SSH
+推送计划，不调用 GitLab，也不选择实时标签、负责人或审核人。用户确认后
+可以用 `manual --push` 或输出的 Git 命令推送分支，再在 GitLab 网页手动创建
+MR。这个路径不会声称 MR 已创建。
 
 也可以直接从 Release 页面下载 `harness-mrtool.exe`；但推荐使用 portable zip 和安装脚本，因为脚本会验证完整归档、receipt、SHA256SUMS 和安装目录所有权。
 
@@ -338,6 +344,7 @@ harness-mrtool verify 123 --level merge --output json
 | `doctor` | 检查仓库、GitLab、Bundle、权限和能力 | 否 |
 | `context` | 生成当前上下文和候选 token | 否 |
 | `preview` | 生成确定性写入计划 | 否 |
+| `manual` | 无 Token 生成本地标题、正文和 SSH 推送计划 | 仅显式 `--push` 时写 Git 远端 |
 | `create` | 创建或按 `--upsert` 更新 MR | 是 |
 | `update <iid>` | 更新已有受管 MR | 是 |
 | `verify <iid>` | 验证 MR 状态 | 否 |
@@ -379,7 +386,7 @@ harness-mrtool verify 123 --level merge --output json
 
 ## 11. 当前版本的范围和未完成项
 
-`cli-v0.1.3` 已完成 Windows x64 CLI Release、portable zip、Bundle receipt、SEA receipt、不可变 GitHub Release 和发布前后字节复核，并修复 PowerShell `ContentLength.HasValue`、`ZipArchive` 运行时兼容性以及生产更新信任 preflight 无条件失败的问题。`plugin-v0.1.2` 仍可作为 Skill 适配层使用，但需要匹配安装 `cli-v0.1.3`。
+`cli-v0.1.4` 在 `0.1.3` 的 Windows x64 CLI Release 基础上新增无 Token 本地手动交接路径：可生成确定性标题、正文和 SSH 推送计划，不调用 GitLab API，不伪造 MR 创建成功。`plugin-v0.1.4` 会在 `context` 返回 `AUTH_ERROR` 或 `GITLAB_ERROR` 时自动切换该路径；有 Token 时现有 `context -> preview -> create/update` 链路保持不变。
 
 以下事项仍属于后续外部门禁，不应在当前版本中当作已完成能力：
 
@@ -394,14 +401,10 @@ harness-mrtool verify 123 --level merge --output json
 
 ```text
 安装 Release
-  -> 配置当前 GitLab Host 的 Token
-  -> doctor
-  -> context
-  -> profiles detect / labels list
-  -> create（人工向导）或 preview + create（自动化）
-  -> verify structure
-  -> 需要 Ready 时再显式更新为 ready
-  -> verify ready / merge
+  -> 有 Token：配置当前 GitLab Host 的 Token -> doctor -> context
+     -> preview -> create/update -> verify
+  -> 无 Token：schema/profiles -> manual -> 确认后 SSH push
+     -> 在 GitLab 网页粘贴标题/正文并手动选择标签、负责人、审核人
 ```
 
 最重要的使用原则只有三条：

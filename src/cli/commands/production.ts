@@ -27,6 +27,7 @@ export interface ProductionCommandServices {
   readonly update?: ProductionCommandHandler;
   readonly verify?: ProductionCommandHandler;
   readonly preview?: ProductionCommandHandler;
+  readonly manual?: ProductionCommandHandler;
   readonly profilesDetect?: ProductionCommandHandler;
   readonly labelsList?: ProductionCommandHandler;
   readonly templateRefresh?: ProductionCommandHandler;
@@ -156,6 +157,7 @@ export function createProductionCommandHandlers(
     update: handler(services.update, "update", "AUTH_ERROR"),
     verify: handler(services.verify, "verify", "AUTH_ERROR"),
     preview: handler(services.preview, "preview", "REPOSITORY_ERROR"),
+    manual: handler(services.manual, "manual", "REPOSITORY_ERROR"),
     "profiles.detect": handler(services.profilesDetect, "profiles.detect", "REPOSITORY_ERROR"),
     "labels.list": handler(services.labelsList, "labels.list", "AUTH_ERROR"),
     "template.refresh": handler(services.templateRefresh, "template.refresh", "UPDATE_REQUIRED"),
