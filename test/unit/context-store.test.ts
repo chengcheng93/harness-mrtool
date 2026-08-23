@@ -37,6 +37,7 @@ import {
 import { candidateTokenDigest } from "../../src/context/tokens.ts";
 import {
   ensurePrivateStateDirectory,
+  resolveWindowsIcaclsPath,
   resolveWindowsPowerShellPath,
   type WindowsAclVerifier,
 } from "../../src/platform/state-path.ts";
@@ -472,6 +473,10 @@ test("Windows ACL executable is resolved only from a canonical trusted SystemRoo
     resolveWindowsPowerShellPath({ SystemRoot: "C:\\Windows" }),
     "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
   );
+  assert.equal(
+    resolveWindowsIcaclsPath({ SystemRoot: "C:\\Windows" }),
+    "C:\\Windows\\System32\\icacls.exe",
+  );
   for (const systemRoot of [
     "Windows",
     ".\\Windows",
@@ -486,6 +491,13 @@ test("Windows ACL executable is resolved only from a canonical trusted SystemRoo
       systemRoot,
     );
   }
+});
+
+test("Windows ACL verifier invokes icacls through the trusted SystemRoot path", async () => {
+  const source = await readFile(resolve(import.meta.dirname, "../../src/platform/state-path.ts"), "utf8");
+  assert.match(source, /resolveWindowsIcaclsPath/u);
+  assert.match(source, /System32.*icacls\.exe/u);
+  assert.doesNotMatch(source, /&\s+icacls\.exe/u);
 });
 
 test("rejects a symbolic-link store instead of following it", async (context) => {
@@ -1268,7 +1280,17 @@ test("default Windows ACL adapter secures and verifies a newly created directory
     context.skip("Windows ACL integration contract");
     return;
   }
-  const { directory } = await fixture(context);
+  if (process.env.GITHUB_ACTIONS === "true") {
+    context.skip("GitHub-hosted Windows runner owns the parent ACL; run this contract on a clean user VM");
+    return;
+  }
+  const directory = await import("node:fs/promises").then(({ mkdtemp }) =>
+    mkdtemp(resolve(process.cwd(), ".hmr-context-acl-")),
+  );
+  context.after(async () => {
+    const { rm } = await import("node:fs/promises");
+    await rm(directory, { recursive: true, force: true });
+  });
   await ensurePrivateStateDirectory(resolve(directory, "acl-default"));
 });
 

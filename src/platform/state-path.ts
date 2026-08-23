@@ -4,17 +4,32 @@ import { dirname, resolve, win32 } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
+
+
+
 import { ToolError } from "../contracts/errors.ts";
 
+
+
+
 const execFileAsync = promisify(execFile);
+
+
+
 
 export interface WindowsAclVerifier {
   verify(path: string): Promise<void>;
 }
 
+
+
+
 export interface PrivateStateDirectoryOptions {
   readonly windowsAclVerifier?: WindowsAclVerifier;
 }
+
+
+
 
 function stateError(reason: string): ToolError<"INTERNAL_ERROR"> {
   return new ToolError("INTERNAL_ERROR", `Private state path is unsafe: ${reason}`, {
@@ -24,6 +39,9 @@ function stateError(reason: string): ToolError<"INTERNAL_ERROR"> {
     safeNextStep: "Inspect or remove the unsafe state path, then retry.",
   });
 }
+
+
+
 
 export function defaultStateDirectory(environment: NodeJS.ProcessEnv = process.env): string {
   if (process.platform === "win32") {
@@ -37,11 +55,17 @@ export function defaultStateDirectory(environment: NodeJS.ProcessEnv = process.e
   return resolve(base, "harness-mrtool");
 }
 
+
+
+
 function powershellSingleQuoted(value: string): string {
   return `'${value.replaceAll("'", "''")}'`;
 }
 
-export function resolveWindowsPowerShellPath(environment: NodeJS.ProcessEnv = process.env): string {
+
+
+
+function resolveWindowsSystemRoot(environment: NodeJS.ProcessEnv): string {
   const systemRoot = environment.SystemRoot;
   if (systemRoot === undefined ||
       !/^[A-Za-z]:\\[^\\/:*?"<>|]+(?:\\[^\\/:*?"<>|]+)*$/u.test(systemRoot) ||
@@ -49,44 +73,99 @@ export function resolveWindowsPowerShellPath(environment: NodeJS.ProcessEnv = pr
       !win32.isAbsolute(systemRoot)) {
     throw stateError("SystemRoot is unavailable or untrusted");
   }
-  return win32.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  return systemRoot;
 }
+
+export function resolveWindowsPowerShellPath(environment: NodeJS.ProcessEnv = process.env): string {
+  return win32.join(
+    resolveWindowsSystemRoot(environment),
+    "System32",
+    "WindowsPowerShell",
+    "v1.0",
+    "powershell.exe",
+  );
+}
+
+export function resolveWindowsIcaclsPath(environment: NodeJS.ProcessEnv = process.env): string {
+  return win32.join(resolveWindowsSystemRoot(environment), "System32", "icacls.exe");
+}
+
+
+
 
 export const systemWindowsAclVerifier: WindowsAclVerifier = {
   async verify(path) {
+    const environment = process.env;
+    const powershellPath = resolveWindowsPowerShellPath(environment);
+    const icaclsPath = powershellSingleQuoted(resolveWindowsIcaclsPath(environment));
     const script = [
       `$path = ${powershellSingleQuoted(path)}`,
-      "$current = [System.Security.Principal.WindowsIdentity]::GetCurrent().User",
+      `$icacls = ${icaclsPath}`,
+      "$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()",
+      "$current = $identity.User",
+      "$currentName = $identity.Name",
+      "$tokenOwner = $identity.Owner",
       "$system = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')",
       "$admins = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')",
       "$inheritance = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'",
       "$propagation = [System.Security.AccessControl.PropagationFlags]::None",
       "$allow = [System.Security.AccessControl.AccessControlType]::Allow",
       "$rights = [System.Security.AccessControl.FileSystemRights]::FullControl",
+      "$currentValue = $current.Value",
+      "$args = @($path, '/inheritance:r', '/grant:r', \"*$currentValue`:(OI)(CI)(F)\", '*S-1-5-18:(OI)(CI)(F)', '*S-1-5-32-544:(OI)(CI)(F)')",
+      "if (-not [IO.File]::Exists($icacls)) { exit 24 }",
+      "& $icacls @args | Out-Null",
+      "if ($LASTEXITCODE -ne 0) { exit 24 }",
       "$acl = Get-Acl -LiteralPath $path",
-      "$acl.SetAccessRuleProtection($true, $false)",
-      "foreach ($rule in @($acl.Access)) { $acl.RemoveAccessRuleSpecific($rule) | Out-Null }",
-      "foreach ($sid in @($current, $system, $admins)) { $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sid, $rights, $inheritance, $propagation, $allow))) }",
-      "$acl.SetOwner($current)",
-      "Set-Acl -LiteralPath $path -AclObject $acl",
-      "$acl = Get-Acl -LiteralPath $path",
-      "if ($acl.Owner -ne $current.Value -and $acl.Owner -ne ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)) { exit 21 }",
-      "$allowed = @($current.Value, [System.Security.Principal.WindowsIdentity]::GetCurrent().Name, $system.Value, $admins.Value, 'NT AUTHORITY\\SYSTEM', 'BUILTIN\\Administrators')",
-      "$unsafe = $acl.Access | Where-Object { $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Value -notin $allowed }",
+      "$allowed = @($current.Value, $tokenOwner.Value, $system.Value, $admins.Value)",
+      "$allowedNames = @($identity.Name, 'NT AUTHORITY\\SYSTEM', 'BUILTIN\\Administrators')",
+      "$owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value",
+      "$ownerName = $acl.GetOwner([System.Security.Principal.NTAccount]).Value",
+      "if ($owner -notin $allowed -and $ownerName -notin $allowedNames) {",
+      "  if ($owner -eq 'S-1-5-32-545') { exit 27 }",
+      "  if ($owner -like 'S-1-5-21-*') { exit 26 }",
+      "  if ($owner -like 'S-1-5-80-*') { exit 28 }",
+      "  exit 21",
+      "}",
+      "$rules = $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])",
+      "$unsafe = $rules | Where-Object { $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Value -notin $allowed }",
       "if ($unsafe) { exit 22 }",
       "if (-not $acl.AreAccessRulesProtected) { exit 23 }",
     ].join("; ");
     try {
       await execFileAsync(
-        resolveWindowsPowerShellPath(),
+        powershellPath,
         ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
         { windowsHide: true, timeout: 5_000, encoding: "utf8" },
       );
-    } catch {
-      throw stateError("Windows ACL verification failed");
+    } catch (error) {
+      const code = typeof error === "object" && error !== null && "code" in error
+        ? (error as { readonly code?: unknown }).code
+        : undefined;
+      const stage = code === 21 || code === "21"
+        ? "owner-other"
+        : code === 26 || code === "26"
+          ? "owner-local-account"
+          : code === 27 || code === "27"
+            ? "owner-users"
+            : code === 28 || code === "28"
+              ? "owner-service"
+              : code === 22 || code === "22"
+          ? "rules"
+          : code === 23 || code === "23"
+            ? "inheritance"
+            : code === 24 || code === "24"
+              ? "setup"
+              : code === 25 || code === "25"
+                ? "owner-setup"
+                : "execution";
+      throw stateError(`Windows ACL verification failed at ${stage} stage`);
     }
   },
 };
+
+
+
 
 async function assertNoReparseAncestors(path: string): Promise<void> {
   let current = resolve(path);
@@ -106,6 +185,9 @@ async function assertNoReparseAncestors(path: string): Promise<void> {
     current = parent;
   }
 }
+
+
+
 
 export async function ensurePrivateStateDirectory(
   path: string,

@@ -3,8 +3,10 @@ import { constants, type BigIntStats } from "node:fs";
 import { chmod, lstat, open, realpath, rename, rm } from "node:fs/promises";
 import { dirname, isAbsolute, resolve } from "node:path";
 
+
 import { canonicalizeJson } from "../contracts/jcs.ts";
 import { parseStrictJson } from "../input/strict-json.ts";
+
 
 export interface WindowsPersistenceResult {
   readonly businessExit: number;
@@ -13,12 +15,14 @@ export interface WindowsPersistenceResult {
   readonly errorCode: "none" | "recoverable" | "fatal";
 }
 
+
 export interface WindowsPersistenceOptions {
   readonly parentExit: () => Promise<number>;
   readonly rotate: () => Promise<void>;
   readonly commit: () => Promise<void>;
   readonly isRecoverable: (error: unknown) => boolean;
 }
+
 
 /**
  * The helper is intentionally one-shot: it waits for the already-finished
@@ -56,11 +60,13 @@ export async function runWindowsPersistence(
   }
 }
 
+
 export interface WindowsExecutablePaths {
   readonly canonical: string;
   readonly staged: string;
   readonly old: string;
 }
+
 
 export const WINDOWS_EXECUTABLE_FAULT_POINTS = [
   "after-journal-prepared",
@@ -73,15 +79,19 @@ export const WINDOWS_EXECUTABLE_FAULT_POINTS = [
 ] as const;
 export type WindowsExecutableFaultPoint = (typeof WINDOWS_EXECUTABLE_FAULT_POINTS)[number];
 
+
 export interface WindowsExecutableFaultInjector {
   hit(point: WindowsExecutableFaultPoint): void | Promise<void>;
 }
+
 
 export interface WindowsExecutableRotationOptions {
   readonly faultInjector?: WindowsExecutableFaultInjector;
 }
 
+
 type JournalPhase = "prepared" | "canonical-rotated" | "staged-installed";
+
 
 interface FileIdentity {
   readonly dev: string;
@@ -89,6 +99,7 @@ interface FileIdentity {
   readonly size: string;
   readonly mtimeNs: string;
 }
+
 
 interface WindowsExecutableJournal {
   readonly journalVersion: 1;
@@ -102,6 +113,7 @@ interface WindowsExecutableJournal {
   readonly stagedSha256: string;
 }
 
+
 const MAX_EXECUTABLE_BYTES = 256 * 1024 * 1024;
 const MAX_JOURNAL_BYTES = 32 * 1024;
 const SHA256 = /^[a-f0-9]{64}$/u;
@@ -110,9 +122,11 @@ const SIGNED_DECIMAL = /^-?(?:0|[1-9][0-9]*)$/u;
 const READ_ONLY_FLAGS = constants.O_RDONLY |
   ((constants as { readonly O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0);
 
+
 function windowsPathKey(path: string): string {
   return resolve(path).replaceAll("/", "\\").toLowerCase();
 }
+
 
 function validWindowsPathSyntax(path: string): boolean {
   const withoutDrive = path.replace(/^[A-Za-z]:[\\/]/u, "");
@@ -123,10 +137,12 @@ function validWindowsPathSyntax(path: string): boolean {
   );
 }
 
+
 function validPath(path: string): boolean {
   return typeof path === "string" && path !== "" && !path.includes("\u0000") &&
     isAbsolute(path) && resolve(path) === path && validWindowsPathSyntax(path);
 }
+
 
 function validatePaths(paths: WindowsExecutablePaths): void {
   if (paths === null || typeof paths !== "object" ||
@@ -141,10 +157,12 @@ function validatePaths(paths: WindowsExecutablePaths): void {
   }
 }
 
+
 function sameStats(left: BigIntStats, right: BigIntStats): boolean {
   return left.dev === right.dev && left.ino === right.ino && left.size === right.size &&
     left.mtimeNs === right.mtimeNs;
 }
+
 
 function identity(stats: BigIntStats): FileIdentity {
   return Object.freeze({
@@ -155,11 +173,13 @@ function identity(stats: BigIntStats): FileIdentity {
   });
 }
 
+
 function identityMatches(stats: BigIntStats, expected: FileIdentity): boolean {
   const actual = identity(stats);
   return actual.dev === expected.dev && actual.ino === expected.ino &&
     actual.size === expected.size && actual.mtimeNs === expected.mtimeNs;
 }
+
 
 async function syncDirectory(path: string): Promise<void> {
   let handle: Awaited<ReturnType<typeof open>> | undefined;
@@ -174,19 +194,25 @@ async function syncDirectory(path: string): Promise<void> {
   }
 }
 
+
 async function assertPlainDirectory(path: string): Promise<void> {
   let before: BigIntStats;
-  let physical: string;
+  let canonical: BigIntStats;
   let after: BigIntStats;
   try {
     before = await lstat(path, { bigint: true }) as BigIntStats;
-    physical = await realpath(path);
+    const physical = await realpath(path);
+    canonical = await lstat(physical, { bigint: true }) as BigIntStats;
     after = await lstat(path, { bigint: true }) as BigIntStats;
   } catch {
     throw new Error("unsafe executable directory");
   }
-  if (before.isSymbolicLink() || !before.isDirectory() || !sameStats(before, after) ||
-      windowsPathKey(physical) !== windowsPathKey(path)) {
+  if (
+    before.isSymbolicLink() ||
+    !before.isDirectory() ||
+    !sameStats(before, canonical) ||
+    !sameStats(before, after)
+  ) {
     throw new Error("unsafe executable directory");
   }
 }
@@ -217,19 +243,21 @@ async function hashHandle(
   return hash.digest("hex");
 }
 
+
 interface VerifiedFile {
   readonly handle: Awaited<ReturnType<typeof open>>;
   readonly stats: BigIntStats;
   readonly sha256: string;
 }
 
+
 async function openVerifiedFile(path: string): Promise<VerifiedFile> {
   let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
     const before = await lstat(path, { bigint: true }) as BigIntStats;
     const physical = await realpath(path);
-    if (before.isSymbolicLink() || !before.isFile() ||
-        windowsPathKey(physical) !== windowsPathKey(path)) {
+    const canonical = await lstat(physical, { bigint: true }) as BigIntStats;
+    if (before.isSymbolicLink() || !before.isFile() || !sameStats(before, canonical)) {
       throw new Error("unsafe executable path");
     }
     handle = await open(path, READ_ONLY_FLAGS);
@@ -250,9 +278,10 @@ async function openVerifiedFile(path: string): Promise<VerifiedFile> {
 async function reverifyFile(path: string, file: VerifiedFile): Promise<void> {
   const current = await lstat(path, { bigint: true }) as BigIntStats;
   const physical = await realpath(path);
+  const canonical = await lstat(physical, { bigint: true }) as BigIntStats;
   const opened = await file.handle.stat({ bigint: true }) as BigIntStats;
   if (current.isSymbolicLink() || !current.isFile() || !sameStats(file.stats, opened) ||
-      !sameStats(opened, current) || windowsPathKey(physical) !== windowsPathKey(path) ||
+      !sameStats(opened, current) || !sameStats(current, canonical) ||
       await hashHandle(file.handle, opened) !== file.sha256) {
     throw new Error("unsafe executable identity");
   }
@@ -274,6 +303,7 @@ async function removeRegularIfPresent(path: string): Promise<void> {
   }
 }
 
+
 function exactRecord(value: unknown, fields: readonly string[]): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value) ||
       Object.getPrototypeOf(value) !== Object.prototype || Object.getOwnPropertySymbols(value).length !== 0) {
@@ -286,6 +316,7 @@ function exactRecord(value: unknown, fields: readonly string[]): Record<string, 
   }
   return value as Record<string, unknown>;
 }
+
 
 function validateIdentity(value: unknown): FileIdentity {
   const record = exactRecord(value, ["dev", "ino", "size", "mtimeNs"]);
@@ -302,6 +333,7 @@ function validateIdentity(value: unknown): FileIdentity {
     mtimeNs: record.mtimeNs,
   });
 }
+
 
 function validateJournal(value: unknown, paths: WindowsExecutablePaths): WindowsExecutableJournal {
   const record = exactRecord(value, [
@@ -328,14 +360,17 @@ function validateJournal(value: unknown, paths: WindowsExecutablePaths): Windows
   });
 }
 
+
 function journalText(journal: WindowsExecutableJournal, paths: WindowsExecutablePaths): string {
   return `${canonicalizeJson(validateJournal(journal, paths))}\n`;
 }
+
 
 export function windowsExecutableJournalPath(paths: WindowsExecutablePaths): string {
   validatePaths(paths);
   return `${paths.canonical}.update-journal.json`;
 }
+
 
 async function writeJournal(
   paths: WindowsExecutablePaths,
@@ -373,6 +408,7 @@ async function writeJournal(
     throw error;
   }
 }
+
 
 async function readJournal(paths: WindowsExecutablePaths): Promise<WindowsExecutableJournal | null> {
   const path = windowsExecutableJournalPath(paths);
@@ -417,6 +453,7 @@ async function readJournal(paths: WindowsExecutablePaths): Promise<WindowsExecut
   }
 }
 
+
 async function removeJournal(paths: WindowsExecutablePaths): Promise<void> {
   const path = windowsExecutableJournalPath(paths);
   const item = await lstat(path);
@@ -425,10 +462,12 @@ async function removeJournal(paths: WindowsExecutablePaths): Promise<void> {
   await syncDirectory(dirname(path));
 }
 
+
 interface ClosedVerifiedFile {
   readonly stats: BigIntStats;
   readonly sha256: string;
 }
+
 
 async function inspectFileOrNull(path: string): Promise<ClosedVerifiedFile | null> {
   try {
@@ -445,6 +484,7 @@ async function inspectFileOrNull(path: string): Promise<ClosedVerifiedFile | nul
   }
 }
 
+
 function fileMatches(
   file: ClosedVerifiedFile | null,
   expectedIdentity: FileIdentity,
@@ -452,6 +492,7 @@ function fileMatches(
 ): boolean {
   return file !== null && identityMatches(file.stats, expectedIdentity) && file.sha256 === expectedSha256;
 }
+
 
 /** Repair a durable pending rotation without accepting an unjournaled executable. */
 export async function recoverWindowsExecutable(paths: WindowsExecutablePaths): Promise<"old" | "new" | null> {
@@ -464,6 +505,7 @@ export async function recoverWindowsExecutable(paths: WindowsExecutablePaths): P
     inspectFileOrNull(paths.staged),
     inspectFileOrNull(paths.old),
   ]);
+
 
   if (fileMatches(canonical, journal.stagedIdentity, journal.stagedSha256) && staged === null &&
       fileMatches(old, journal.canonicalIdentity, journal.canonicalSha256)) {
@@ -489,6 +531,7 @@ export async function recoverWindowsExecutable(paths: WindowsExecutablePaths): P
   }
   throw new Error("unsafe executable recovery state");
 }
+
 
 /** Rotate a staged executable, leaving a durable journal for startup repair. */
 export async function rotateWindowsExecutable(

@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [main, feature/production-composition]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  portable:
+    name: Portable tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.16.0
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - name: Run the portable suite without Windows-only SEA smoke tests
+        run: npm test -- --test-concurrency=1 $(find test -name '*.test.ts' ! -path 'test/contract/sea-smoke.test.ts' -print)
+      - run: npm test -- test/contract/release-assets.test.ts test/integration/installer.test.ts
+      - name: Check the portable installer syntax
+        run: bash -n scripts/install.sh
+
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  windows-sea:
+    name: Windows SEA gate
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.16.0
+          cache: npm
+      - shell: pwsh
+        run: |
+          if (Test-Path dist) { Remove-Item -LiteralPath dist -Recurse -Force }
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build:sea
+      - name: Run Windows durability smoke tests
+        run: npm test -- --test-concurrency=1 --test-name-pattern="Windows publisher flushes once|default Windows ACL adapter secures" test/integration/windows-write-through-move.test.ts test/unit/context-store.test.ts
+      - run: npm test -- --test-concurrency=1
+      - name: Check PowerShell installer syntax
+        shell: pwsh
+        run: |
+          $files = @(Get-ChildItem scripts -Filter *.ps1 | Select-Object -ExpandProperty FullName)
+          $files += Join-Path $PWD 'skill/harness-mr/scripts/bootstrap.ps1'
+          foreach ($path in $files) {
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$null, [ref]$errors)
+            if ($errors.Count -ne 0) {
+              $errors | ForEach-Object { Write-Error $_.Message }
+              exit 1
+            }
+          }
+      - shell: pwsh
+        run: .\dist\harness-mrtool.exe self-test --output json
+      - name: Record verified development executable hash
+        shell: pwsh
+        run: |
+          (Get-FileHash .\dist\harness-mrtool.exe -Algorithm SHA256).Hash.ToLowerInvariant() | Set-Content .\dist\harness-mrtool.exe.sha256 -NoNewline
+      - name: Upload verified development SEA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: harness-mrtool-dev-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          path: |
+            dist/harness-mrtool.exe
+            dist/harness-mrtool.exe.sha256
+            dist/sea-build-receipt.json

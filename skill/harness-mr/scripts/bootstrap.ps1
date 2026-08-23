@@ -25,6 +25,10 @@ $MaxArchiveEntries = 256
 $Sha256Pattern = '^[a-f0-9]{64}$'
 $SafePathPattern = '^(?!/)(?!.*(?:^|/)\.\.(?:/|$))[A-Za-z0-9._/-]+$'
 $ReservedNamePattern = '^(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)'
+$ReleaseOwner = 'chengcheng93'
+$ReleaseRepository = 'harness-mrtool'
+$ReleaseHost = 'github.com'
+$RedirectHosts = @('github.com', 'objects.githubusercontent.com', 'release-assets.githubusercontent.com')
 
 function Fail-Security {
   param([string]$Message)
@@ -542,21 +546,75 @@ function Validate-SkillTree {
   if ([string]::IsNullOrWhiteSpace($skillText) -or $skillText.Contains([char]0)) { Fail-Security 'SKILL.md is invalid.' }
 }
 
+function Download-ReleaseArchive {
+  param([Uri]$Uri, [string]$DestinationPath)
+  Add-Type -AssemblyName System.Net.Http -ErrorAction Stop
+  $handler = New-Object Net.Http.HttpClientHandler
+  $handler.AllowAutoRedirect = $false
+  $client = New-Object Net.Http.HttpClient($handler)
+  $client.Timeout = [TimeSpan]::FromSeconds(90)
+  $current = $Uri
+  $stream = $null
+  try {
+    for ($hop = 0; $hop -lt 4; $hop++) {
+      if ($current.Scheme -ne 'https' -or $current.UserInfo -ne '' -or $current.Host -notin $RedirectHosts) {
+        Fail-Security 'The Skill release redirected to an untrusted host.'
+      }
+      $response = $client.GetAsync($current, [Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+      try {
+        if ([int]$response.StatusCode -ge 300 -and [int]$response.StatusCode -lt 400) {
+          if ($null -eq $response.Headers.Location) { Fail-Security 'The Skill release redirect has no location.' }
+          try { $current = [Uri]::new($current, $response.Headers.Location) } catch { Fail-Security 'The Skill release redirect is invalid.' }
+          continue
+        }
+        if (-not $response.IsSuccessStatusCode) { Fail-Security 'The Skill release could not be downloaded.' }
+        if ($response.Content.Headers.ContentLength.HasValue -and $response.Content.Headers.ContentLength.Value -gt $MaxArchiveBytes) {
+          Fail-Security 'The Skill release archive is too large.'
+        }
+        $stream = [IO.File]::Open($DestinationPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        $inputStream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+        $buffer = New-Object byte[] 65536
+        [Int64]$total = 0
+        try {
+          while (($read = $inputStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            $total += $read
+            if ($total -gt $MaxArchiveBytes) { Fail-Security 'The Skill release archive is too large.' }
+            $stream.Write($buffer, 0, $read)
+          }
+          if ($total -lt 1) { Fail-Security 'The Skill release archive is empty.' }
+          $stream.Flush($true)
+        } finally { $inputStream.Dispose() }
+        return
+      } finally { $response.Dispose() }
+    }
+    Fail-Security 'The Skill release redirected too many times.'
+  } finally {
+    if ($null -ne $stream) { $stream.Dispose() }
+    $client.Dispose()
+    $handler.Dispose()
+  }
+}
+
 if ($Version -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$') {
   Fail-Security 'Version must be an exact semantic version.'
 }
 $base = $null
 try { $base = [Uri]$ReleaseBaseUrl } catch { Fail-Security 'ReleaseBaseUrl must be an HTTPS URL.' }
-if ($base.Scheme -ne 'https' -or [string]::IsNullOrEmpty($base.Host) -or $base.UserInfo -ne '' -or $base.Query -ne '' -or $base.Fragment -ne '') {
-  Fail-Security 'ReleaseBaseUrl must be an HTTPS URL without user information.'
+if ($base.Scheme -cne 'https' -or $base.Host -cne $ReleaseHost -or $base.Port -notin @(-1, 443) -or
+    $base.UserInfo -ne '' -or $base.Query -ne '' -or $base.Fragment -ne '') {
+  Fail-Security 'ReleaseBaseUrl must be the fixed HTTPS GitHub release origin.'
+}
+$expectedReleasePath = "/$ReleaseOwner/$ReleaseRepository/releases/download/skill-v$Version"
+if ($base.AbsolutePath.TrimEnd('/') -cne $expectedReleasePath) {
+  Fail-Security 'ReleaseBaseUrl must point to the exact immutable Skill release tag.'
 }
 $destinationFull = Get-FullPathSafe $Destination
 $parent = Ensure-SafeDirectory (Split-Path -Parent $destinationFull)
 $destinationName = Split-Path -Leaf $destinationFull
 if ([string]::IsNullOrWhiteSpace($destinationName) -or $destinationName -match '[\\/:*?"<>|]') { Fail-Security 'Destination is invalid.' }
 $shaExpected = $Sha256.ToLowerInvariant()
-$asset = "harness-mr-skill-$Version.zip"
-try { $uri = [Uri]::new($base, ($base.AbsoluteUri.TrimEnd('/') + '/' + $asset)) } catch { Fail-Security 'Release URL is invalid.' }
+$asset = 'harness-mr-skill.zip'
+try { $uri = [Uri]::new($base.AbsoluteUri.TrimEnd('/') + '/' + $asset) } catch { Fail-Security 'Release URL is invalid.' }
 
 $suffix = [Guid]::NewGuid().ToString('N')
 $archivePath = Join-Path $parent ('.harness-mr-bootstrap-' + $suffix + '.zip')
@@ -575,7 +633,7 @@ try {
     if (-not $destinationItem.PSIsContainer) { Fail-Security 'Destination is not a directory.' }
     Assert-NoReparseTree $destinationFull
   }
-  try { Invoke-WebRequest -Uri $uri -Method Get -MaximumRedirection 0 -TimeoutSec 60 -OutFile $archivePath | Out-Null } catch { Fail-Security 'The Skill release could not be downloaded.' }
+  Download-ReleaseArchive $uri $archivePath
   $archiveItem = Get-ItemSafe $archivePath
   Assert-NotReparse $archiveItem
   if ($archiveItem.PSIsContainer -or $archiveItem.Length -lt 1 -or $archiveItem.Length -gt $MaxArchiveBytes) { Fail-Security 'The Skill release archive is too large.' }
