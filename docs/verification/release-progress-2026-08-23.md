@@ -2,9 +2,9 @@
 
 ## 当前结论
 
-本次提交整理了 CLI 的安装器、便携包、Skill 打包、Windows 持久化/状态目录安全检查、发布契约测试和发布工作流基础设施。当前已推送发布候选分支，但**没有创建正式 Tag、没有创建 GitHub Release**。
+本次提交整理了 CLI 的安装器、便携包、Skill 打包、Windows 持久化/状态目录安全检查、发布契约测试和发布工作流基础设施。正式 CLI `0.1.0` 已完成 Windows SEA 构建、字节复核并发布为 GitHub 不可变 Release。
 
-正式发布仍需在一台不受本机加密文件存储影响的 Windows 机器上完成 SEA 构建和最终验收。
+正式 Release：<https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.0>
 
 ## 发布候选整合状态
 
@@ -20,7 +20,8 @@
 - 已生成第一把生产 Ed25519 根：`release-key-1`。
 - 公钥指纹：`75f4bca790273aa6079eead3bb071db7cc9ead8442f3d9cb112249bec15d0eaf`。
 - Bundle receipt 已按 `templates-v1.0.0`、当前 manifest 和全部模板文件哈希生成并签名；私钥和 Base64 Secret 保存在仓库外的受限目录，未写入 Git。
-- GitHub Secret、正式 Tag、Windows SEA 发布构建和 GitHub Release 仍待完成。
+- GitHub Secret `BUNDLE_RECEIPT_B64` 已配置；正式 Tag `cli-v0.1.0` 已锁定到提交 `7b67ded5b0bfdf526b227832c61ce47d6e071732`。
+- GitHub Release #3（Actions run `32635454627`）已成功完成，页面显示 `Immutable release`。
 - 当前私有个人仓库不支持 GitHub Artifact Attestations；CLI Release 工作流已调整为在该环境跳过 Attestation，但仍执行最终文件、归档和收据的完整字节校验。
 
 ## 已确认的验证结果
@@ -32,6 +33,7 @@
 - 本地 `npm run typecheck`：在 Node `25.8.0` 上通过；项目正式门禁以 CI 的 Node `24.16.0` 结果为准。
 - 发布、安装器、Bundle 和打包契约测试：`84 pass / 1 skip / 0 fail`。
 - 全量 portable 测试已在 Windows CI 通过；macOS 本地运行仍可能受系统进程锁提供器限制，不作为发布门禁依据。
+- Release #3 的构建、验收和发布三个 job 全部成功；Release 页面包含 `.exe`、portable `.zip`、Bundle receipt、SEA build receipt 和 GitHub Release attestation。
 
 ## 本次纳入提交的内容
 
@@ -45,22 +47,17 @@
 
 ## 当前未完成的内容
 
-- `templates-vX.Y.Z` 和 `skill-vX.Y.Z` Tag 尚未确定或创建；CLI `cli-v0.1.0` Tag 尚未创建。
-- Windows Node `24.16.0` SEA 构建、非零字节 exe、receipt 和三个 probe 已在 CI #107 的干净 Windows runner 完成。
-- CLI 生产签名根和 Bundle Receipt 已准备；Channel Envelope、GitHub Secret 和 GitHub Release 资产尚未注入或发布。
-- portable 安装、repair、uninstall、Skill install/activate 的完整 Windows 端到端验收仍需作为正式 Release 前的人工验收项。
+- `templates-vX.Y.Z` 和 `skill-vX.Y.Z` 的产品 Tag/Release 仍未确定；本次只完成 CLI `0.1.0`。
+- Signed GitHub Pages stable channel 尚未部署，Channel Envelope 的生产签名和端到端客户端拉取仍需单独验收。
+- portable 安装、repair、uninstall、Skill install/activate 的真实用户环境端到端验收仍需补做；Release 工作流已完成构建和归档字节门禁，但不替代这些产品流程验收。
+- 隔离 GitLab 集成和真实 Codex Skill host 仍是外部环境门禁。
 
-后续应从候选分支重新 checkout，并重点验证源码字节、模板 manifest、SEA 构建和非零字节 exe。
+## 正式发布已完成
 
-## 正式发布所需步骤
-
-1. 在干净 Windows 环境使用 Node `24.16.0` checkout `release-candidate-0.1.0`。
-2. 执行 `npm ci`、`npm run typecheck`、完整测试和 `npm run build:sea`。
-3. 确认 `dist/harness-mrtool.exe`、`dist/sea-build-receipt.json` 均为非零字节。
-4. 运行 exe 的 `self-test`、contract probe、renderer probe。
-5. 生成并注入明确标记为 development 的 Bundle Receipt；不得冒充生产签名 receipt。
-6. 运行 portable 打包、SHA-256、安装器、repair、uninstall 和 Skill install/activate 验证。
-7. 检查最终 diff 后，决定版本号并创建三类 immutable Tag；再按工作流顺序创建 GitHub Release，最后发布 stable channel。
+1. `release-candidate-0.1.0` 在 GitHub Actions Windows runner 上完成 Node `24.16.0` SEA 构建。
+2. `BUNDLE_RECEIPT_B64` 在构建 job 中解码，Bundle receipt、SEA receipt 和 portable archive 均通过发布前后字节复核。
+3. 仓库已启用 Release immutability；工作流先创建草稿、下载复核资产，再发布不可变 Release。
+4. Release `cli-v0.1.0` 已锁定到 `7b67ded`，正式安装资产可从 Release 页面下载。
 
 ## macOS 构建说明
 
