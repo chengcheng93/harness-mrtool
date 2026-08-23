@@ -207,7 +207,7 @@ PowerShell 示例：
 
 ```powershell
 $tag = 'cli-v0.1.3'
-$sha256 = '08157ff9ad5de3524891a7eff49bdda77929ded1b5b13317e23e67be8c8f6ad3'
+$sha256 = 'dcd873807a61c008132272ad3f49930cbec7c8b4ce60d44590523ad8b839b469'
 $installer = Join-Path $env:TEMP 'harness-mrtool-install.ps1'
 
 Invoke-WebRequest `

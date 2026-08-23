@@ -6,7 +6,7 @@
 
 正式 Release：<https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.3>
 
-修复版 Portable SHA-256：`08157ff9ad5de3524891a7eff49bdda77929ded1b5b13317e23e67be8c8f6ad3`。
+修复版 Portable SHA-256：`dcd873807a61c008132272ad3f49930cbec7c8b4ce60d44590523ad8b839b469`。
 
 ## 发布候选整合状态
 
@@ -38,6 +38,7 @@
 - Release #3 的构建、验收和发布三个 job 全部成功；Release 页面包含 `.exe`、portable `.zip`、Bundle receipt、SEA build receipt 和 GitHub Release attestation。
 - Release CLI #4（Actions run `32644748847`）成功完成修复版构建、验收和不可变发布。
 - Release CLI #5（Actions run `32646019146`）和 Plugin #5（Actions run `32646019087`）成功完成第二次兼容性修复发布。
+- Release CLI #6（Actions run `32647676578`）成功发布 `cli-v0.1.3`，修复生产更新信任 preflight 无条件失败问题；Release 已确认 immutable。
 
 ## 本次纳入提交的内容
 
