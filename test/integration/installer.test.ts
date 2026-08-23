@@ -95,8 +95,10 @@ test("Windows installer rechecks the archive while holding a no-write handle", a
   const windows = await readFile(join(scripts, "install.ps1"), "utf8");
   const initialHash = windows.indexOf("Get-FileHashHex $archivePath");
   const verifiedOpen = windows.indexOf("Open-VerifiedArchive $archivePath");
-  const zipOpen = windows.indexOf("[IO.Compression.ZipArchive]::new");
+  const zipOpen = windows.indexOf("New-ZipArchiveReader $archiveStream");
   assert.ok(initialHash >= 0 && verifiedOpen > initialHash && zipOpen > verifiedOpen);
+  assert.match(windows, /GetType\('System\.IO\.Compression\.ZipArchive, System\.IO\.Compression'/u);
+  assert.match(windows, /Activator\]::CreateInstance/u);
   assert.match(windows, /FileShare\]::None/u);
   assert.doesNotMatch(windows, /ZipFile::OpenRead/u);
 });

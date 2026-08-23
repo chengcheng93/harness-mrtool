@@ -81,6 +81,20 @@ function Open-VerifiedArchive { param([string]$Path, [string]$ExpectedHash)
     throw
   } finally { $hash.Dispose() }
 }
+function New-ZipArchiveReader { param([IO.Stream]$Stream)
+  foreach ($assemblyName in @('System.IO.Compression', 'System.IO.Compression.FileSystem')) {
+    try { Add-Type -AssemblyName $assemblyName -ErrorAction Stop } catch { }
+  }
+  $zipType = [Type]::GetType('System.IO.Compression.ZipArchive, System.IO.Compression', $false)
+  if ($null -eq $zipType) { $zipType = [Type]::GetType('System.IO.Compression.ZipArchive, System.IO.Compression.FileSystem', $false) }
+  $modeType = [Type]::GetType('System.IO.Compression.ZipArchiveMode, System.IO.Compression', $false)
+  if ($null -eq $modeType) { $modeType = [Type]::GetType('System.IO.Compression.ZipArchiveMode, System.IO.Compression.FileSystem', $false) }
+  if ($null -eq $zipType -or $null -eq $modeType) { Fail-Safe 'The .NET ZIP archive runtime is unavailable.' }
+  try {
+    $readMode = [Enum]::Parse($modeType, 'Read')
+    return [Activator]::CreateInstance($zipType, [object[]]@($Stream, $readMode, $true))
+  } catch { Fail-Safe 'The .NET ZIP archive runtime could not create a reader.' }
+}
 function Download-Bounded { param([Uri]$Uri, [string]$DestinationPath)
   Add-Type -AssemblyName System.Net.Http -ErrorAction Stop
   $handler = New-Object Net.Http.HttpClientHandler; $handler.AllowAutoRedirect = $false
@@ -151,11 +165,10 @@ $lock = $null; $moved = $false; $published = $false
 try {
   try { $lock = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None) } catch { Fail-Safe 'Another installation is already running.' }
   Download-Bounded $uri $archivePath; if ((Get-FileHashHex $archivePath) -cne $expectedHash) { Fail-Safe 'Downloaded release hash does not match the expected hash.' }; Ensure-Directory $stagePath | Out-Null
-  Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
   $archiveStream = $null; $archive = $null
   try {
     $archiveStream = Open-VerifiedArchive $archivePath $expectedHash
-    $archive = [IO.Compression.ZipArchive]::new($archiveStream, [IO.Compression.ZipArchiveMode]::Read, $true)
+    $archive = New-ZipArchiveReader $archiveStream
     if ($archive.Entries.Count -ne $ExpectedNames.Count) { Fail-Safe 'Release archive entry count is invalid.' }; $seen = @{}; [Int64]$expanded = 0; [Int64]$writtenTotal = 0
     foreach ($entry in $archive.Entries) {
       if ($entry.FullName.EndsWith('/')) { Fail-Safe 'Release archive contains a directory entry.' }; $name = Assert-ArchivePath $entry.FullName

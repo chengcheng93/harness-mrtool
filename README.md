@@ -10,7 +10,7 @@ updating, and verifying GitLab merge requests from repository changes.
 <https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.1>
 
 Codex Plugin 构建产物：
-<https://github.com/chengcheng93/harness-mrtool/releases/tag/plugin-v0.1.1>
+<https://github.com/chengcheng93/harness-mrtool/releases/tag/plugin-v0.1.2>
 
 插件源码位于 `plugins/harness-mrtool/`，其中包含 `.codex-plugin/plugin.json`
 和 `harness-mr` Skill。插件依赖已安装的 `harness-mrtool` CLI；两者是两个
