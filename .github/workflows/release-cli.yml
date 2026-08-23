@@ -59,6 +59,9 @@ jobs:
             --node-license licenses/Node.txt `
             --output dist/harness-mrtool-windows-x64.zip
       - name: Attest the final portable archive
+        # GitHub Artifact Attestations are unavailable for private repositories
+        # owned by personal accounts. The archive is still byte-verified below.
+        if: ${{ github.event.repository.visibility != 'private' }}
         uses: actions/attest@v4
         with:
           subject-path: dist/harness-mrtool-windows-x64.zip

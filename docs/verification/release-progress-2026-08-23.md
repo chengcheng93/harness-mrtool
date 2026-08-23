@@ -21,6 +21,7 @@
 - 公钥指纹：`75f4bca790273aa6079eead3bb071db7cc9ead8442f3d9cb112249bec15d0eaf`。
 - Bundle receipt 已按 `templates-v1.0.0`、当前 manifest 和全部模板文件哈希生成并签名；私钥和 Base64 Secret 保存在仓库外的受限目录，未写入 Git。
 - GitHub Secret、正式 Tag、Windows SEA 发布构建和 GitHub Release 仍待完成。
+- 当前私有个人仓库不支持 GitHub Artifact Attestations；CLI Release 工作流已调整为在该环境跳过 Attestation，但仍执行最终文件、归档和收据的完整字节校验。
 
 ## 已确认的验证结果
 
