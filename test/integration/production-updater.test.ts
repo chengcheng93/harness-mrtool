@@ -102,13 +102,12 @@ for (const commandCase of PUBLIC_COMMANDS) {
   });
 }
 
-test("the default production preflight fails closed without shipped trust roots", async () => {
-  await assert.rejects(
+test("the default production preflight accepts the pinned production trust roots", async () => {
+  await assert.doesNotReject(
     () => createProductionUpdatePreflight().run({
       commandKind: "version",
       noUpdate: false,
       offline: false,
     }),
-    (error: unknown) => error instanceof ToolError && error.code === "UPDATE_SECURITY_ERROR",
   );
 });

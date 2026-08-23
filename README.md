@@ -7,7 +7,7 @@ updating, and verifying GitLab merge requests from repository changes.
 [Notion-ready 使用手册](docs/usage/harness-mrtool-notion.md)
 
 正式 Windows x64 Release：
-<https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.2>
+<https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.3>
 
 Codex Plugin 构建产物：
 <https://github.com/chengcheng93/harness-mrtool/releases/tag/plugin-v0.1.2>

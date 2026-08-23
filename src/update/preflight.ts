@@ -26,8 +26,11 @@ function unavailableProductionTrust(): ToolError<"UPDATE_SECURITY_ERROR"> {
 
 
 /**
- * The shipped source tree intentionally has no release signing roots. The
- * production entry therefore fails closed until the build injects them.
+ * Validate the immutable production trust configuration before a public
+ * invocation. The configuration is source-pinned and included in the
+ * bundled production executable; a valid configuration is sufficient to
+ * continue. Network update checks remain owned by the update service when a
+ * service is provisioned.
  */
 export function createProductionUpdatePreflight(): PublicInvocationPreflight {
   return Object.freeze({
@@ -39,7 +42,6 @@ export function createProductionUpdatePreflight(): PublicInvocationPreflight {
         if (isToolError(error, "UPDATE_SECURITY_ERROR")) throw error;
         throw unavailableProductionTrust();
       }
-      throw unavailableProductionTrust();
     },
   });
 }
