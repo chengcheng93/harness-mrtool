@@ -14,6 +14,14 @@
 - 候选以最新 `main` 为代码基线，只移植发布分支的工作流、安装器、打包器、发布契约测试和验收文档；没有把发布分支的旧生产入口覆盖回 `main`。
 - 远端 `main`、原发布分支均未被覆盖。
 
+## 本次正式发布准备
+
+- 正式 CLI 版本：`0.1.0`，目标 Tag：`cli-v0.1.0`。
+- 已生成第一把生产 Ed25519 根：`release-key-1`。
+- 公钥指纹：`75f4bca790273aa6079eead3bb071db7cc9ead8442f3d9cb112249bec15d0eaf`。
+- Bundle receipt 已按 `templates-v1.0.0`、当前 manifest 和全部模板文件哈希生成并签名；私钥和 Base64 Secret 保存在仓库外的受限目录，未写入 Git。
+- GitHub Secret、正式 Tag、Windows SEA 发布构建和 GitHub Release 仍待完成。
+
 ## 已确认的验证结果
 
 - CI #107（`8364776`）：GitHub Actions 全部通过，使用 Node `24.16.0` 的 Windows runner 完成最终门禁。
@@ -36,9 +44,9 @@
 
 ## 当前未完成的内容
 
-- 正式版本号、`cli-vX.Y.Z`、`templates-vX.Y.Z` 和 `skill-vX.Y.Z` Tag 尚未确定或创建。
-- Windows Node `24.16.0` SEA 构建、非零字节 exe、receipt 和 Windows durability smoke 已在 GitHub-hosted runner 完成；正式签名材料仍未注入。
-- 生产签名根、Bundle Receipt、Channel Envelope 和 GitHub Release 资产尚未注入或发布。
+- `templates-vX.Y.Z` 和 `skill-vX.Y.Z` Tag 尚未确定或创建；CLI `cli-v0.1.0` Tag 尚未创建。
+- Windows Node `24.16.0` SEA 构建、非零字节 exe、receipt 和三个 probe 已在 CI #107 的干净 Windows runner 完成。
+- CLI 生产签名根和 Bundle Receipt 已准备；Channel Envelope、GitHub Secret 和 GitHub Release 资产尚未注入或发布。
 - portable 安装、repair、uninstall、Skill install/activate 的完整 Windows 端到端验收仍需作为正式 Release 前的人工验收项。
 
 后续应从候选分支重新 checkout，并重点验证源码字节、模板 manifest、SEA 构建和非零字节 exe。

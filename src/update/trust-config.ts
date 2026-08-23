@@ -47,11 +47,19 @@ export const PRODUCTION_UPDATE_PAGES_ORIGIN =
 export const PRODUCTION_UPDATE_CHANNEL_URL =
   "https://chengcheng93.github.io/harness-mrtool/stable.envelope.json";
 
-// A production root is added only by changing both reviewed source constants.
+// The first production root is pinned in source; its private counterpart is
+// kept outside the repository and is used only by the protected release job.
 export const PRODUCTION_UPDATE_BOOTSTRAP_KEYS: readonly TrustedSigningKey[] =
-  Object.freeze([]);
+  Object.freeze([{
+    keyId: "release-key-1",
+    publicKeySpki: "MCowBQYDK2VwAyEAAsvciZczfCepU2C8M5joYNOva8-3uNH-ZJ8jaDA1BVI",
+    activeFromSequence: 1,
+    revokedAtSequence: null,
+  }]);
 export const PRODUCTION_UPDATE_BOOTSTRAP_KEY_FINGERPRINTS: readonly string[] =
-  Object.freeze([]);
+  Object.freeze([
+    "75f4bca790273aa6079eead3bb071db7cc9ead8442f3d9cb112249bec15d0eaf",
+  ]);
 
 const REPOSITORY_PART = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$/u;
 
