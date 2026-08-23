@@ -2,19 +2,24 @@
 
 ## 当前结论
 
-本次提交整理了 CLI 的安装器、便携包、Skill 打包、Windows 持久化/状态目录安全检查、发布契约测试和发布工作流基础设施。当前**没有创建正式 Tag、没有推送、没有创建 GitHub Release**。
+本次提交整理了 CLI 的安装器、便携包、Skill 打包、Windows 持久化/状态目录安全检查、发布契约测试和发布工作流基础设施。当前已推送发布候选分支，但**没有创建正式 Tag、没有创建 GitHub Release**。
 
 正式发布仍需在一台不受本机加密文件存储影响的 Windows 机器上完成 SEA 构建和最终验收。
 
+## 发布候选整合状态
+
+- 候选分支：`release-candidate-0.1.0`。
+- 候选提交：`807a57b81a68c4ec48ef56354cdfe1aee0ef0d9b`。
+- `main` 与 `publish/cli-release-pipeline-v2` 没有共同祖先，不能安全地按普通分叉合并。
+- 候选以最新 `main` 为代码基线，只移植发布分支的工作流、安装器、打包器、发布契约测试和验收文档；没有把发布分支的旧生产入口覆盖回 `main`。
+- 远端 `main`、原发布分支均未被覆盖。
+
 ## 已确认的验证结果
 
-- `npm run typecheck`：此前通过。
-- 安装器和 Release 契约测试：此前为 `19 pass / 1 skip / 0 fail`。
-- 远端 `origin/main` 曾有开发构建 CI 验收记录：typecheck、回归测试和 Windows SEA 验收曾通过。
-- 当前机器的工作区文件落盘会把若干源码写成二进制乱码，典型首字节为 `17 DA 5F A0 16 33 CD 9A`，导致：
-  - `src/production-main.ts` 无法被 esbuild 读取；
-  - `npm run build:sea` 报 `Unexpected "\\x17"`；
-  - 因此本机不能作为最终发布构建机。
+- `npm run typecheck`：在 Node `25.8.0` 上通过；项目正式要求 Node `24.16.0`，因此这不是最终发布门禁结果。
+- 发布、安装器、Bundle 和打包契约测试：`84 pass / 1 skip / 0 fail`。
+- 全量 portable 测试：未通过，失败集中在当前 macOS 没有系统进程锁提供器（`Process lock unavailable`）以及未先生成 SEA 产物导致的 3 个 SEA smoke 测试；Windows runner 需重新执行完整门禁。
+- `npm run build:sea` 需要精确的 Node `24.16.0` 和 Windows runner；本机 Node 版本不满足该门禁，未生成可发布 SEA 产物。
 
 ## 本次纳入提交的内容
 
@@ -26,23 +31,24 @@
 - Skill bootstrap 的固定 GitHub Release 来源、重定向限制和下载大小限制。
 - 安全、验证、故障排查和命令文档。
 
-## 明确未提交的内容
+## 当前未完成的内容
 
-- `src/main.ts`：当前工作区中的磁盘内容已被本机加密/文件过滤影响，表现为二进制乱码；不能把该版本提交。
-- `.tmp-acl-probe.ps1`：临时探针。
-- `probe.zip`：临时探测产物。
+- 正式版本号、`cli-vX.Y.Z`、`templates-vX.Y.Z` 和 `skill-vX.Y.Z` Tag 尚未确定或创建。
+- Windows Node `24.16.0` SEA 构建、非零字节 exe、receipt 和三个 probe 尚未在干净 runner 完成。
+- 生产签名根、Bundle Receipt、Channel Envelope 和 GitHub Release 资产尚未注入或发布。
+- portable 安装、repair、uninstall、Skill install/activate 的 Windows 端到端验收尚未完成。
 
-提交后应在干净机器上从提交内容重新 checkout，并重点验证源码字节、模板 manifest、SEA 构建和非零字节 exe。
+后续应从候选分支重新 checkout，并重点验证源码字节、模板 manifest、SEA 构建和非零字节 exe。
 
 ## 正式发布所需步骤
 
-1. 在干净 Windows 环境使用 Node `24.16.0` checkout 本提交。
+1. 在干净 Windows 环境使用 Node `24.16.0` checkout `release-candidate-0.1.0`。
 2. 执行 `npm ci`、`npm run typecheck`、完整测试和 `npm run build:sea`。
 3. 确认 `dist/harness-mrtool.exe`、`dist/sea-build-receipt.json` 均为非零字节。
 4. 运行 exe 的 `self-test`、contract probe、renderer probe。
 5. 生成并注入明确标记为 development 的 Bundle Receipt；不得冒充生产签名 receipt。
 6. 运行 portable 打包、SHA-256、安装器、repair、uninstall 和 Skill install/activate 验证。
-7. 检查最终 diff 后，另行决定版本号、Tag、推送和 GitHub Release。
+7. 检查最终 diff 后，决定版本号并创建三类 immutable Tag；再按工作流顺序创建 GitHub Release，最后发布 stable channel。
 
 ## macOS 构建说明
 
