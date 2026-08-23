@@ -1,0 +1,12 @@
+project_path: .
+docs_path: docs
+source_path: src
+test_path: test
+scripts_path: scripts
+workflows_path: .github/workflows
+commands:
+  install: npm ci
+  typecheck: npm run typecheck
+  test: npm test -- --test-concurrency=1
+  build: npm run build
+  sea_build: npm run build:sea

@@ -16,7 +16,7 @@ import { zipSync } from "fflate";
 import { canonicalize } from "json-canonicalize";
 
 const MAX_INPUT_BYTES = 256 * 1024 * 1024;
-const MAX_ARCHIVE_BYTES = 512 * 1024 * 1024;
+const MAX_ARCHIVE_BYTES = 256 * 1024 * 1024;
 const SHA256 = /^[a-f0-9]{64}$/u;
 const EXPECTED_NAMES = Object.freeze([
   "SHA256SUMS",
@@ -67,7 +67,7 @@ async function readRegularFile(path, name) {
   try {
     const link = await lstat(absolute, { bigint: true });
     before = link;
-    if (!link.isFile() || link.size > BigInt(MAX_INPUT_BYTES)) {
+    if (!link.isFile() || link.size < 1n || link.size > BigInt(MAX_INPUT_BYTES)) {
       fail(`${name} is not a bounded regular file.`);
     }
     handle = await open(
@@ -99,12 +99,50 @@ function sha256(bytes) {
 function assertCanonicalReceipt(bytes) {
   let value;
   try {
-    const text = Buffer.from(bytes).toString("utf8");
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
     value = JSON.parse(text);
     if (text !== `${canonicalize(value)}\n`) fail("bundle receipt is not canonical JSON.");
   } catch (error) {
     if (error?.message?.startsWith("Portable release packaging failed:")) throw error;
     fail("bundle receipt is not valid UTF-8 JSON.", error);
+  }
+  if (
+    value === null ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(["payload", "signatures"])
+  ) {
+    fail("bundle receipt envelope shape is invalid.");
+  }
+  if (
+    typeof value.payload !== "string" ||
+    !/^[A-Za-z0-9_-]+$/u.test(value.payload) ||
+    Buffer.from(value.payload, "base64url").toString("base64url") !== value.payload ||
+    !Array.isArray(value.signatures) ||
+    value.signatures.length < 1 ||
+    value.signatures.length > 16
+  ) {
+    fail("bundle receipt envelope payload is invalid.");
+  }
+  const seen = new Set();
+  for (const signature of value.signatures) {
+    if (
+      signature === null ||
+      typeof signature !== "object" ||
+      Array.isArray(signature) ||
+      JSON.stringify(Object.keys(signature).sort()) !== JSON.stringify(["algorithm", "keyId", "signature"]) ||
+      signature.algorithm !== "Ed25519" ||
+      typeof signature.keyId !== "string" ||
+      !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(signature.keyId) ||
+      seen.has(signature.keyId) ||
+      typeof signature.signature !== "string" ||
+      !/^[A-Za-z0-9_-]+$/u.test(signature.signature) ||
+      Buffer.from(signature.signature, "base64url").byteLength !== 64 ||
+      Buffer.from(signature.signature, "base64url").toString("base64url") !== signature.signature
+    ) {
+      fail("bundle receipt envelope signature is invalid.");
+    }
+    seen.add(signature.keyId);
   }
 }
 
@@ -127,7 +165,7 @@ function assertByteMap(entries) {
     if (!EXPECTED_NAMES.includes(name) || !(entries[name] instanceof Uint8Array)) {
       fail("archive tree contains an unexpected or non-file entry.");
     }
-    if (entries[name].byteLength > MAX_INPUT_BYTES) fail("archive entry is too large.");
+    if (entries[name].byteLength < 1 || entries[name].byteLength > MAX_INPUT_BYTES) fail("archive entry size is invalid.");
   }
   if (JSON.stringify([...names].sort()) !== JSON.stringify([...EXPECTED_NAMES].sort())) {
     fail("archive tree is not exact.");
@@ -155,6 +193,14 @@ export function validateReleaseArchive(entries) {
   }
   if (seen.size !== CHECKSUM_NAMES.length) fail("SHA256SUMS is incomplete.");
   assertCanonicalReceipt(entries["bundle-receipt.envelope.json"]);
+  return true;
+}
+
+export function validateReleaseArchiveAndReceipt(entries, receiptBytes) {
+  validateReleaseArchive(entries);
+  if (!(receiptBytes instanceof Uint8Array) || !Buffer.from(entries["bundle-receipt.envelope.json"]).equals(Buffer.from(receiptBytes))) {
+    fail("standalone bundle receipt does not match the packaged receipt.");
+  }
   return true;
 }
 

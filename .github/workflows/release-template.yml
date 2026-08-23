@@ -11,6 +11,7 @@ on:
 permissions:
   contents: write
   id-token: write
+  attestations: write
 
 jobs:
   verify:
@@ -18,8 +19,11 @@ jobs:
     timeout-minutes: 15
     env:
       RELEASE_TAG: ${{ inputs.tag }}
+      TEMPLATE_DIST: dist/template-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
       - uses: actions/setup-node@v4
         with:
           node-version: 24.16.0
@@ -28,7 +32,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]
+          [[ "$RELEASE_TAG" =~ ^templates-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]
       - run: npm run typecheck
       - run: npm test -- test/unit/bundle.test.ts test/unit/update-manifest.test.ts
       - name: Create immutable template receipt
@@ -38,28 +42,33 @@ jobs:
           test -d template-bundle
           if find template-bundle -type l -print -quit | grep -q .; then exit 1; fi
           test -n "${BUNDLE_RECEIPT_B64:-}"
-          mkdir -p dist/template-bundle
-          (cd template-bundle && zip -X -q -r ../dist/template-bundle/template-bundle.zip .)
-          printf '%s' "$BUNDLE_RECEIPT_B64" | base64 --decode > dist/template-bundle/bundle-receipt.envelope.json
-          (cd dist/template-bundle && sha256sum template-bundle.zip bundle-receipt.envelope.json > SHA256SUMS)
-          test -s dist/template-bundle/template-bundle.zip
-          test -s dist/template-bundle/bundle-receipt.envelope.json
+          if [[ -e "$TEMPLATE_DIST" || -L "$TEMPLATE_DIST" ]]; then
+            [[ -d "$TEMPLATE_DIST" && ! -L "$TEMPLATE_DIST" ]]
+            [[ -z "$(find "$TEMPLATE_DIST" -mindepth 1 -print -quit)" ]]
+          else
+            mkdir -p "$TEMPLATE_DIST"
+          fi
+          (cd template-bundle && zip -X -q -r "../$TEMPLATE_DIST/harness-mr-templates.zip" .)
+          printf '%s' "$BUNDLE_RECEIPT_B64" | base64 --decode > "$TEMPLATE_DIST/bundle-receipt.envelope.json"
+          (cd "$TEMPLATE_DIST" && sha256sum harness-mr-templates.zip bundle-receipt.envelope.json > SHA256SUMS)
+          test -s "$TEMPLATE_DIST/harness-mr-templates.zip"
+          test -s "$TEMPLATE_DIST/bundle-receipt.envelope.json"
         env:
           BUNDLE_RECEIPT_B64: ${{ secrets.TEMPLATE_BUNDLE_RECEIPT_B64 }}
       - name: Attest the verified template archive
         uses: actions/attest@v4
         with:
-          subject-path: dist/template-bundle/template-bundle.zip
+          subject-path: ${{ env.TEMPLATE_DIST }}/harness-mr-templates.zip
       - name: Upload verified template assets
         uses: actions/upload-artifact@v4
         with:
-          name: release-template-${{ github.sha }}
-          path: dist/template-bundle
+          name: release-template-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.TEMPLATE_DIST }}
       - name: Publish a draft after verification
         if: ${{ inputs.tag != '' }}
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${RELEASE_TAG}-template" --draft --target "${GITHUB_SHA}" --title "${RELEASE_TAG} template" --generate-notes dist/template-bundle/template-bundle.zip dist/template-bundle/bundle-receipt.envelope.json dist/template-bundle/SHA256SUMS
+        run: gh release create "${RELEASE_TAG}" --draft --verify-tag --target "${GITHUB_SHA}" --title "${RELEASE_TAG}" --generate-notes "$TEMPLATE_DIST/harness-mr-templates.zip" "$TEMPLATE_DIST/bundle-receipt.envelope.json" "$TEMPLATE_DIST/SHA256SUMS"
       - name: Download and verify the draft assets
         if: ${{ inputs.tag != '' }}
         env:
@@ -68,13 +77,16 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf draft-template
-          gh release download "${RELEASE_TAG}-template" --dir draft-template --pattern 'template-bundle.zip' --pattern 'bundle-receipt.envelope.json' --pattern 'SHA256SUMS'
+          gh release download "${RELEASE_TAG}" --dir draft-template --pattern 'harness-mr-templates.zip' --pattern 'bundle-receipt.envelope.json' --pattern 'SHA256SUMS'
+          cmp --silent "$TEMPLATE_DIST/harness-mr-templates.zip" draft-template/harness-mr-templates.zip
+          cmp --silent "$TEMPLATE_DIST/bundle-receipt.envelope.json" draft-template/bundle-receipt.envelope.json
+          cmp --silent "$TEMPLATE_DIST/SHA256SUMS" draft-template/SHA256SUMS
           (cd draft-template && sha256sum -c SHA256SUMS)
       - name: Publish the verified template draft
         if: ${{ inputs.tag != '' }}
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release edit "${RELEASE_TAG}-template" --draft=false
+        run: gh release edit "${RELEASE_TAG}" --draft=false
       - name: Verify immutable template release
         if: ${{ inputs.tag != '' }}
         env:
@@ -82,5 +94,5 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(gh release view "${RELEASE_TAG}-template" --json isDraft --jq .isDraft)" = false
-          test "$(gh release view "${RELEASE_TAG}-template" --json isImmutable --jq .isImmutable)" = true
+          test "$(gh release view "${RELEASE_TAG}" --json isDraft --jq .isDraft)" = false
+          test "$(gh release view "${RELEASE_TAG}" --json isImmutable --jq .isImmutable)" = true

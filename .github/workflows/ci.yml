@@ -65,9 +65,11 @@ jobs:
       - name: Check PowerShell installer syntax
         shell: pwsh
         run: |
-          Get-ChildItem scripts -Filter *.ps1 | ForEach-Object {
+          $files = @(Get-ChildItem scripts -Filter *.ps1 | Select-Object -ExpandProperty FullName)
+          $files += Join-Path $PWD 'skill/harness-mr/scripts/bootstrap.ps1'
+          foreach ($path in $files) {
             $errors = $null
-            [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$errors)
+            [void][System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$null, [ref]$errors)
             if ($errors.Count -ne 0) {
               $errors | ForEach-Object { Write-Error $_.Message }
               exit 1
@@ -82,7 +84,7 @@ jobs:
       - name: Upload verified development SEA artifact
         uses: actions/upload-artifact@v4
         with:
-          name: harness-mrtool-dev-${{ github.sha }}
+          name: harness-mrtool-dev-${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: error
           path: |
             dist/harness-mrtool.exe

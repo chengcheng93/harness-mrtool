@@ -8,11 +8,12 @@ on:
         required: true
         type: string
   push:
-    tags: ["v*.*.*"]
+    tags: ["cli-v*.*.*"]
 
 permissions:
   contents: write
   id-token: write
+  attestations: write
 
 jobs:
   build:
@@ -22,6 +23,8 @@ jobs:
       RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       - uses: actions/setup-node@v4
         with:
           node-version: 24.16.0
@@ -33,7 +36,7 @@ jobs:
       - name: Require an immutable semantic release tag
         shell: pwsh
         run: |
-          if ($env:RELEASE_TAG -notmatch '^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$') { throw 'Release tag is invalid' }
+          if ($env:RELEASE_TAG -notmatch '^cli-v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$') { throw 'Release tag is invalid' }
       - run: npm run typecheck
       - run: npm test -- test/contract/release-assets.test.ts
       - run: npm run build:sea
@@ -54,18 +57,18 @@ jobs:
             --receipt dist/bundle-receipt.envelope.json `
             --notices THIRD_PARTY_NOTICES.md `
             --node-license licenses/Node.txt `
-            --output dist/harness-mrtool-portable.zip
+            --output dist/harness-mrtool-windows-x64.zip
       - name: Attest the final portable archive
         uses: actions/attest@v4
         with:
-          subject-path: dist/harness-mrtool-portable.zip
+          subject-path: dist/harness-mrtool-windows-x64.zip
       - name: Upload immutable draft inputs
         uses: actions/upload-artifact@v4
         with:
-          name: release-cli-${{ github.sha }}
+          name: release-cli-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             dist/harness-mrtool.exe
-            dist/harness-mrtool-portable.zip
+            dist/harness-mrtool-windows-x64.zip
             dist/bundle-receipt.envelope.json
             dist/sea-build-receipt.json
 
@@ -75,61 +78,69 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       - uses: actions/setup-node@v4
         with:
           node-version: 24.16.0
       - run: npm ci
       - uses: actions/download-artifact@v4
         with:
-          name: release-cli-${{ github.sha }}
+          name: release-cli-${{ github.run_id }}-${{ github.run_attempt }}
           path: dist
       - name: Verify downloaded final bytes
         shell: bash
         run: |
           set -euo pipefail
           test -s dist/harness-mrtool.exe
-          test -s dist/harness-mrtool-portable.zip
-          sha256sum dist/harness-mrtool.exe dist/harness-mrtool-portable.zip
-          unzip -p dist/harness-mrtool-portable.zip SHA256SUMS > dist/SHA256SUMS
+          test -s dist/harness-mrtool-windows-x64.zip
+          unzip -p dist/harness-mrtool-windows-x64.zip harness-mrtool.exe > dist/portable-harness-mrtool.exe
+          cmp --silent dist/harness-mrtool.exe dist/portable-harness-mrtool.exe
+          sha256sum dist/harness-mrtool.exe dist/harness-mrtool-windows-x64.zip
+          unzip -p dist/harness-mrtool-windows-x64.zip SHA256SUMS > dist/SHA256SUMS
           test -s dist/SHA256SUMS
-          node --input-type=module -e "import {readFile} from 'node:fs/promises'; import {unzipSync} from 'fflate'; import {validateReleaseArchive} from './scripts/package-portable.mjs'; validateReleaseArchive(unzipSync(await readFile('dist/harness-mrtool-portable.zip')));"
+          node --input-type=module -e "import {readFile} from 'node:fs/promises'; import {unzipSync} from 'fflate'; import {validateReleaseArchiveAndReceipt} from './scripts/package-portable.mjs'; validateReleaseArchiveAndReceipt(unzipSync(await readFile('dist/harness-mrtool-windows-x64.zip')), await readFile('dist/bundle-receipt.envelope.json'));"
       - name: Preserve the verified bytes for publication
         uses: actions/upload-artifact@v4
         with:
-          name: verified-release-cli-${{ github.sha }}
+          name: verified-release-cli-${{ github.run_id }}-${{ github.run_attempt }}
           path: dist
 
   publish:
     needs: verify-draft-assets
-    if: ${{ startsWith(inputs.tag || github.ref_name, 'v') }}
+    if: ${{ startsWith(inputs.tag || github.ref_name, 'cli-v') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
       RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       - uses: actions/setup-node@v4
         with:
           node-version: 24.16.0
       - run: npm ci --ignore-scripts
       - uses: actions/download-artifact@v4
         with:
-          name: verified-release-cli-${{ github.sha }}
+          name: verified-release-cli-${{ github.run_id }}-${{ github.run_attempt }}
           path: dist
       - name: Re-verify the bytes in the publishing job
         shell: bash
         run: |
           set -euo pipefail
           test -s dist/harness-mrtool.exe
-          test -s dist/harness-mrtool-portable.zip
+          test -s dist/harness-mrtool-windows-x64.zip
           test -s dist/bundle-receipt.envelope.json
-          unzip -p dist/harness-mrtool-portable.zip SHA256SUMS > dist/SHA256SUMS
+          unzip -p dist/harness-mrtool-windows-x64.zip harness-mrtool.exe > dist/portable-harness-mrtool.exe
+          cmp --silent dist/harness-mrtool.exe dist/portable-harness-mrtool.exe
+          unzip -p dist/harness-mrtool-windows-x64.zip SHA256SUMS > dist/SHA256SUMS
           test -s dist/SHA256SUMS
-          node --input-type=module -e "import {readFile} from 'node:fs/promises'; import {unzipSync} from 'fflate'; import {validateReleaseArchive} from './scripts/package-portable.mjs'; validateReleaseArchive(unzipSync(await readFile('dist/harness-mrtool-portable.zip')));"
+          node --input-type=module -e "import {readFile} from 'node:fs/promises'; import {unzipSync} from 'fflate'; import {validateReleaseArchiveAndReceipt} from './scripts/package-portable.mjs'; validateReleaseArchiveAndReceipt(unzipSync(await readFile('dist/harness-mrtool-windows-x64.zip')), await readFile('dist/bundle-receipt.envelope.json'));"
       - name: Create a draft release with the verified assets
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${RELEASE_TAG}" --draft --verify-tag --title "${RELEASE_TAG}" --generate-notes dist/harness-mrtool.exe dist/harness-mrtool-portable.zip dist/bundle-receipt.envelope.json dist/sea-build-receipt.json
+        run: gh release create "${RELEASE_TAG}" --draft --verify-tag --title "${RELEASE_TAG}" --generate-notes dist/harness-mrtool.exe dist/harness-mrtool-windows-x64.zip dist/bundle-receipt.envelope.json dist/sea-build-receipt.json
       - name: Download the draft assets and verify the published bytes
         env:
           GH_TOKEN: ${{ github.token }}
@@ -137,8 +148,14 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf draft-download
-          gh release download "${RELEASE_TAG}" --dir draft-download --pattern 'harness-mrtool-portable.zip' --pattern 'bundle-receipt.envelope.json'
-          node --input-type=module -e "import {readFile} from 'node:fs/promises'; import {unzipSync} from 'fflate'; import {validateReleaseArchive} from './scripts/package-portable.mjs'; validateReleaseArchive(unzipSync(await readFile('draft-download/harness-mrtool-portable.zip')));"
+          gh release download "${RELEASE_TAG}" --dir draft-download --pattern 'harness-mrtool.exe' --pattern 'harness-mrtool-windows-x64.zip' --pattern 'bundle-receipt.envelope.json' --pattern 'sea-build-receipt.json'
+          cmp --silent dist/harness-mrtool.exe draft-download/harness-mrtool.exe
+          cmp --silent dist/harness-mrtool-windows-x64.zip draft-download/harness-mrtool-windows-x64.zip
+          cmp --silent dist/bundle-receipt.envelope.json draft-download/bundle-receipt.envelope.json
+          cmp --silent dist/sea-build-receipt.json draft-download/sea-build-receipt.json
+          unzip -p draft-download/harness-mrtool-windows-x64.zip harness-mrtool.exe > draft-download/portable-harness-mrtool.exe
+          cmp --silent draft-download/harness-mrtool.exe draft-download/portable-harness-mrtool.exe
+          node --input-type=module -e "import {readFile} from 'node:fs/promises'; import {unzipSync} from 'fflate'; import {validateReleaseArchiveAndReceipt} from './scripts/package-portable.mjs'; validateReleaseArchiveAndReceipt(unzipSync(await readFile('draft-download/harness-mrtool-windows-x64.zip')), await readFile('draft-download/bundle-receipt.envelope.json'));"
       - name: Publish the verified draft
         env:
           GH_TOKEN: ${{ github.token }}

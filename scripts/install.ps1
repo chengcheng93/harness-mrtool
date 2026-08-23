@@ -1,10 +1,8 @@
 [CmdletBinding()]
 param(
-  [Parameter(Mandatory = $true)]
-  [ValidatePattern('^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$')]
+  [Parameter(Mandatory = $false)]
   [string]$Tag,
-  [Parameter(Mandatory = $true)]
-  [ValidatePattern('^[A-Fa-f0-9]{64}$')]
+  [Parameter(Mandatory = $false)]
   [string]$Sha256,
   [string]$Destination = $(if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) { '' } else { Join-Path $env:LOCALAPPDATA 'HarnessMrTool' }),
   [switch]$Repair
@@ -14,8 +12,8 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $Repository = 'chengcheng93/harness-mrtool'
 $ReleaseHost = 'github.com'
-$AssetName = 'harness-mrtool-portable.zip'
-$MaxArchiveBytes = 512MB
+$AssetName = 'harness-mrtool-windows-x64.zip'
+$MaxArchiveBytes = 256MB
 $MaxEntryBytes = 256MB
 $MaxExpandedBytes = 512MB
 $MarkerName = '.harness-mrtool-install.json'
@@ -68,6 +66,21 @@ function Get-FileHashHex { param([string]$Path)
   try { $stream = [IO.File]::Open($item.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read); return ([BitConverter]::ToString($hash.ComputeHash($stream))).Replace('-', '').ToLowerInvariant() }
   finally { if ($null -ne $stream) { $stream.Dispose() }; $hash.Dispose() }
 }
+function Open-VerifiedArchive { param([string]$Path, [string]$ExpectedHash)
+  $item = Get-SafeItem $Path; Assert-PlainItem $item $false
+  $hash = [Security.Cryptography.SHA256]::Create(); $stream = $null
+  try {
+    # Keep an exclusive handle while the verified bytes are parsed by ZipArchive.
+    $stream = [IO.File]::Open($item.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+    $actual = ([BitConverter]::ToString($hash.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
+    if ($actual -cne $ExpectedHash) { Fail-Safe 'Downloaded release changed during verification.' }
+    $stream.Position = 0
+    return $stream
+  } catch {
+    if ($null -ne $stream) { $stream.Dispose() }
+    throw
+  } finally { $hash.Dispose() }
+}
 function Download-Bounded { param([Uri]$Uri, [string]$DestinationPath)
   Add-Type -AssemblyName System.Net.Http -ErrorAction Stop
   $handler = New-Object Net.Http.HttpClientHandler; $handler.AllowAutoRedirect = $false
@@ -96,7 +109,7 @@ function Read-ManagedMarker { param([string]$Root)
   $path = Join-Path $Root $MarkerName; $item = Get-SafeItem $path; Assert-PlainItem $item $false
   try { $value = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json } catch { Fail-Safe 'Installation marker is invalid.' }
   $keys = @($value.PSObject.Properties.Name | Sort-Object)
-  if (($keys -join '|') -cne 'archiveSha256|executableSha256|repository|schemaVersion|tag' -or $value.schemaVersion -ne 1 -or $value.repository -cne $Repository -or $value.archiveSha256 -notmatch '^[a-f0-9]{64}$' -or $value.executableSha256 -notmatch '^[a-f0-9]{64}$') { Fail-Safe 'Installation marker fields are invalid.' }
+  if (($keys -join '|') -cne 'archiveSha256|executableSha256|repository|schemaVersion|tag' -or $value.schemaVersion -ne 1 -or $value.repository -cne $Repository -or $value.archiveSha256 -notmatch '^[a-f0-9]{64}$' -or $value.executableSha256 -notmatch '^[a-f0-9]{64}$' -or $value.tag -notmatch '^cli-v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$') { Fail-Safe 'Installation marker fields are invalid.' }
   return $value
 }
 function Validate-ReleaseTree { param([string]$Root)
@@ -116,37 +129,54 @@ function Validate-ReleaseTree { param([string]$Root)
   if ($null -eq $receipt) { Fail-Safe 'Bundle receipt is invalid.' }
 }
 function Invoke-ExecutableSelfTest { param([string]$Executable)
-  $info = New-Object Diagnostics.ProcessStartInfo; $info.FileName = $Executable; $info.Arguments = 'self-test --output json'; $info.UseShellExecute = $false; $info.CreateNoWindow = $true; $info.RedirectStandardOutput = $true; $info.RedirectStandardError = $true
+  $info = New-Object Diagnostics.ProcessStartInfo; $info.FileName = $Executable; $info.Arguments = 'self-test --output json'; $info.UseShellExecute = $false; $info.CreateNoWindow = $true
   $process = New-Object Diagnostics.Process; $process.StartInfo = $info
   try { if (-not $process.Start()) { Fail-Safe 'Installed executable could not start.' }; if (-not $process.WaitForExit(60000)) { try { $process.Kill() } catch { }; Fail-Safe 'Installed executable self-test timed out.' }; if ($process.ExitCode -ne 0) { Fail-Safe 'Installed executable self-test failed.' } }
   finally { $process.Dispose() }
 }
 
 if ([string]::IsNullOrWhiteSpace($Destination)) { Fail-Safe 'LOCALAPPDATA is unavailable; specify a destination.' }
-$destinationFull = Get-SafePath $Destination; $parent = Ensure-Directory (Split-Path -Parent $destinationFull); $expectedHash = $Sha256.ToLowerInvariant()
-$uri = [Uri]::new("https://$ReleaseHost/$Repository/releases/download/$Tag/$AssetName")
+$destinationFull = Get-SafePath $Destination; $parent = Ensure-Directory (Split-Path -Parent $destinationFull)
 if ($Repair) {
   $marker = Read-ManagedMarker $destinationFull; $exe = Join-Path $destinationFull 'harness-mrtool.exe'
   if ((Get-FileHashHex $exe) -cne $marker.executableSha256) { Fail-Safe 'Installed executable does not match its marker.' }
   Invoke-ExecutableSelfTest $exe; & $exe self-update status --output json *> $null; if ($LASTEXITCODE -ne 0) { Fail-Safe 'Updater recovery did not complete.' }; exit 0
 }
+if ($Tag -notmatch '^cli-v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$') { Fail-Safe 'Release tag is invalid.' }
+if ($Sha256 -notmatch '^[A-Fa-f0-9]{64}$') { Fail-Safe 'Release hash is invalid.' }
+$expectedHash = $Sha256.ToLowerInvariant(); $uri = [Uri]::new("https://$ReleaseHost/$Repository/releases/download/$Tag/$AssetName")
 $lockPath = Join-Path $parent '.harness-mrtool-install.lock'; $archivePath = Join-Path $parent ('.harness-mrtool-download-' + [Guid]::NewGuid().ToString('N') + '.zip'); $stagePath = Join-Path $parent ('.harness-mrtool-stage-' + [Guid]::NewGuid().ToString('N')); $backupPath = Join-Path $parent ('.harness-mrtool-old-' + [Guid]::NewGuid().ToString('N'))
 $lock = $null; $moved = $false; $published = $false
 try {
   try { $lock = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None) } catch { Fail-Safe 'Another installation is already running.' }
   Download-Bounded $uri $archivePath; if ((Get-FileHashHex $archivePath) -cne $expectedHash) { Fail-Safe 'Downloaded release hash does not match the expected hash.' }; Ensure-Directory $stagePath | Out-Null
-  Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop; $archive = [IO.Compression.ZipFile]::OpenRead($archivePath)
+  Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
+  $archiveStream = $null; $archive = $null
   try {
-    if ($archive.Entries.Count -ne $ExpectedNames.Count) { Fail-Safe 'Release archive entry count is invalid.' }; $seen = @{}; [Int64]$expanded = 0
+    $archiveStream = Open-VerifiedArchive $archivePath $expectedHash
+    $archive = [IO.Compression.ZipArchive]::new($archiveStream, [IO.Compression.ZipArchiveMode]::Read, $true)
+    if ($archive.Entries.Count -ne $ExpectedNames.Count) { Fail-Safe 'Release archive entry count is invalid.' }; $seen = @{}; [Int64]$expanded = 0; [Int64]$writtenTotal = 0
     foreach ($entry in $archive.Entries) {
       if ($entry.FullName.EndsWith('/')) { Fail-Safe 'Release archive contains a directory entry.' }; $name = Assert-ArchivePath $entry.FullName
       if ($name -notin $ExpectedNames -or $seen.ContainsKey($name) -or $entry.Length -lt 1 -or $entry.Length -gt $MaxEntryBytes) { Fail-Safe 'Release archive tree is invalid.' }
       $expanded += [Int64]$entry.Length; if ($expanded -gt $MaxExpandedBytes) { Fail-Safe 'Release archive expands beyond its limit.' }
       $destination = Join-Path $stagePath ($name.Replace('/', [IO.Path]::DirectorySeparatorChar)); Ensure-Directory (Split-Path -Parent $destination) | Out-Null
       $out = [IO.File]::Open($destination, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None); $input = $entry.Open()
-      try { $input.CopyTo($out); $out.Flush($true) } finally { $input.Dispose(); $out.Dispose() }; $seen[$name] = $true
+      try {
+        $buffer = New-Object byte[] 65536
+        [Int64]$written = 0
+        while (($read = $input.Read($buffer, 0, $buffer.Length)) -gt 0) {
+          $written += $read
+          if ($written -gt [Int64]$entry.Length -or $written -gt $MaxEntryBytes) { Fail-Safe 'Release archive entry emitted too many bytes.' }
+          $writtenTotal += $read
+          if ($writtenTotal -gt $MaxExpandedBytes) { Fail-Safe 'Release archive emitted too many bytes.' }
+          $out.Write($buffer, 0, $read)
+        }
+        if ($written -ne [Int64]$entry.Length) { Fail-Safe 'Release archive entry emitted an unexpected byte count.' }
+        $out.Flush($true)
+      } finally { $input.Dispose(); $out.Dispose() }; $seen[$name] = $true
     }
-  } finally { $archive.Dispose() }
+  } finally { if ($null -ne $archive) { $archive.Dispose() }; if ($null -ne $archiveStream) { $archiveStream.Dispose() } }
   Validate-ReleaseTree $stagePath; $exe = Join-Path $stagePath 'harness-mrtool.exe'; Invoke-ExecutableSelfTest $exe
   $marker = [ordered]@{ schemaVersion = 1; repository = $Repository; tag = $Tag; archiveSha256 = $expectedHash; executableSha256 = Get-FileHashHex $exe }
   [IO.File]::WriteAllText((Join-Path $stagePath $MarkerName), ($marker | ConvertTo-Json -Compress), (New-Object Text.UTF8Encoding($false)))

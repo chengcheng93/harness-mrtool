@@ -11,6 +11,12 @@ in source configuration intentionally contains no production roots, so a
 source invocation fails closed. Test-only loopback trust is branded and cannot
 be relabeled as production trust.
 
+The bundled Skill bootstrap accepts only the fixed GitHub repository and the
+exact `skill-v<version>` release path. It follows a bounded set of HTTPS GitHub
+asset redirects and rejects arbitrary caller-supplied hosts. Download hashes
+and archive manifests are checked locally; production receipt signatures still
+require the approved Ed25519 trust chain.
+
 The update cache, trust state, activation journal, Skill state, and verification
 receipts are private state. They use canonical records, identity checks, atomic
 publication, and recovery paths that retain evidence on ambiguity. A missing or
