@@ -22,7 +22,7 @@
 - Bundle receipt 已按 `templates-v1.0.0`、当前 manifest 和全部模板文件哈希生成并签名；私钥和 Base64 Secret 保存在仓库外的受限目录，未写入 Git。
 - GitHub Secret `BUNDLE_RECEIPT_B64` 已配置；正式 Tag `cli-v0.1.0` 已锁定到提交 `7b67ded5b0bfdf526b227832c61ce47d6e071732`。
 - GitHub Release #3（Actions run `32635454627`）已成功完成，页面显示 `Immutable release`。
-- 当前私有个人仓库不支持 GitHub Artifact Attestations；CLI Release 工作流已调整为在该环境跳过 Attestation，但仍执行最终文件、归档和收据的完整字节校验。
+- Release #3 构建时仓库仍为私有，工作流在该次运行跳过了 GitHub Artifact Attestations，但完成了最终文件、归档和收据的完整字节校验；随后仓库已按发布要求切换为 Public，后续 Release 可启用 Artifact Attestations。
 
 ## 已确认的验证结果
 
