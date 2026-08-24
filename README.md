@@ -13,10 +13,10 @@ SSH-first 迁移、验收和排障：
 [SSH-first 操作手册](docs/usage/ssh-first-operation-manual.md)
 
 正式 Windows x64 Release：
-<https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.4>
+<https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.5>
 
 Codex Plugin 构建产物：
-<https://github.com/chengcheng93/harness-mrtool/releases/tag/plugin-v0.1.4>
+<https://github.com/chengcheng93/harness-mrtool/releases/tag/plugin-v0.1.5>
 
 插件源码位于 `plugins/harness-mrtool/`，其中包含 `.codex-plugin/plugin.json`
 和 `harness-mr` Skill。插件依赖已安装的 `harness-mrtool` CLI；两者是两个

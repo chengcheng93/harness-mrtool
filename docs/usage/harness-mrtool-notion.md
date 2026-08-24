@@ -2,9 +2,9 @@
 
 > 适合复制到 Notion 的项目说明文档
 >
-> 当前正式版本：`0.1.4`
+> 当前正式版本：`0.1.5`（SSH-first）
 > GitHub 仓库：<https://github.com/chengcheng93/harness-mrtool>
-> Windows Release：<https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.4>
+> Windows Release：<https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.5>
 
 ## 1. 一句话理解
 
@@ -205,8 +205,10 @@ Skill 更新先进入 CLI 管理的 staging 目录，只有用户显式执行 `s
 PowerShell 示例：
 
 ```powershell
-$tag = 'cli-v0.1.4'
-$sha256 = 'b467068fb4b14c5e1c1b6e6de61aeae1c7a39bd78f682ea49237afb23761080b'
+$tag = 'cli-v0.1.5'
+# 从 cli-v0.1.5 Release 页的 `harness-mrtool-windows-x64.zip` 复制 SHA-256；
+# 不要沿用旧版本的哈希。
+$sha256 = '<从 Release 页面复制 64 位十六进制 SHA-256>'
 $installer = Join-Path $env:TEMP 'harness-mrtool-install.ps1'
 
 Invoke-WebRequest `

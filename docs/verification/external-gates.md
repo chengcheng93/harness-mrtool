@@ -1,7 +1,8 @@
 # External gates
 
 This file records evidence without converting an unavailable environment into
-a success claim.
+a success claim. The SSH-first `0.1.5` candidate is tracked separately from
+the already-published `0.1.4` assets below.
 
 | Gate | Status | Evidence or owner action |
 | --- | --- | --- |
@@ -17,5 +18,12 @@ a success claim.
 | Isolated GitLab integration | Pending external prerequisite | Run fake-stack and real GitLab journeys with host-scoped credentials. |
 | Real Codex Skill host | Pending external prerequisite | Test standalone Skill staging, explicit activation, and host refresh. |
 | GitHub branch push | Completed | `release-candidate-0.1.0`, immutable `cli-v0.1.4`, and immutable `plugin-v0.1.4` are pushed without changing `main`. |
+
+## SSH-first 0.1.5 candidate
+
+- Local implementation commit: `123c387` (`feat: make Codex MR flow SSH-first`).
+- Verification completed locally: typecheck, 11 targeted authentication/manual/Skill contract tests, and 7 targeted Git push integration tests.
+- Release publication still requires the Windows GitHub Actions SEA build and immutable `cli-v0.1.5` / `plugin-v0.1.5` / `skill-v0.1.5` assets.
+- Real GitLab acceptance is still an external gate: this workstation has no configured GitLab remote, SSH identity loaded in the agent, or host-scoped GitLab target. No GitLab write was attempted.
 
 Local tests do not replace the Windows SEA, signing, real GitLab, or real-host gates.

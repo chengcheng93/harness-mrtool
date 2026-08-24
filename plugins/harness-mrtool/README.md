@@ -8,7 +8,7 @@ profiles, rendering, labels, writes, and verification.
 
 Install the matching CLI Release first:
 
-<https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.4>
+<https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.5>
 
 The current published CLI supports Windows x64. A GitLab token is optional:
 the default Skill path is SSH-first and renders a local handoff before the user

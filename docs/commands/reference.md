@@ -9,7 +9,7 @@ installation-path material.
 | `doctor` | Read-only repository, GitLab, Bundle, capability, and update diagnostics. |
 | `context` | Resolve a request context; `context --mr <iid>` requires the exact historical Bundle. |
 | `preview` | Produce a deterministic write plan without consuming candidates or mutating GitLab. |
-| `manual` | Render a token-free local handoff with title, body, and an SSH-compatible push plan; `--ssh-mr --push` is an explicit basic Draft MR request and remains unverified without API/UI readback. |
+| `manual` | Render a token-free local handoff with title, body, and an SSH-compatible push plan; `--ssh-mr --push` is an explicit basic MR request (Draft when the request intent is Draft) and remains unverified without API/UI readback. |
 | `create` | Create or upsert a merge request through the verified transaction path. |
 | `update <iid>` | Update an existing merge request with readback and journal evidence. |
 | `verify <iid>` | Verify stored merge-request state and historical Bundle evidence. |
