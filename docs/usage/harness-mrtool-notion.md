@@ -208,7 +208,7 @@ PowerShell 示例：
 $tag = 'cli-v0.1.5'
 # 从 cli-v0.1.5 Release 页的 `harness-mrtool-windows-x64.zip` 复制 SHA-256；
 # 不要沿用旧版本的哈希。
-$sha256 = '<从 Release 页面复制 64 位十六进制 SHA-256>'
+$sha256 = '52761faf9b145220a74fbc4f38e15bad84457476bc866003306c10b01ad22bf6'
 $installer = Join-Path $env:TEMP 'harness-mrtool-install.ps1'
 
 Invoke-WebRequest `

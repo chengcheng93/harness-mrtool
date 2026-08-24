@@ -14,16 +14,17 @@ the already-published `0.1.4` assets below.
 | Signed GitHub Pages channel | Pending external prerequisite | The publish workflow validates release inputs and envelope size locally, but production Ed25519 signing, schema/tag/hash binding, Pages deployment, and an end-to-end client fetch require protected release material and a hosted environment. |
 | Skill bootstrap origin and receipt trust | Pending external prerequisite | The bootstrap now pins the repository, exact `skill-v` release path, and bounded GitHub redirects. Production testing must still exercise the final immutable URL and signed receipt/key chain; no arbitrary host or unsigned receipt is accepted as a release claim. |
 | Production signing roots | Completed for CLI 0.1.4 | `release-key-1` is pinned in the production trust configuration; the signed Bundle receipt was injected through `BUNDLE_RECEIPT_B64` and verified by Release CLI run `32650924186`. |
-| Immutable GitHub release assets | Completed for CLI/Plugin 0.1.4 | Releases [`cli-v0.1.4`](https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.4) and [`plugin-v0.1.4`](https://github.com/chengcheng93/harness-mrtool/releases/tag/plugin-v0.1.4) are non-draft and immutable. Their workflows verified final bytes and downloaded draft assets before publishing; the public repository also permits Artifact Attestations. |
+| Immutable GitHub release assets | Completed for CLI/Plugin 0.1.5 | Releases [`cli-v0.1.5`](https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.5) and [`plugin-v0.1.5`](https://github.com/chengcheng93/harness-mrtool/releases/tag/plugin-v0.1.5) are non-draft and immutable. Their workflows verified final bytes and downloaded draft assets before publishing; the public repository also permits Artifact Attestations. |
 | Isolated GitLab integration | Pending external prerequisite | Run fake-stack and real GitLab journeys with host-scoped credentials. |
 | Real Codex Skill host | Pending external prerequisite | Test standalone Skill staging, explicit activation, and host refresh. |
-| GitHub branch push | Completed | `release-candidate-0.1.0`, immutable `cli-v0.1.4`, and immutable `plugin-v0.1.4` are pushed without changing `main`. |
+| GitHub branch push | Completed | `release-candidate-0.1.0`, immutable `cli-v0.1.5`, and immutable `plugin-v0.1.5` are pushed without changing `main`. |
 
 ## SSH-first 0.1.5 candidate
 
 - Local implementation commit: `123c387` (`feat: make Codex MR flow SSH-first`).
 - Verification completed locally: typecheck, 11 targeted authentication/manual/Skill contract tests, and 7 targeted Git push integration tests.
-- Release publication still requires the Windows GitHub Actions SEA build and immutable `cli-v0.1.5` / `plugin-v0.1.5` / `skill-v0.1.5` assets.
+- CLI/Plugin publication completed: Windows SEA and immutable `cli-v0.1.5` / `plugin-v0.1.5` are available.
+- Skill publication still requires the dedicated `SKILL_BUNDLE_RECEIPT_B64` Secret; the first `skill-v0.1.5` run failed closed before publishing because that Secret is not configured.
 - Real GitLab acceptance is still an external gate: this workstation has no configured GitLab remote, SSH identity loaded in the agent, or host-scoped GitLab target. No GitLab write was attempted.
 
 Local tests do not replace the Windows SEA, signing, real GitLab, or real-host gates.

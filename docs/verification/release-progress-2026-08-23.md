@@ -82,3 +82,15 @@ Codex Plugin zip SHA-256：`f45c673ed4c9f9b704e2010739d5fd6e9b1396322da8090ccabc
 - 当前 macOS 不能直接产出可发布的 Windows `.exe`；
 - 若要发布 macOS SEA，需要新增 macOS 目标文件名、SEA 注入、可执行文件验证、权限/签名（如需要）和对应 CI runner；
 - Windows 和 macOS 的 SEA 产物必须分别在各自平台构建，不能把一个平台的 Node 可执行文件跨平台注入后当作另一个平台产物。
+
+## SSH-first 0.1.5 发布结果（2026-08-24）
+
+- 实现提交：`123c387`；版本提交：`a74fbb1`。
+- 候选分支：`release-candidate-0.1.0`，已推送；`main` 未修改。
+- CLI Release：[`cli-v0.1.5`](https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.5)，工作流 [`32713773931`](https://github.com/chengcheng93/harness-mrtool/actions/runs/32713773931)，已通过 Windows Node `24.16.0` SEA、归档和不可变发布门禁。
+- Plugin Release：[`plugin-v0.1.5`](https://github.com/chengcheng93/harness-mrtool/releases/tag/plugin-v0.1.5)，工作流 [`32713773849`](https://github.com/chengcheng93/harness-mrtool/actions/runs/32713773849)，已成功发布。
+- Windows portable zip SHA-256：`52761faf9b145220a74fbc4f38e15bad84457476bc866003306c10b01ad22bf6`。
+- Windows executable SHA-256：`99f54dc413dcbb5abe93eef03b121d9c4074d8754343bfc6dd57280c71b6e147`。
+- Plugin zip SHA-256：`b97c10e9145864ff6d197056e07913b1c0fdef8f393d64624578a9497bdd6791`。
+- Skill Release：首次 [`skill-v0.1.5`](https://github.com/chengcheng93/harness-mrtool/actions/runs/32713774061) 在收据 Secret 缺失处安全失败，未创建不可信 Release；配置 `SKILL_BUNDLE_RECEIPT_B64` 后需重新触发。
+- 真实 GitLab 验收仍未执行：当前工作站没有目标 GitLab 仓库、已加载的 GitLab SSH 身份或 Host-scoped GitLab 连接信息，因此没有进行任何 GitLab 写入。
