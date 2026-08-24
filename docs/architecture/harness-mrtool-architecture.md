@@ -12,7 +12,7 @@
 
 ## 1. 架构目标
 
-本架构把 MR 生成从 AI 临场组织文本改为确定性编译过程：调用者只提交结构化 Request，CLI 固定完成解析、Schema 校验、实时上下文解析、模板渲染、GitLab 写入和最终回读。CLI 返回成功意味着远端实际状态已满足当前 Bundle 合同；它不代表工具成为 GitLab 合并门禁。
+本架构把 MR 生成从 AI 临场组织文本改为确定性编译过程：调用者提交结构化 Request，CLI 固定完成解析、Schema 校验、模板渲染和 Git 事务校验。默认 SSH-first 路径不要求 GitLab Token：CLI 生成可审计的 title/body/push plan，用户通过 SSH 推送后在 GitLab 网页创建 MR。显式 `--auth api` 才启用实时上下文、候选解析、MR 写入和最终回读；API 路径返回成功意味着远端实际状态已满足当前 Bundle 合同。工具不代表 GitLab 合并门禁。
 
 V1 的优先级依次为：
 
@@ -35,6 +35,7 @@ V1 的优先级依次为：
 | GitLab 访问 | 生产 adapter 直接调用 REST/GraphQL；不依赖额外 CLI |
 | 模板事实源 | 公开 GitHub 仓库中的版本化 Template Bundle |
 | 自动更新 | 每次业务调用短预算检查，可信 last-known-good 离线继续 |
+| 默认认证 | SSH-first；GitLab API 是显式 opt-in 的完整能力 |
 | Windows 更新 | staging 新 CLI 执行业务，临时 helper 在旧进程退出后持久化替换 |
 | 代码组织 | 端口与适配器；领域层不得导入 CLI、HTTP、文件系统或进程实现 |
 
@@ -44,7 +45,8 @@ V1 的优先级依次为：
 flowchart LR
     U["Human / Script / Codex Skill"] --> C["harness-mrtool CLI"]
     C --> G["Local Git"]
-    C --> L["GitLab REST / GraphQL"]
+    C --> GIT["Git SSH push"]
+    C --> L["GitLab REST / GraphQL (explicit API mode)"]
     C --> H["Public GitHub signed channel"]
     H --> R["Immutable Releases"]
     C --> S["Private local state"]
@@ -82,11 +84,21 @@ domain         -X-> concrete HTTP, fs, process, console or CLI parsing
 
 ### 5.1 Context 与候选 token
 
-1. CLI 解析当前 Git remote、GitLab host/project、target branch 和 source HEAD。
+1. API 模式下，CLI 解析当前 Git remote、GitLab host/project、target branch 和 source HEAD；SSH-first 模式只依赖本地 Git remote、target branch 和 source HEAD。
 2. CLI 固定一个已验证的 release-set 与 Bundle，并实时分页读取项目及祖先组标签、Issue 和人员候选。
 3. CLI 构造 `ExternalContextSnapshot`，发放 256-bit 随机 candidate token。
 4. 本地只保存 token 的 SHA-256 digest；context 文件绑定 host、project、候选类型、真实 ID、Bundle hash、protocol、创建时间和 30 分钟 TTL。
 5. `create`/`update` 只接受该 context 发放的 token。解析后仍要从 GitLab 重新验证对象存在、未归档且仍符合 Policy。
+
+### 5.5 SSH-first 手工提交
+
+默认 Skill 流程不调用 `context`、`labels list` 或 GitLab API：
+
+```text
+schema show -> profiles list -> manual --auth ssh -> review -> SSH push -> GitLab Web MR
+```
+
+`manual` 使用已验证 Bundle 在本地生成 title、description、target branch、source SHA 和普通非强制 push plan。显式 `--ssh-mr` 时，工具将 create/target/title/description/optional-draft 编码为 GitLab Push Options；它不发送标签、负责人、审核人、目标项目或自动合并选项。由于没有 API/UI 回读，输出只能是 `requested-unverified`，用户必须在 GitLab 网页确认。
 
 context 必须使用当前用户私有目录、原子替换和跨进程锁。Windows 通过 ACL 保障当前用户可读；类 Unix 目标若以后支持则要求 mode `0600`。原始 token 不写日志、marker 或诊断文件。
 

@@ -2,11 +2,15 @@
 
 `harness-mrtool` is a deterministic CLI for preparing, previewing, creating,
 updating, and verifying GitLab merge requests from repository changes. A
-GitLab token is optional: the `manual` command generates a token-free title,
-description, and SSH push plan for a user-created MR.
+GitLab token is optional: the default path is SSH-first and the `manual`
+command generates a token-free title, description, and SSH push plan for a
+user-created MR. The API path remains available explicitly with `--auth api`.
 
 使用说明（原理、实现逻辑、安装、配置和命令示例）：
 [Notion-ready 使用手册](docs/usage/harness-mrtool-notion.md)
+
+SSH-first 迁移、验收和排障：
+[SSH-first 操作手册](docs/usage/ssh-first-operation-manual.md)
 
 正式 Windows x64 Release：
 <https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.4>

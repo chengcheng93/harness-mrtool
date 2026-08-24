@@ -20,6 +20,7 @@ test("parses every V1 command into one closed invocation contract", () => {
     [["verify", "12", "--level", "merge"], "verify"],
     [["preview", "--input", "request.yaml"], "preview"],
     [["manual", "--input", "request.yaml", "--push"], "manual"],
+    [["manual", "--auth", "ssh", "--ssh-mr"], "manual"],
     [["schema", "show", "--from-mr", "12"], "schema.show"],
     [["profiles", "list"], "profiles.list"],
     [["profiles", "detect"], "profiles.detect"],
@@ -67,6 +68,12 @@ test("returns typed command-specific values and common options", () => {
   assert.equal(invocation.options.output, "json");
   assert.equal(invocation.options.nonInteractive, true);
   assert.equal(invocation.options.client, "script");
+});
+
+test("parses the SSH merge request opt-in separately from auth mode", () => {
+  const invocation = parseCliInvocation(["manual", "--auth", "ssh", "--ssh-mr", "--output", "json"]);
+  assert.deepEqual(invocation.command, { kind: "manual", sshMergeRequest: true });
+  assert.equal(invocation.options.authMode, "ssh");
 });
 
 test("keeps machine output separate from template export destination", () => {

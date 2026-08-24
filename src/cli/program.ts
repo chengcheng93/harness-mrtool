@@ -25,7 +25,7 @@ export type CliCommand =
     }
   | { readonly kind: "verify"; readonly iid: number | null; readonly level: VerificationLevel }
   | { readonly kind: "preview" }
-  | { readonly kind: "manual" }
+  | { readonly kind: "manual"; readonly sshMergeRequest: boolean }
   | { readonly kind: "schema.show"; readonly fromMrIid: number | null }
   | { readonly kind: "profiles.list" }
   | { readonly kind: "profiles.detect" }
@@ -57,6 +57,7 @@ const BASE_COMMON_FLAGS = new Set([
   "--output",
   "--client",
   "--client-version",
+  "--auth",
   "--skill-protocol",
   "--offline",
   "--no-update",
@@ -79,6 +80,7 @@ const LOCAL_COMMON_FLAGS = new Set([
 
 
 const SPECIFIC_FLAGS: Readonly<Partial<Record<CommandKind, Readonly<Record<string, FlagArity>>>>> = {
+  manual: { "--ssh-mr": "boolean" },
   create: { "--upsert": "boolean" },
   context: { "--mr": "value", "--migrate-template": "boolean" },
   update: {
@@ -224,7 +226,6 @@ function commandFor(
       return Object.freeze({ kind, upsert: specific.has("--upsert") });
     }
     case "preview":
-    case "manual":
     case "profiles.list":
     case "profiles.detect":
     case "labels.list":
@@ -235,6 +236,9 @@ function commandFor(
     case "version":
       requireNoPositionals(positionals);
       return Object.freeze({ kind });
+    case "manual":
+      requireNoPositionals(positionals);
+      return Object.freeze({ kind, sshMergeRequest: specific.has("--ssh-mr") });
     case "context": { // eslint-disable-line no-case-declarations
       requireNoPositionals(positionals);
       const mrRaw = specificValue(specific, "--mr");

@@ -57,6 +57,7 @@ test("parses the complete common CLI flag contract without side effects", () => 
     nonInteractive: true,
     output: "json",
     client: "codex-skill",
+    authMode: "auto",
     clientVersion: "1.2.3-beta.1",
     skillProtocol: 2,
     push: true,
@@ -77,6 +78,7 @@ test("uses explicit stable defaults", () => {
     nonInteractive: false,
     output: null,
     client: "manual",
+    authMode: "auto",
     clientVersion: null,
     skillProtocol: null,
     push: false,
@@ -113,6 +115,13 @@ test("enforces coherent client tuples", () => {
   ]) {
     assertInputError(() => parseCliOptions(args));
   }
+});
+
+test("parses explicit authentication modes", () => {
+  assert.equal(parseCliOptions(["--auth", "ssh"]).authMode, "ssh");
+  assert.equal(parseCliOptions(["--auth=api"]).authMode, "api");
+  assert.equal(parseCliOptions(["--auth", "auto"]).authMode, "auto");
+  assertInputError(() => parseCliOptions(["--auth", "token"]));
 });
 
 test("rejects duplicates, missing values, unsupported values, and conflicts as INPUT_ERROR", () => {

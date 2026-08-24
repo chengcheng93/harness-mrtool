@@ -75,13 +75,15 @@ async function manager(paths: { readonly active: string; readonly staging: strin
   });
 }
 
-test("Skill instructions begin with context and delegate rendering/labels to the CLI", () => {
+test("Skill instructions begin with SSH-first local inspection and delegate rendering/labels to the CLI", () => {
   const instructions = renderSkillInstructions({ skillVersion: "1.1.0", skillProtocol: 1 });
-  const contextIndex = instructions.indexOf("harness-mrtool context");
-  assert.notEqual(contextIndex, -1);
-  assert.ok(contextIndex < instructions.indexOf("harness-mrtool preview"));
+  const schemaIndex = instructions.indexOf("harness-mrtool schema show");
+  assert.notEqual(schemaIndex, -1);
+  assert.ok(schemaIndex < instructions.indexOf("harness-mrtool manual --auth ssh"));
+  assert.ok(instructions.includes("--ssh-mr"));
+  assert.ok(instructions.includes("--auth api"));
   assert.ok(instructions.includes("harness-mrtool manual"));
-  assert.ok(instructions.includes("AUTH_ERROR"));
+  assert.ok(instructions.includes("--auth api"));
   assert.ok(instructions.includes("harness-mrtool create"));
   assert.ok(instructions.includes("harness-mrtool update"));
   assert.ok(!instructions.includes("status::"));

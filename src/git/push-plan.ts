@@ -22,6 +22,8 @@ interface PushPlanCommon {
   readonly relation: SourceBranchRelation;
   readonly remote: string;
   readonly remoteRef: string;
+  /** Explicit, tool-generated Git push options; ambient options are never retained. */
+  readonly pushOptions?: readonly string[];
 }
 
 export type SourceBranchPushPlan =
@@ -38,6 +40,7 @@ export type SourceBranchPushPlan =
 export interface PlanPushOptions {
   readonly allowPush: boolean;
   readonly dryRun?: boolean;
+  readonly pushOptions?: readonly string[];
 }
 
 export type PushResult =
@@ -60,6 +63,81 @@ export type PushResult =
 export interface ExecutePushOptions {
   readonly authorized: boolean;
   readonly dryRun?: boolean;
+}
+
+export interface SshMergeRequestPushOptions {
+  readonly targetBranch: string;
+  readonly title: string;
+  readonly description: string;
+  readonly draft: boolean;
+}
+
+const MAX_PUSH_OPTION_TEXT = 64 * 1024;
+
+function pushOptionText(value: string, field: string): string {
+  if (value === "" || Buffer.byteLength(value, "utf8") > MAX_PUSH_OPTION_TEXT || /[\u0000\r]/u.test(value)) {
+    throw pushError(
+      "SSH merge request push option is invalid",
+      `${field} is non-empty text without NUL or carriage return and at most ${String(MAX_PUSH_OPTION_TEXT)} bytes`,
+      "invalid push option text",
+      "Edit the generated request and retry.",
+    );
+  }
+  // GitLab push options cannot contain literal newlines. Preserve backslashes
+  // and encode line breaks using the documented `\\n` representation.
+  return value.replaceAll("\\", "\\\\").replaceAll("\n", "\\n");
+}
+
+export function buildSshMergeRequestPushOptions(
+  options: SshMergeRequestPushOptions,
+): readonly string[] {
+  if (!/^[^\u0000\r\n\s]+$/u.test(options.targetBranch) || options.targetBranch.startsWith("-")) {
+    throw pushError(
+      "SSH merge request target branch is invalid",
+      "a valid target branch",
+      "invalid target branch",
+      "Use the branch returned by context and retry.",
+    );
+  }
+  const result = [
+    "merge_request.create",
+    `merge_request.target=${pushOptionText(options.targetBranch, "target branch")}`,
+    `merge_request.title=${pushOptionText(options.title, "title")}`,
+    `merge_request.description=${pushOptionText(options.description, "description")}`,
+  ];
+  if (options.draft) result.push("merge_request.draft");
+  return Object.freeze(result);
+}
+
+function assertAllowedPushOptions(options: readonly string[]): void {
+  const allowed = /^(?:merge_request\.create|merge_request\.draft|merge_request\.(?:target|title|description)=.+)$/u;
+  const createCount = options.filter((option) => option === "merge_request.create").length;
+  const draftCount = options.filter((option) => option === "merge_request.draft").length;
+  if (options.length < 4 || options.length > 5 || new Set(options).size !== options.length ||
+      options.some((option) => typeof option !== "string" || !allowed.test(option)) ||
+      createCount !== 1 || draftCount > 1 ||
+      options.filter((option) => option.startsWith("merge_request.target=")).length !== 1 ||
+      options.filter((option) => option.startsWith("merge_request.title=")).length !== 1 ||
+      options.filter((option) => option.startsWith("merge_request.description=")).length !== 1 ||
+      !options.includes("merge_request.create") ||
+      options.some((option) => option.includes("merge_request.label=") || option.includes("merge_request.assign=") ||
+        option.includes("merge_request.auto_merge") || option.includes("merge_request.target_project="))) {
+    throw pushError(
+      "SSH merge request push options are not an approved tool-generated set",
+      "create, target, title, description, and optional draft only",
+      "unsupported or incomplete push options",
+      "Regenerate the SSH merge request plan and retry.",
+    );
+  }
+}
+
+export function isSshPushUrl(value: string): boolean {
+  if (/^(?:[^@/\s:]+@)?[^/\s:]+:.+$/u.test(value) && !value.includes("://")) return true;
+  try {
+    return new URL(value).protocol === "ssh:";
+  } catch {
+    return false;
+  }
 }
 
 interface RemoteTransactionView {
@@ -584,14 +662,15 @@ async function isAncestor(
   );
 }
 
-function commandFor(repository: RepositorySnapshot): readonly string[] {
+function commandFor(repository: RepositorySnapshot, pushOptions: readonly string[] = []): readonly string[] {
+  const optionArguments = pushOptions.flatMap((option) => [`--push-option=${option}`]);
   return Object.freeze([
     "-c",
     "push.pushOption=",
     "push",
     "--porcelain",
     "--no-follow-tags",
-    "--no-push-option",
+    ...(pushOptions.length === 0 ? ["--no-push-option"] : optionArguments),
     "--recurse-submodules=no",
     "--no-verify",
     "--",
@@ -610,11 +689,14 @@ function assertPushPlan(repository: RepositorySnapshot, plan: SourceBranchPushPl
   const commonMatches = plan.remote === repository.sourceRemote &&
     plan.remoteRef === repository.sourceRemoteRef &&
     plan.localHeadSha === repository.sourceHeadSha;
-  const expectedCommand = commandFor(repository);
+  const pushOptions = plan.pushOptions ?? [];
+  if (pushOptions.length > 0) assertAllowedPushOptions(pushOptions);
+  const expectedCommand = commandFor(repository, pushOptions);
   const shapeMatches = plan.kind === "up-to-date"
     ? plan.relation === "equal" &&
       plan.beforeSha === repository.sourceHeadSha &&
-      plan.command === null
+      plan.command === null &&
+      (plan.pushOptions === undefined || plan.pushOptions.length === 0)
     : (plan.relation === "absent" || plan.relation === "behind") &&
       (plan.relation === "absent" ? plan.beforeSha === null : plan.beforeSha !== null) &&
       commandsEqual(plan.command, expectedCommand);
@@ -632,11 +714,31 @@ export async function planSourceBranchPush(
   repository: RepositorySnapshot,
   options: PlanPushOptions,
 ): Promise<SourceBranchPushPlan> {
+  const pushOptions = options.pushOptions === undefined
+    ? Object.freeze([])
+    : Object.freeze([...options.pushOptions]);
+  if (pushOptions.length > 0) assertAllowedPushOptions(pushOptions);
+  if (pushOptions.length > 0 && !isSshPushUrl(repository.sourcePushUrl)) {
+    throw pushError(
+      "SSH merge request push options require an SSH Git remote",
+      "an SSH source push URL",
+      repository.sourcePushUrl,
+      "Change the source remote to SSH, verify ssh -T, and retry.",
+    );
+  }
   const remoteSha = await withRemoteTransactionView(
     repository,
     async (view) => readRemoteSha(repository, view.environment),
   );
   if (remoteSha === repository.sourceHeadSha) {
+    if (pushOptions.length > 0) {
+      throw pushError(
+        "SSH merge request creation requires a new source branch push",
+        "a source branch that is absent or behind the local HEAD",
+        "remote source branch is already up-to-date",
+        "Use the normal manual handoff and create the MR in GitLab, or add a new commit before retrying --ssh-mr.",
+      );
+    }
     return Object.freeze({
       kind: "up-to-date",
       relation: "equal",
@@ -672,10 +774,11 @@ export async function planSourceBranchPush(
     kind: ready ? "ready" : "confirmation-required",
     relation,
     beforeSha: remoteSha,
-    command: commandFor(repository),
+    command: commandFor(repository, pushOptions),
     localHeadSha: repository.sourceHeadSha,
     remote: repository.sourceRemote,
     remoteRef: repository.sourceRemoteRef,
+    ...(pushOptions.length === 0 ? {} : { pushOptions }),
   });
 }
 
@@ -714,7 +817,7 @@ export async function executeSourceBranchPush(
   }
   await assertCleanWorktree(repository);
   await assertRepositoryUnchanged(repository);
-  const exactCommand = commandFor(repository);
+  const exactCommand = commandFor(repository, plan.pushOptions ?? []);
   const remoteView = await createRemoteTransactionView(repository);
   let operationError: unknown;
   let verifiedRemoteSha: string | null = null;

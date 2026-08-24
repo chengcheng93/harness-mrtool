@@ -187,13 +187,12 @@ Windows 不能可靠覆盖正在运行的 `.exe`。工具使用 staging handoff�
 Skill 每次调用：
 
 1. 固定当前 Skill version 和 protocol；
-2. 先执行 `harness-mrtool context`；
-3. 只使用 CLI 返回的 Schema、Profile、候选 token 和 diff 证据；
-4. 生成结构化 Request；
-5. 执行只读 `preview`；
-6. 展示 CLI JSON 并等待确认；
-7. 把同一份 Request 通过 stdin 交给 `create`/`update`；
-8. 原样保留 `ok`、`code`、partial state、activationRequired 和 hostRefreshMayBeRequired。
+2. 默认先执行本地 `schema show` 和 `profiles list`；
+3. 只使用 CLI 返回的 Schema、Profile 和本地 diff 证据生成结构化 Request；
+4. 默认执行 `manual --auth ssh`，展示标题、正文和 SSH push plan 并等待确认；
+5. 确认后才执行 `manual --push`，再由用户在 GitLab 网页创建 MR；
+6. 只有显式 `--auth api` 才执行 `context -> preview -> create/update -> verify`；
+7. SSH Push Options 只有显式 `--ssh-mr` 才启用，并将创建结果标记为未验证。
 
 Skill 更新先进入 CLI 管理的 staging 目录，只有用户显式执行 `skill activate --version ... --path ...` 才会切换 active path。激活不会强制当前会话重新加载 Skill，宿主是否立即发现新 Skill 会通过状态字段明确报告。
 
@@ -243,18 +242,21 @@ codex plugin add harness-mrtool@harness-mrtool
 ```
 
 安装后新开一个 Codex task/thread。进入目标 Git 仓库后，可以直接说“准备当前
-分支的 merge request”；Plugin 会按 `context -> Request -> preview ->
-确认 -> create/update` 调用 CLI。Plugin 不接收或保存 GitLab Token。
+分支的 merge request”；Plugin 默认使用 `schema/profiles -> Request ->
+manual --auth ssh` 的 SSH-first 流程，本地生成标题、正文和 SSH 推送计划，
+不调用 GitLab API。用户确认后可以用 `manual --push` 或输出的 Git 命令推送
+分支，再在 GitLab 网页手动创建 MR。这个路径不会声称 MR 已创建。
 
-如果 `context` 返回 `AUTH_ERROR` 或 `GITLAB_ERROR`，Plugin 会自动改走
-`schema/profiles -> Request -> manual`：CLI 在本地生成标题、正文和 SSH
-推送计划，不调用 GitLab，也不选择实时标签、负责人或审核人。用户确认后
-可以用 `manual --push` 或输出的 Git 命令推送分支，再在 GitLab 网页手动创建
-MR。这个路径不会声称 MR 已创建。
+如果目标 GitLab 支持 Push Options，可以显式使用 `manual --auth ssh --ssh-mr
+--push` 请求创建基础 Draft MR。该路径只发送创建、目标分支、标题、正文和可选
+Draft，不发送标签、负责人、审核人或自动合并；输出 `mrCreation=requested-unverified`
+时必须在 GitLab 网页确认 MR 实际存在。
 
 也可以直接从 Release 页面下载 `harness-mrtool.exe`；但推荐使用 portable zip 和安装脚本，因为脚本会验证完整归档、receipt、SHA256SUMS 和安装目录所有权。
 
-### 7.2 配置 GitLab 认证
+### 7.2 可选：配置 API 模式认证
+
+默认 SSH-first 流程不需要下面的变量。只有需要实时 GitLab 上下文、候选标签/人员、自动创建或更新 MR 时，才显式使用 `--auth api` 并配置当前 GitLab Host 的 Token：
 
 当前 CLI 使用 Host-scoped 环境变量作为可用的生产入口：
 
@@ -270,35 +272,50 @@ Remove-Item Env:HARNESS_MRTOOL_GITLAB_TOKEN
 Remove-Item Env:HARNESS_MRTOOL_GITLAB_HOST
 ```
 
-### 7.3 最小工作流
+### 7.3 默认 SSH-first 工作流
 
 在目标 Git 仓库目录执行：
 
 ```powershell
 git status
 git remote -v
-harness-mrtool doctor --output json
-harness-mrtool profiles detect --output json
-harness-mrtool labels list --output json
+harness-mrtool schema show --output json
+harness-mrtool profiles list --output json
+
+Get-Content .\mr-request.json -Raw |
+  harness-mrtool manual `
+    --auth ssh `
+    --input - `
+    --input-format json `
+    --output json
 ```
 
-最简单的人工模式：
+确认输出中的标题、正文、目标分支、源 SHA 和 `pushPlan` 后，才执行：
 
 ```powershell
-harness-mrtool create
+Get-Content .\mr-request.json -Raw |
+  harness-mrtool manual `
+    --auth ssh `
+    --input - `
+    --input-format json `
+    --push `
+    --output json
 ```
 
-向导会收集标题、变更、动机、影响、验证、文档、风险和审核信息，然后先创建 Draft 并按事务顺序完成回读验证。
+推送成功后，在 GitLab 网页选择源分支和目标分支，粘贴 CLI 输出的标题和正文，再手动选择标签、负责人和审核人。该流程不调用 GitLab API，也不会声称 MR 已创建。
+
+需要基础 Draft MR 请求时，显式加上 `--ssh-mr`；它只使用 GitLab 支持的 SSH Push Options，并且需要在网页核验结果。
 
 ### 7.4 文件或 stdin 模式
 
 长文本推荐使用 YAML/JSON 文件，自动化和 Codex 推荐 JSON stdin：
 
 ```powershell
-harness-mrtool context --output json
+harness-mrtool context --auth api --output json
 
 Get-Content .\mr-request.json -Raw |
   harness-mrtool preview `
+    --auth api `
     --input - `
     --input-format json `
     --non-interactive `
@@ -306,6 +323,7 @@ Get-Content .\mr-request.json -Raw |
 
 Get-Content .\mr-request.json -Raw |
   harness-mrtool create `
+    --auth api `
     --input - `
     --input-format json `
     --non-interactive `
@@ -323,10 +341,10 @@ harness-mrtool template export --profile general --destination .\MR-template.md 
 ### 7.5 更新和验证 MR
 
 ```powershell
-harness-mrtool update 123 --input .\mr-request.yaml
-harness-mrtool verify 123 --level structure --output json
-harness-mrtool verify 123 --level ready --output json
-harness-mrtool verify 123 --level merge --output json
+harness-mrtool update 123 --auth api --input .\mr-request.yaml
+harness-mrtool verify 123 --auth api --level structure --output json
+harness-mrtool verify 123 --auth api --level ready --output json
+harness-mrtool verify 123 --auth api --level merge --output json
 ```
 
 三个 verify 等级都是只读：
@@ -386,7 +404,7 @@ harness-mrtool verify 123 --level merge --output json
 
 ## 11. 当前版本的范围和未完成项
 
-`cli-v0.1.4` 在 `0.1.3` 的 Windows x64 CLI Release 基础上新增无 Token 本地手动交接路径：可生成确定性标题、正文和 SSH 推送计划，不调用 GitLab API，不伪造 MR 创建成功。`plugin-v0.1.4` 会在 `context` 返回 `AUTH_ERROR` 或 `GITLAB_ERROR` 时自动切换该路径；有 Token 时现有 `context -> preview -> create/update` 链路保持不变。
+当前 CLI 支持 `--auth auto|ssh|api`。`auto` 为默认模式；Plugin 普通流程使用 SSH-first。`ssh` 模式不读取 GitLab Token，`api` 模式保留原有 `context -> preview -> create/update -> verify` 完整链路。
 
 以下事项仍属于后续外部门禁，不应在当前版本中当作已完成能力：
 
@@ -401,9 +419,9 @@ harness-mrtool verify 123 --level merge --output json
 
 ```text
 安装 Release
-  -> 有 Token：配置当前 GitLab Host 的 Token -> doctor -> context
+  -> 有 Token：--auth api + 配置当前 GitLab Host 的 Token -> doctor -> context
      -> preview -> create/update -> verify
-  -> 无 Token：schema/profiles -> manual -> 确认后 SSH push
+  -> 无 Token：schema/profiles -> manual --auth ssh -> 确认后 SSH push
      -> 在 GitLab 网页粘贴标题/正文并手动选择标签、负责人、审核人
 ```
 

@@ -40,6 +40,16 @@ export interface ProductionCommandServices {
   readonly skillStatus?: ProductionCommandHandler;
 }
 
+function rejectSshApiMode(invocation: CliInvocation, kind: string): void {
+  if (invocation.options.authMode !== "ssh") return;
+  throw new ToolError("AUTH_ERROR", `The ${kind} command is API-only in SSH mode`, {
+    field: "authMode",
+    expected: "auto or api for GitLab API commands",
+    actual: "ssh",
+    safeNextStep: "Use manual --auth ssh for token-free SSH-first flow, or explicitly choose --auth api.",
+  });
+}
+
 export interface DefaultUpdaterCommandOptions {
   readonly stateDirectory?: string;
   readonly windowsAclVerifier?: WindowsAclVerifier;
@@ -151,15 +161,15 @@ export function createProductionCommandHandlers(
     throw new TypeError("Production command services require a CLI version");
   }
   const handlers: Record<string, ProductionCommandHandler> = {
-    doctor: handler(services.doctor, "doctor", "AUTH_ERROR"),
-    context: handler(services.context, "context", "AUTH_ERROR"),
-    create: handler(services.create, "create", "AUTH_ERROR"),
-    update: handler(services.update, "update", "AUTH_ERROR"),
-    verify: handler(services.verify, "verify", "AUTH_ERROR"),
-    preview: handler(services.preview, "preview", "REPOSITORY_ERROR"),
+    doctor: async (invocation) => { rejectSshApiMode(invocation, "doctor"); return handler(services.doctor, "doctor", "AUTH_ERROR")(invocation); },
+    context: async (invocation) => { rejectSshApiMode(invocation, "context"); return handler(services.context, "context", "AUTH_ERROR")(invocation); },
+    create: async (invocation) => { rejectSshApiMode(invocation, "create"); return handler(services.create, "create", "AUTH_ERROR")(invocation); },
+    update: async (invocation) => { rejectSshApiMode(invocation, "update"); return handler(services.update, "update", "AUTH_ERROR")(invocation); },
+    verify: async (invocation) => { rejectSshApiMode(invocation, "verify"); return handler(services.verify, "verify", "AUTH_ERROR")(invocation); },
+    preview: async (invocation) => { rejectSshApiMode(invocation, "preview"); return handler(services.preview, "preview", "REPOSITORY_ERROR")(invocation); },
     manual: handler(services.manual, "manual", "REPOSITORY_ERROR"),
     "profiles.detect": handler(services.profilesDetect, "profiles.detect", "REPOSITORY_ERROR"),
-    "labels.list": handler(services.labelsList, "labels.list", "AUTH_ERROR"),
+    "labels.list": async (invocation) => { rejectSshApiMode(invocation, "labels.list"); return handler(services.labelsList, "labels.list", "AUTH_ERROR")(invocation); },
     "template.refresh": handler(services.templateRefresh, "template.refresh", "UPDATE_REQUIRED"),
     "self-update.check": handler(services.selfUpdateCheck, "self-update.check", "UPDATE_REQUIRED"),
     "self-update.status": handler(services.selfUpdateStatus, "self-update.status", "UPDATE_REQUIRED"),

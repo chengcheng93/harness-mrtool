@@ -19,6 +19,8 @@ import {
 } from "../../git/repository.ts";
 import {
   executeSourceBranchPush,
+  buildSshMergeRequestPushOptions,
+  isSshPushUrl,
   planSourceBranchPush,
   type ExecutePushOptions,
   type PlanPushOptions,
@@ -247,13 +249,25 @@ function fixedPushCommand(repository: RepositorySnapshot): string {
   return `git push --no-force ${repository.sourceRemote} ${repository.sourceHeadSha}:${repository.sourceRemoteRef}`;
 }
 
+function displayPushCommand(plan: SourceBranchPushPlan, repository: RepositorySnapshot): string {
+  if (plan.command === null || plan.pushOptions === undefined || plan.pushOptions.length === 0) {
+    return fixedPushCommand(repository);
+  }
+  return [
+    "git push --no-force",
+    ...plan.pushOptions.map((option) => `--push-option=${JSON.stringify(option)}`),
+    repository.sourceRemote,
+    `${repository.sourceHeadSha}:${repository.sourceRemoteRef}`,
+  ].join(" ");
+}
+
 function pushData(
   repository: RepositorySnapshot,
   plan: SourceBranchPushPlan | null,
   error: boolean,
   result: Awaited<ReturnType<typeof executeSourceBranchPush>> | null,
 ): JsonObject {
-  const command = fixedPushCommand(repository);
+  const command = plan === null ? fixedPushCommand(repository) : displayPushCommand(plan, repository);
   return {
     state: plan?.kind === "up-to-date" ? "up-to-date" : error ? "unavailable" : "ready",
     remote: repository.sourceRemote,
@@ -331,6 +345,26 @@ export function createManualCommandServices(
   const repositoryRuntime = dependencies.repository ?? defaultManualRepository;
   return {
     manual: async (invocation) => {
+      if (invocation.command.kind === "manual" && invocation.command.sshMergeRequest && invocation.options.authMode === "api") {
+        throw manualError(
+          "REPOSITORY_ERROR",
+          "SSH merge request push options cannot be combined with API auth mode",
+          "authMode",
+          "ssh or auto",
+          "api",
+          "Use manual --auth ssh --ssh-mr, or use the API create flow without --ssh-mr.",
+        );
+      }
+      if (invocation.options.authMode === "ssh" && invocation.options.input === null) {
+        throw manualError(
+          "INPUT_ERROR",
+          "SSH manual mode requires structured request input",
+          "input",
+          "--input <path> or --input - with --input-format json|yaml",
+          "no structured input source",
+          "Build the Request from schema show/profiles list and pass it through JSON or YAML stdin; this keeps SSH mode token-free.",
+        );
+      }
       const selection = verifySelection(dependencies.currentBundle);
       const request = manualRequest(await dependencies.requestSource.read(invocation));
       const repository = await repositoryRuntime.discover({
@@ -369,9 +403,18 @@ export function createManualCommandServices(
       let pushError = false;
       let pushResult: Awaited<ReturnType<typeof executeSourceBranchPush>> | null = null;
       try {
+        const pushOptions = invocation.command.kind === "manual" && invocation.command.sshMergeRequest
+          ? buildSshMergeRequestPushOptions({
+              targetBranch: request.targetBranch,
+              title,
+              description,
+              draft: request.intent === "draft",
+            })
+          : undefined;
         plan = await repositoryRuntime.planPush(repository, {
           allowPush: invocation.options.push,
           dryRun: invocation.options.dryRun,
+          ...(pushOptions === undefined ? {} : { pushOptions }),
         });
       } catch {
         pushError = true;
@@ -387,6 +430,16 @@ export function createManualCommandServices(
         }
       }
       if (invocation.options.push && plan !== null) {
+        if (invocation.options.authMode !== "api" && !isSshPushUrl(repository.sourcePushUrl)) {
+          throw manualError(
+            "REPOSITORY_ERROR",
+            "SSH-first mode requires an SSH source remote",
+            "remote",
+            "a GitLab SSH push URL",
+            repository.sourcePushUrl,
+            "Run git remote set-url --push origin git@<gitlab-host>:<group>/<project>.git, verify ssh -T, and retry.",
+          );
+        }
         pushResult = await repositoryRuntime.executePush(repository, plan, {
           authorized: true,
           dryRun: invocation.options.dryRun,
@@ -397,7 +450,11 @@ export function createManualCommandServices(
         invocation.options.push
           ? "The source branch push was requested through the configured Git remote; confirm the execution result below."
           : "Run pushPlan.command with your SSH agent or Git credential helper if the source branch is not already remote.",
-        "Open the GitLab project, create the Merge Request manually, paste the title and description, and choose labels, assignee, and reviewers in the UI.",
+        invocation.command.kind === "manual" && invocation.command.sshMergeRequest
+          ? request.intent === "draft"
+            ? "The SSH push requested a Draft Merge Request with generated title and description; creation is not API-verified. Open GitLab and verify it before adding labels, assignee, and reviewers."
+            : "The SSH push requested a Merge Request with generated title and description; creation is not API-verified. Open GitLab and verify it before adding labels, assignee, and reviewers."
+          : "Open the GitLab project, create the Merge Request manually, paste the title and description, and choose labels, assignee, and reviewers in the UI.",
       ];
       const targetProject = repository.targetProject;
       return {
@@ -405,7 +462,8 @@ export function createManualCommandServices(
         output: {
           data: {
             command: "manual",
-            mode: "manual",
+            mode: invocation.command.kind === "manual" && invocation.command.sshMergeRequest ? "ssh-mr" : "manual",
+            authMode: invocation.options.authMode,
             tokenRequired: false,
             remoteApi: "not-used",
             title,
@@ -421,6 +479,9 @@ export function createManualCommandServices(
             pushPlan: pushData(repository, plan, pushError, pushResult),
             manualLabelPlaceholders: labels.map((label) => label.name),
             manualSteps,
+            ...(invocation.command.kind === "manual" && invocation.command.sshMergeRequest
+              ? { mrCreation: pushResult?.kind === "pushed" || pushResult?.kind === "synchronized-after-unknown" ? "requested-unverified" : "not-requested" }
+              : {}),
           },
         },
       };

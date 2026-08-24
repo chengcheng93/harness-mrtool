@@ -1360,6 +1360,7 @@ harness-mrtool create
 harness-mrtool update [iid]
 harness-mrtool verify [iid] --level structure|ready|merge
 harness-mrtool preview
+harness-mrtool manual [--ssh-mr]
 harness-mrtool schema show [--from-mr <iid>]
 harness-mrtool profiles list
 harness-mrtool profiles detect
@@ -1387,6 +1388,7 @@ harness-mrtool version
 --non-interactive
 --output json
 --client manual|codex-skill|script
+--auth auto|ssh|api
 --client-version <semver>
 --skill-protocol <integer>
 --push
@@ -1394,6 +1396,13 @@ harness-mrtool version
 --offline
 --no-update
 ```
+
+`--auth auto` 是默认兼容模式。Codex Skill 的默认业务路径是
+`schema show -> profiles list -> manual --auth ssh`，不读取 GitLab API
+或 Token；直接调用 API-only 命令时，`auto` 保留旧的 API 行为，推荐显式写
+`--auth api`。`--auth ssh` 才是强制禁止 API-only 命令的模式。
+`manual` 额外支持显式 `--ssh-mr` 请求 GitLab 基础 MR（Draft 请求会附带
+Draft 选项），且结果必须经过网页确认，不得当作 API 回读成功。
 
 `--offline` 完全跳过本次网络更新检查并明确输出 `latestVersionConfirmed:false`，只使用 last-known-good；它不跳过 GitLab 业务 API。`--no-update` 仍检查 manifest，但不自动安装新版；若已验证 manifest 声明当前版本被撤销或不再兼容，有副作用命令仍失败。两者不能用于掩盖签名失败或已知撤销。
 
@@ -1426,7 +1435,7 @@ JSON 输出必须包含稳定的：
 - 当前目录是否为 Git 仓库；
 - remote 和 GitLab Host 是否可识别；
 - Git identity 是否有效；
-- GitLab 认证和最小权限；
+- 使用 `--auth api` 时检查 GitLab 认证和最小权限；SSH-first 手工模式不调用 API；
 - Labels、Issue、MR REST 与所需 GraphQL mutation；
 - 当前 release set 和签名缓存；
 - Template Bundle 完整性；
@@ -1471,27 +1480,34 @@ Skill 是可选的自然语言适配层，不是核心控制器。OpenAI Skill �
 
 Skill 名建议为 `harness-mr`，职责为：
 
-1. 调用 `harness-mrtool context`；
+1. 调用本地 `schema show` 和 `profiles list`；
 2. 分析 diff、commits 和实际测试输出；
 3. 依据 CLI 返回的 Schema 组织 Request；
 4. 对无法从仓库确定的信息逐项询问用户；
-5. 调用 `preview`；
-6. 通过 JSON stdin 调用 `create` 或 `update`；
-7. 只根据 CLI JSON 结果报告成功或失败。
+5. 默认调用 `manual --auth ssh`，展示标题、正文和推送计划；
+6. 用户确认后才执行 SSH branch push，由用户在 GitLab 网页创建 MR；
+7. 只有用户显式选择 API 模式时，才调用 `context --auth api -> preview -> create/update -> verify`；
+8. 只根据 CLI JSON 结果报告成功或失败，未回读的 SSH MR 只能报告为 requested-unverified。
 
 ### 14.2 每次 Skill 调用
 
-Skill 第一条可执行步骤必须调用：
+Skill 的默认第一条可执行步骤必须调用本地 Schema/Profile：
+
+```text
+harness-mrtool schema show --output json
+harness-mrtool profiles list --output json
+```
+
+只有 API 模式才调用下面的上下文入口；这次 CLI 调用本身已经执行统一更新 preflight，因此不需要 Skill 再维护第二套版本检查脚本。
 
 ```text
 harness-mrtool context \
+  --auth api \
   --client codex-skill \
   --client-version <skill-semver> \
   --skill-protocol <protocol> \
   --output json
 ```
-
-这次 CLI 调用本身已经执行统一更新 preflight，因此不需要 Skill 再维护第二套版本检查脚本。
 
 CLI 尚未安装时，Skill 可调用其 bundled bootstrap script 安装公开 Release；安装成功后所有后续检查回到 CLI。
 
@@ -1507,8 +1523,12 @@ CLI 尚未安装时，Skill 可调用其 bundled bootstrap script 安装公开 R
 
 ## 15. GitLab 认证与安全
 
-- CLI 直接调用 GitLab API，不依赖用户安装 `glab`；
+- CLI 的默认人工提交路径使用 Git SSH，不依赖 GitLab Token；
+- CLI 直接调用 GitLab API 的完整能力只在显式 `--auth api` 下启用，不依赖用户安装 `glab`；
+- SSH Push Options 只在显式 `manual --auth ssh --ssh-mr` 下启用，且仅发送 create、target、title、description 和可选 draft；
+- SSH 模式不自动选择或创建标签、不设置负责人/审核人、不执行自动合并，MR 创建结果必须由 GitLab 网页回读确认；
 - Token 不得作为普通命令行参数；
+- SSH 私钥只由系统 SSH agent/凭据管理器使用，不进入 CLI argv、Request、日志或 MR 正文；
 - 人工凭据优先保存到系统凭据库；
 - 自动化使用环境变量或受控 secret provider；
 - Token、Authorization header 和完整认证响应不得进入日志；

@@ -13,6 +13,7 @@ import {
   createDefaultUpdaterCommandServices,
   createProductionCommandHandlers,
 } from "../../src/cli/commands/production.ts";
+import { executeCliJson } from "../../src/cli/execute.ts";
 import { UpdateCache, type ReleaseSetSnapshot } from "../../src/update/cache.ts";
 import { parseCliInvocation, type CliCommand } from "../../src/cli/program.ts";
 
@@ -82,6 +83,28 @@ test("production handler factory registers every non-local V1 route", () => {
     const handler = handlers[invocation.command.kind as CliCommand["kind"]];
     assert.equal(typeof handler, "function", `missing handler for ${invocation.command.kind}`);
   }
+});
+
+test("SSH auth mode rejects API-only production commands before invoking handlers", async () => {
+  let called = false;
+  const handlers = createProductionCommandHandlers({
+    cliVersion: "0.1.4-test",
+    context: async () => { called = true; return {}; },
+  });
+  const chunks: string[] = [];
+  const result = await executeCliJson(
+    ["context", "--auth", "ssh", "--output", "json"],
+    {
+      cliVersion: "0.1.4-test",
+      handlers,
+      stdout: { write(chunk, callback) { chunks.push(chunk); callback(); return true; } },
+    },
+  );
+  assert.equal(result.exitCode, 3);
+  assert.equal(called, false);
+  const output = JSON.parse(chunks[0]!) as Record<string, unknown>;
+  assert.equal(output.ok, false);
+  assert.equal(output.code, "AUTH_ERROR");
 });
 
 

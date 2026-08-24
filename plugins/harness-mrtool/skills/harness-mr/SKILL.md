@@ -12,44 +12,39 @@ and GitLab writes. Do not copy those rules into Skill instructions.
 ## Invocation
 
 At the beginning of every invocation, keep the loaded Skill version and
-protocol fixed and run this command before any other executable command:
+protocol fixed. The default path is SSH-first and does not require a GitLab
+Token. Start with local Bundle inspection:
 
 ```text
-harness-mrtool context --client codex-skill --client-version <skill-semver> --skill-protocol <protocol> --output json
+harness-mrtool schema show --output json
+harness-mrtool profiles list --output json
 ```
 
-Use the returned JSON Schema, profile detection, diff evidence, test output,
-and candidate tokens. Ask the user only for values that the repository and
-the returned context cannot establish. Never invent labels, user IDs, review
-states, issue data, or template text.
+Use the returned JSON Schema and local repository evidence. Ask the user only
+for values that the repository cannot establish. Never invent labels, user IDs,
+review states, issue data, or template text.
 
-If the context command returns `ok: false` with `code: AUTH_ERROR` or
-`code: GITLAB_ERROR`, switch to the local manual handoff path instead of
-asking for a token or retrying the API. Read the local schema and profiles:
+Render the default token-free SSH handoff:
 
 ```text
-harness-mrtool schema.show --output json
-harness-mrtool profiles.list --output json
+harness-mrtool manual --auth ssh --input - --input-format json --output json
 ```
 
-Construct the same normalized Request from the repository changes and the
-user's answers, then render a token-free handoff:
+Manual SSH mode never calls GitLab and never resolves labels, assignees, or
+reviewers. Show the deterministic title, description, target branch, and
+`pushPlan`; ask for confirmation before rerunning with `--push`. After the
+branch is pushed, the user creates the Merge Request in GitLab and selects
+labels, assignee, and reviewers in the web UI.
 
-```text
-harness-mrtool manual --client codex-skill --client-version <skill-semver> --skill-protocol <protocol> --input - --input-format json --output json
-```
-
-Manual mode never calls GitLab and never resolves labels, assignees, or
-reviewers. It returns the deterministic title and description plus an SSH
-compatible `pushPlan`. Show those values and ask for confirmation before
-rerunning the command with `--push`; after the branch is pushed, the user
-creates the Merge Request in GitLab and selects labels, assignee, and
-reviewers in the web UI. A manual handoff is not a created Merge Request.
+For an explicit basic Draft MR request through GitLab SSH Push Options, add
+`--ssh-mr`. Only create, target, title, description, and optional draft options
+are generated. The result is `requested-unverified` until the user checks the
+GitLab UI.
 
 Run the read-only preview after constructing the structured Request:
 
 ```text
-harness-mrtool preview --client codex-skill --client-version <skill-semver> --skill-protocol <protocol> --input - --input-format json --output json
+harness-mrtool preview --auth api --client codex-skill --client-version <skill-semver> --skill-protocol <protocol> --input - --input-format json --output json
 ```
 
 Show the user the CLI JSON result and obtain any confirmation required by the
@@ -58,8 +53,9 @@ stdin; never put request contents, candidate tokens, credentials, or long
 text in command-line arguments:
 
 ```text
-harness-mrtool create --client codex-skill --client-version <skill-semver> --skill-protocol <protocol> --input - --input-format json --output json
-harness-mrtool update <iid> --client codex-skill --client-version <skill-semver> --skill-protocol <protocol> --input - --input-format json --output json
+harness-mrtool context --auth api --client codex-skill --client-version <skill-semver> --skill-protocol <protocol> --output json
+harness-mrtool create --auth api --client codex-skill --client-version <skill-semver> --skill-protocol <protocol> --input - --input-format json --output json
+harness-mrtool update <iid> --auth api --client-version <skill-semver> --skill-protocol <protocol> --input - --input-format json --output json
 ```
 
 Report only the single CLI JSON document. Preserve its `ok`, `code`, partial

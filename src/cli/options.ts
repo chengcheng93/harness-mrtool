@@ -6,6 +6,7 @@ import type { InputFormat } from "../input/load-input.ts";
 
 export type CliClient = "manual" | "codex-skill" | "script";
 export type CliOutput = "json";
+export type CliAuthMode = "auto" | "ssh" | "api";
 export type CliProfileSelection =
   | { readonly kind: "auto" }
   | { readonly kind: "explicit"; readonly ids: readonly string[] };
@@ -16,6 +17,7 @@ export interface CliOptions {
   readonly nonInteractive: boolean;
   readonly output: CliOutput | null;
   readonly client: CliClient;
+  readonly authMode: CliAuthMode;
   readonly clientVersion: string | null;
   readonly skillProtocol: number | null;
   readonly push: boolean;
@@ -34,6 +36,7 @@ interface MutableOptions {
   nonInteractive: boolean;
   output: CliOutput | null;
   client: CliClient;
+  authMode: CliAuthMode;
   clientVersion: string | null;
   skillProtocol: number | null;
   push: boolean;
@@ -59,6 +62,7 @@ const VALUE_FLAGS = new Set([
   "--input-format",
   "--output",
   "--client",
+  "--auth",
   "--client-version",
   "--skill-protocol",
   "--profile",
@@ -171,6 +175,12 @@ function applyValue(options: MutableOptions, flag: string, value: string): void 
       }
       options.client = value;
       break;
+    case "--auth":
+      if (value !== "auto" && value !== "ssh" && value !== "api") {
+        invalidFlag(flag, "auto, ssh, or api", "unsupported authentication mode");
+      }
+      options.authMode = value;
+      break;
     case "--client-version":
       options.clientVersion = assertScalar(flag, value);
       break;
@@ -228,6 +238,7 @@ export function parseCliOptions(arguments_: readonly string[]): CliOptions {
     nonInteractive: false,
     output: null,
     client: "manual",
+    authMode: "auto",
     clientVersion: null,
     skillProtocol: null,
     push: false,
