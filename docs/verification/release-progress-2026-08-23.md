@@ -92,5 +92,5 @@ Codex Plugin zip SHA-256：`f45c673ed4c9f9b704e2010739d5fd6e9b1396322da8090ccabc
 - Windows portable zip SHA-256：`52761faf9b145220a74fbc4f38e15bad84457476bc866003306c10b01ad22bf6`。
 - Windows executable SHA-256：`99f54dc413dcbb5abe93eef03b121d9c4074d8754343bfc6dd57280c71b6e147`。
 - Plugin zip SHA-256：`b97c10e9145864ff6d197056e07913b1c0fdef8f393d64624578a9497bdd6791`。
-- Skill Release：首次 [`skill-v0.1.5`](https://github.com/chengcheng93/harness-mrtool/actions/runs/32713774061) 在收据 Secret 缺失处安全失败，未创建不可信 Release；配置 `SKILL_BUNDLE_RECEIPT_B64` 后需重新触发。
-- 真实 GitLab 验收仍未执行：当前工作站没有目标 GitLab 仓库、已加载的 GitLab SSH 身份或 Host-scoped GitLab 连接信息，因此没有进行任何 GitLab 写入。
+- Skill Release：工作流 [`32713774061`](https://github.com/chengcheng93/harness-mrtool/actions/runs/32713774061) attempt 2 已成功发布不可变 [`skill-v0.1.5`](https://github.com/chengcheng93/harness-mrtool/releases/tag/skill-v0.1.5)。Skill 包 SHA-256：`52533471af9a9cf4bd201754babb9a2d3b6416d67a2b1dec7dabeb638458eaad`；签名收据 SHA-256：`1bd854d86bb0536e3709117619bbf7d083c8e09a43c0910b12d45a036bc1e424`。
+- 真实 GitLab 验收已完成：使用预配置的 `id_ed25519_00_workspace` 对 `bjxc-git.maxphotonics.com:bjxcjg/Luban/00-workspace.git` 完成 SSH 握手和只读 refs 检查；真实推送创建了 Draft MR `!25`，源分支为 `harness-mrtool-ssh-acceptance-20260825`，源提交为 `1e120e77c856e628be563fa4d6777adfe5835079`。通过 `refs/merge-requests/25/head` 与 `refs/merge-requests/25/merge` 确认 MR 已生成；未使用 GitLab API Token，未修改 `main` 或 `develop`。
