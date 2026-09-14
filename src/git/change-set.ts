@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, realpath, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import type { DiffItem } from "../bundle/detect-profile.ts";
+import type { DiffEvidenceItem, DiffItem } from "../bundle/detect-profile.ts";
 import { ToolError } from "../contracts/errors.ts";
 import {
   assertObjectId,
@@ -330,6 +330,79 @@ function compareItems(left: DiffItem, right: DiffItem): number {
   return rank[left.status] - rank[right.status] ||
     Buffer.compare(Buffer.from(leftOld), Buffer.from(rightOld)) ||
     Buffer.compare(Buffer.from(leftNew), Buffer.from(rightNew));
+}
+
+
+export interface CanonicalLabelChangeSet extends Omit<CanonicalChangeSet, "items"> {
+  readonly items: readonly DiffEvidenceItem[];
+}
+
+const MAX_LABEL_BLOB_BYTES = 1024 * 1024;
+const MAX_LABEL_DIFF_BYTES = 8 * 1024 * 1024;
+const MAX_LABEL_DIFF_FILES = 2000;
+
+async function blobAt(
+  runner: RepositorySnapshot["runner"],
+  environment: Readonly<Record<string, string | undefined>>,
+  sha: string,
+  path: string,
+  budget: { remaining: number },
+): Promise<string | undefined> {
+  // Literal pathspec avoids treating names containing glob metacharacters as patterns.
+  // Inspect tree mode before cat-file; symlinks and submodules are never text evidence.
+  const tree = await runGitChecked(runner, ["ls-tree", "-z", sha, "--", `:(literal)${path}`], "committed label tree", environment);
+  const entries = splitNul(tree);
+  if (entries.length !== 1 || entries[0] === undefined) throw changeSetError("label path is not one tree entry");
+  const entry = entries[0];
+  const tab = entry.indexOf(9);
+  if (tab < 0 || decodePath(entry.subarray(tab + 1)) !== path) throw changeSetError("label path identity changed");
+  const metadata = /^(100644|100755) blob ([a-f0-9]{40}(?:[a-f0-9]{24})?)$/u.exec(entry.subarray(0, tab).toString("ascii"));
+  if (metadata === null) return undefined;
+  const oid = assertObjectId(metadata[2]!, "label blob");
+  const sizeText = await readGitText(runner, ["cat-file", "-s", oid], "label blob size", environment);
+  if (!/^\d+$/u.test(sizeText)) throw changeSetError("invalid label blob size");
+  const size = Number(sizeText);
+  if (!Number.isSafeInteger(size) || size > MAX_LABEL_BLOB_BYTES || size > budget.remaining) {
+    throw changeSetError("label diff exceeds bounded content limit");
+  }
+  budget.remaining -= size;
+  const bytes = await runGitChecked(runner, ["cat-file", "blob", oid], "committed diff blob", environment);
+  if (bytes.length !== size) throw changeSetError("label blob size changed");
+  if (bytes.includes(0)) return undefined;
+  try { return new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
+  catch { return undefined; }
+}
+
+/** Enriches the pinned ChangeSet with committed blob content only, never worktree bytes. */
+export async function readCanonicalLabelDiff(repository: RepositorySnapshot): Promise<CanonicalLabelChangeSet> {
+  const base = await readCanonicalChangeSet(repository);
+  if (base.items.length > MAX_LABEL_DIFF_FILES) throw changeSetError("too many files for label classification");
+  const isolated = await createIsolatedGitView(repository);
+  let operationError: unknown;
+  try {
+    const budget = { remaining: MAX_LABEL_DIFF_BYTES };
+    const items: DiffEvidenceItem[] = [];
+    for (const item of base.items) {
+      if (item.binary || item.submodule) { items.push(item); continue; }
+      const oldPath = "oldPath" in item ? item.oldPath : item.status === "modified" ? item.newPath : null;
+      const newPath = "newPath" in item ? item.newPath : null;
+      const before = oldPath === null ? undefined : await blobAt(repository.runner, isolated.environment, base.mergeBaseSha, oldPath, budget);
+      const after = newPath === null ? undefined : await blobAt(repository.runner, isolated.environment, base.sourceHeadSha, newPath, budget);
+      const unsupported = (oldPath !== null && before === undefined) || (newPath !== null && after === undefined);
+      items.push(Object.freeze({ ...item,
+        ...(unsupported ? { unsupported: true } : {}),
+        ...(before === undefined ? {} : { before }), ...(after === undefined ? {} : { after }),
+      }));
+    }
+    return Object.freeze({ ...base, items: Object.freeze(items) });
+  } catch (error) { operationError = error; throw error; }
+  finally {
+    try { await isolated.dispose(); }
+    catch (cleanupError) {
+      if (operationError !== undefined) throw cleanupAfterChangeSetFailure(operationError, cleanupError);
+      throw changeSetError("label diff temporary view cleanup failed");
+    }
+  }
 }
 
 export async function readCanonicalChangeSet(

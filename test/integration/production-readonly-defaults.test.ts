@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import test from "node:test";
@@ -19,6 +19,10 @@ import type { GitLabClient } from "../../src/gitlab/client.ts";
 import type { RepositorySnapshot } from "../../src/git/repository.ts";
 import { normalizeAndValidateRequest } from "../../src/input/normalize.ts";
 import { runProductionMain } from "../../src/production-main.ts";
+import {
+  createProductionUpdateTrustConfig,
+  parseProductionUpdateTrustConfig,
+} from "../../src/update/trust-config.ts";
 
 const repositoryRoot = resolve(import.meta.dirname, "../..");
 const targetSha = "a".repeat(40);
@@ -188,7 +192,7 @@ test("default TTY wizard issues one context through the same readonly planner wi
   const selected: Readonly<Record<string, number>> = {
     "workItem.relation": 1,
     intent: 1,
-    "title.type": 1,
+    "labels.priority": 2,
     "impact.nature": 1,
     "risk.level": 1,
     assignee: 1,
@@ -221,7 +225,7 @@ test("default TTY wizard issues one context through the same readonly planner wi
         "title.module": expected.title.module,
         "title.titleSummary": expected.title.titleSummary,
       } as const)[id]!,
-      confirm: async () => true,
+      confirm: async ({ id }) => id !== "labels.escalate",
     },
     wizardEditor: {
       edit: async () => {
@@ -270,42 +274,130 @@ test("default TTY wizard issues one context through the same readonly planner wi
   ]);
 });
 
-test("production text mode fails closed before request input without production trust roots", () => {
+test("production text mode validates source-pinned trust before requiring structured input", () => {
+  // This constructor checks the reviewed source-pinned Ed25519 roots and their
+  // fingerprints. The old empty-root premise stopped being true at release setup.
+  const trust = createProductionUpdateTrustConfig();
+  assert.equal(trust.testOnly, false);
+  assert.ok(trust.bootstrapKeys.length > 0);
   const result = runProductionProcess(["preview"], repositoryRoot, process.env);
 
   assert.equal(result.error, undefined);
-  assert.equal(result.status, 5, result.stderr || result.stdout);
+  assert.equal(result.status, 2, result.stderr || result.stdout);
   assert.equal(result.stdout, "");
   assert.equal(
     result.stderr,
-    "UPDATE_SECURITY_ERROR: Signed update metadata could not be verified: trusted key state is invalid\n",
+    "INPUT_ERROR: Structured input is required for non-interactive execution\n",
   );
   assert.doesNotMatch(result.stderr, /requires --output json/u);
 });
 
-test("production source fails closed before private state bootstrap without trust roots", {
-  skip: process.platform !== "win32",
-}, async (t) => {
+test("production source validates pinned trust without eagerly accessing private state", async (t) => {
+  // Exercise the real source entry point on every host (including Windows),
+  // without --no-update or an injected preflight that bypasses production trust.
+  const trust = createProductionUpdateTrustConfig();
+  assert.equal(trust.testOnly, false);
+  assert.ok(trust.bootstrapKeys.some((key) => key.keyId === "release-key-1"));
+  assert.throws(
+    () => parseProductionUpdateTrustConfig({ ...trust, bootstrapKeys: [] }),
+    (error: unknown) => isToolError(error, "UPDATE_SECURITY_ERROR"),
+  );
+  assert.throws(
+    () => parseProductionUpdateTrustConfig({
+      ...trust,
+      bootstrapKeys: trust.bootstrapKeys.map((key) => ({ ...key, keyId: "replacement-key" })),
+    }),
+    (error: unknown) => isToolError(error, "UPDATE_SECURITY_ERROR"),
+  );
+
   const cwd = await mkdtemp(resolve(tmpdir(), "harness-mrtool-no-state-"));
   t.after(async () => rm(cwd, { recursive: true, force: true }));
   const environment = { ...process.env };
-  delete environment.LOCALAPPDATA;
+  // Keep this an empty, non-repository fixture even under a caller's Git env;
+  // match LOCALAPPDATA case-insensitively when preparing a Windows child env.
+  for (const key of Object.keys(environment)) {
+    if (/^(?:GIT_|LOCALAPPDATA$)/iu.test(key)) delete environment[key];
+  }
+  environment.GIT_CEILING_DIRECTORIES = cwd;
+  environment.XDG_STATE_HOME = resolve(cwd, "private-state");
 
   const version = runProductionProcess(["version", "--output", "json"], cwd, environment);
   assert.equal(version.error, undefined);
-  assert.equal(version.status, 5, version.stderr || version.stdout);
-  assert.equal((JSON.parse(version.stdout) as { readonly code: string }).code, "UPDATE_SECURITY_ERROR");
+  assert.equal(version.status, 0, version.stderr || version.stdout);
+  const versionOutput = JSON.parse(version.stdout);
+  assert.equal(versionOutput.ok, true);
+  assert.equal(versionOutput.code, "OK");
+  assert.equal(versionOutput.data.command, "version");
+  assert.equal(versionOutput.data.version, versionOutput.versions.cliVersion);
 
   const doctor = runProductionProcess(["doctor", "--output", "json"], cwd, environment);
   assert.equal(doctor.error, undefined);
-  assert.equal(doctor.status, 5, doctor.stderr || doctor.stdout);
-  assert.equal((JSON.parse(doctor.stdout) as { readonly code: string }).code, "UPDATE_SECURITY_ERROR");
+  assert.equal(doctor.status, 0, doctor.stderr || doctor.stdout);
+  const doctorOutput = JSON.parse(doctor.stdout);
+  assert.equal(doctorOutput.ok, true);
+  assert.equal(doctorOutput.code, "OK");
+  assert.equal(doctorOutput.data.command, "doctor");
+  const checks = doctorOutput.data.checks as readonly {
+    readonly id: string; readonly status: string; readonly detail: string;
+  }[];
+  assert.equal(checks.find((check) => check.id === "repository")?.status, "failed");
+  assert.equal(checks.find((check) => check.id === "bundle")?.status, "passed");
+  const privateState = checks.find((check) => check.id === "candidate-context-state");
+  assert.equal(privateState?.status, "warning");
+  assert.match(privateState.detail, /private state path is not accessed/u);
+  assert.equal(doctorOutput.data.capabilities.context, false);
 
   const context = runProductionProcess(["context", "--output", "json"], cwd, environment);
   assert.equal(context.error, undefined);
-  assert.equal(context.status, 5, context.stderr || context.stdout);
-  assert.equal((JSON.parse(context.stdout) as { readonly code: string }).code, "UPDATE_SECURITY_ERROR");
-  assert.doesNotMatch(`${version.stdout}\n${version.stderr}\n${doctor.stdout}\n${doctor.stderr}\n${context.stdout}\n${context.stderr}`, /LOCALAPPDATA|bootstrap/iu);
+  assert.equal(context.status, 3, context.stderr || context.stdout);
+  const contextOutput = JSON.parse(context.stdout);
+  assert.equal(contextOutput.ok, false);
+  assert.equal(contextOutput.code, "REPOSITORY_ERROR");
+  assert.equal(contextOutput.error.field, "repository root");
+  for (const [result, output] of [
+    [version, versionOutput], [doctor, doctorOutput], [context, contextOutput],
+  ] as const) {
+    assert.equal(result.stderr, "");
+    assert.deepEqual(output.remoteWrite, { state: "not-attempted", operations: [] });
+    assert.doesNotMatch(result.stdout, /LOCALAPPDATA|bootstrap/iu);
+  }
+  assert.deepEqual(await readdir(cwd), []);
+});
+
+test("Windows private state fails closed only when the lazy context store is used", async (t) => {
+  const currentBundle = await currentSelection();
+  const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+  const localAppData = process.env.LOCALAPPDATA;
+  t.diagnostic(process.platform === "win32"
+    ? "Native Windows missing-LOCALAPPDATA branch (no ACL or persistence operations)"
+    : `Controlled Windows state-path seam on ${process.platform}; not native Windows execution`);
+  try {
+    // A narrow state-path branch seam on non-Windows hosts, NOT Windows OS/ACL
+    // emulation. On Windows this uses the native platform unchanged.
+    if (process.platform !== "win32") {
+      Object.defineProperty(process, "platform", { ...platform, value: "win32" });
+    }
+    delete process.env.LOCALAPPDATA;
+    const defaults = createProductionReadOnlyDefaults({
+      cliVersion: "0.1.0-test",
+      cwd: repositoryRoot,
+      currentBundle,
+      contextIssueIid: null,
+    });
+    // Composition above must not resolve private state. Both store entry points
+    // must still reject the missing Windows path before touching disk or input.
+    for (const useStore of [
+      () => defaults.contextStore.issue({} as never),
+      () => defaults.contextStore.resolve({} as never),
+    ]) {
+      await assert.rejects(useStore, (error: unknown) =>
+        isToolError(error, "INTERNAL_ERROR", /LOCALAPPDATA is unavailable/u));
+    }
+  } finally {
+    Object.defineProperty(process, "platform", platform);
+    if (localAppData === undefined) delete process.env.LOCALAPPDATA;
+    else process.env.LOCALAPPDATA = localAppData;
+  }
 });
 
 test("default context state is resolved once per production composition", async () => {
@@ -409,7 +501,7 @@ function fixtureSession(
       const effective = [
         [1, "week::2026-w33"],
         [2, "type::feature"],
-        [3, "priority::p1"],
+        [3, "priority::p2"],
         [4, "status::doing"],
         [5, "status::review"],
       ].map(([restId, name]) => ({
@@ -494,7 +586,7 @@ function repositoryPort(calls: string[]) {
       calls.push("change-set");
       return {
         items: [
-          { status: "added" as const, newPath: "src/read-only.ts", binary: false, submodule: false },
+          { status: "added" as const, newPath: "src/read-only.ts", binary: false, submodule: false, after: "export function readOnly() { return 1; }" },
           { status: "added" as const, newPath: "docs/read-only.md", binary: false, submodule: false },
         ],
         mergeBaseSha: targetSha,
@@ -518,7 +610,7 @@ function repositoryPort(calls: string[]) {
 
 async function historicalBundle(current: TrustedBundleSelection): Promise<LoadedMrBundle> {
   const bundle = structuredClone(current.bundle);
-  (bundle.manifest as { version: string }).version = "0.9.0";
+  (bundle.manifest as { version: string }).version = "1.1.0-beta.1";
   validateTemplateBundle(bundle);
   const bundleManifestHash = sha256Utf8(`${canonicalizeJson(bundle.manifest)}\n`);
   return {
@@ -526,7 +618,7 @@ async function historicalBundle(current: TrustedBundleSelection): Promise<Loaded
     marker: { renderPhase: "final" } as LoadedMrBundle["marker"],
     receipt: {} as LoadedMrBundle["receipt"],
     reference: {
-      releaseTag: "templates-v0.9.0",
+      releaseTag: "templates-v1.1.0-beta.1",
       bundleId: bundle.manifest.bundleId,
       bundleVersion: bundle.manifest.version,
       bundleManifestHash,
@@ -800,7 +892,7 @@ test("historical MR failures never fall back to the current Bundle or repository
   }
 });
 
-test("missing production historical source fails with fixed safe metadata and no current fallback", async () => {
+test("default historical loader rejects unmanaged descriptions without a current fallback", async () => {
   const currentBundle = await currentSelection();
   const sessionFixture = fixtureSession();
   const repositoryCalls: string[] = [];
@@ -823,7 +915,7 @@ test("missing production historical source fails with fixed safe metadata and no
       request: null,
       contextIssueIid: null,
     }),
-    (error: unknown) => isToolError(error, "UPDATE_SECURITY_ERROR") &&
+    (error: unknown) => isToolError(error, "UNMANAGED_MR") &&
       !`${error.message}\n${JSON.stringify(error.details)}`.includes("gitlab.example.test") &&
       !`${error.message}\n${JSON.stringify(error.details)}`.includes("marker-owned-description"),
   );
@@ -1155,7 +1247,7 @@ test("default planner rejects a push plan from another repository remote", async
   );
 });
 
-test("production main context MR reaches the installed planner and fails closed without trust", async () => {
+test("production main context MR reaches the installed planner and rejects unmanaged metadata", async () => {
   const currentBundle = await currentSelection();
   const sessionFixture = fixtureSession();
   const repositoryCalls: string[] = [];
@@ -1175,9 +1267,25 @@ test("production main context MR reaches the installed planner and fails closed 
   const output = JSON.parse(serialized) as { readonly ok: boolean; readonly code: string };
   assert.notEqual(exitCode, 0);
   assert.equal(output.ok, false);
-  assert.equal(output.code, "UPDATE_SECURITY_ERROR");
+  assert.equal(output.code, "UNMANAGED_MR");
   assert.notEqual(output.code, "AUTH_ERROR");
   assert.deepEqual(repositoryCalls, []);
   assert.deepEqual(sessionFixture.calls, ["mr:7:88"]);
   assert.doesNotMatch(serialized, /gitlab\.example\.test|marker-owned-description/u);
+});
+
+test("default production composition exposes create and update handlers instead of unavailable routes", async () => {
+  const [currentBundle] = await Promise.all([currentSelection()]);
+  const defaults = createProductionReadOnlyDefaults({
+    cliVersion: "0.1.0-test", cwd: "C:\\fixture", currentBundle, contextIssueIid: null,
+    targetSessionResolver: { resolve: async () => { throw new Error("session should be lazy"); } },
+  });
+  const { createProductionRuntime } = await import("../../src/cli/production-runtime.ts");
+  const handlers = createProductionRuntime({
+    cliVersion: "0.1.0-test", cwd: "C:\\fixture", currentBundle,
+    profileRepository: { discover: async () => { throw new Error("not reached"); }, readChangeSet: async () => { throw new Error("not reached"); } },
+    targetProjectResolver: { resolve: async () => { throw new Error("not reached"); } }, readOnly: defaults,
+  });
+  assert.equal(typeof handlers.create, "function");
+  assert.equal(typeof handlers.update, "function");
 });

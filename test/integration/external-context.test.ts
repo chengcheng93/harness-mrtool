@@ -10,6 +10,7 @@ import {
   type ExternalContextReader,
   type ExternalContextReadOptions,
 } from "../../src/app/external-context.ts";
+import { getContext } from "../../src/app/get-context.ts";
 import { loadTemplateBundle } from "../../src/bundle/load.ts";
 import { canonicalizeJson, sha256Utf8 } from "../../src/contracts/jcs.ts";
 import { CandidateContextStore } from "../../src/context/store.ts";
@@ -208,7 +209,7 @@ test("reads a canonical tokenless external context without using a caller store 
     ]);
     assert.deepEqual(context.binding.targetProject, { id: "7", fullPath: "group/project" });
     assert.equal(context.snapshot.targetRefSha, targetSha);
-    assert.deepEqual(context.requiredLabelCategories, ["week", "type", "priority"]);
+    assert.deepEqual(context.requiredLabelCategories, ["type", "priority"]);
     assert.deepEqual(context.lifecycleLabelNames, {
       draft: "status::doing",
       ready: "status::review",
@@ -225,11 +226,6 @@ test("reads a canonical tokenless external context without using a caller store 
         kind: "label", restId: 1, globalId: "gid://gitlab/ProjectLabel/1",
         name: "type::bug", description: "type::bug description", color: "#123456",
         scopeKind: "project", scopeId: "7", scopePath: "group/project", policyCategory: "type",
-      },
-      {
-        kind: "label", restId: 21, globalId: "gid://gitlab/GroupLabel/21",
-        name: "week::2026-w32-0803-0809", description: "week::2026-w32-0803-0809 description", color: "#123456",
-        scopeKind: "group", scopeId: "11", scopePath: "group", policyCategory: "week",
       },
       { kind: "assignee", userId: "40", globalId: "gid://gitlab/User/40", username: "author", displayName: "Author" },
       { kind: "assignee", userId: "42", globalId: "gid://gitlab/User/42", username: "developer", displayName: "Developer" },
@@ -277,6 +273,41 @@ test("reads a canonical tokenless external context without using a caller store 
   }
 });
 
+test("marks existing P2 as the new-MR default and never selects week labels", async () => {
+  try {
+    const bundle = await loadTemplateBundle(resolve(repositoryRoot, "template-bundle"));
+    const api = new ReadOnlyGitLabFixture();
+    api.labels.push(
+      mutableLabel(5, "priority::p0"),
+      mutableLabel(6, "priority::p2", "group"),
+      mutableLabel(7, "week::2099-w01-0104-0110", "group"),
+    );
+    let index = 0;
+    const store = {
+      issue: async (input: { readonly binding: unknown; readonly snapshot: unknown; readonly candidates: readonly unknown[] }) => ({
+        contextId: "hmrx1_" + "x".repeat(43),
+        createdAtMs: 1,
+        expiresAtMs: 2,
+        externalSnapshotDigest: "a".repeat(64),
+        candidates: input.candidates.map((metadata) => ({
+          kind: (metadata as { kind: "label" | "assignee" | "reviewer" }).kind,
+          token: "hmrc1_" + String(index++).padStart(43, "0"),
+          metadata: metadata as never,
+        })),
+      }),
+    };
+    const context = await getContext({
+      ...readOptions(api, bundle),
+      store,
+    });
+
+    assert.deepEqual(
+      context.labelCandidates.filter((candidate) => candidate.defaultSelected).map((candidate) => candidate.name),
+      ["priority::p2"],
+    );
+  } finally { /* no filesystem-backed candidate store */ }
+});
+
 test("preserves getContext source-project identity failures", async () => {
   const bundle = await loadTemplateBundle(resolve(repositoryRoot, "template-bundle"));
   const api = new ReadOnlyGitLabFixture();
@@ -304,7 +335,7 @@ test("exposes a readonly capture-backed reader port for production injection", a
   const context = await reader.read(readOptions(api, bundle));
 
   assert.equal(Object.isFrozen(reader), true);
-  assert.equal(context.candidates.length, 8);
+  assert.equal(context.candidates.length, 7);
   assert.doesNotMatch(JSON.stringify(context), /hmr[cx]1_/u);
 });
 

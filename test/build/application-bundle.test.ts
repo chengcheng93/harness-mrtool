@@ -15,6 +15,8 @@ import { canonicalizeJson } from "../../src/contracts/jcs.ts";
 import { runProcess } from "../helpers/process.ts";
 
 
+import bundleManifest from "../../template-bundle/bundle-manifest.json" with { type: "json" };
+
 const repositoryRoot = resolve(import.meta.dirname, "../..");
 const templateBundlePath = resolve(repositoryRoot, "template-bundle");
 
@@ -53,7 +55,7 @@ test("application bundle executes Bundle validation without external modules", a
     message: "Template bundle validation passed",
     versions: {
       cliVersion: "0.1.0-test",
-      templateVersion: "1.0.0",
+      templateVersion: bundleManifest.version,
       bundleHash: expectedBundleHash,
       releaseSetId: null,
       inputSchema: 1,
@@ -116,7 +118,7 @@ test("application bundle exposes verified local commands and atomic template exp
       readonly data: { readonly command: string };
     };
     assert.equal(envelope.ok, true, diagnostic);
-    assert.equal(envelope.versions.templateVersion, "1.0.0", diagnostic);
+    assert.equal(envelope.versions.templateVersion, bundleManifest.version, diagnostic);
     assert.equal(envelope.data.command, expectedCommand, diagnostic);
     assert.equal(result.stdout.trimEnd().split(/\r?\n/u).length, 1, diagnostic);
   }

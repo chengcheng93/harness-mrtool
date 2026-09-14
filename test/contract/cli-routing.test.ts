@@ -125,3 +125,22 @@ test("does not reflect rejected command-line values", () => {
     return true;
   });
 });
+
+test("MR commands accept diff-bound type confirmation and explicit priority elevation", () => {
+  const invocation = parseCliInvocation(["create", "--confirm-label-type", "bug", "--label-diff-digest", "a".repeat(64),
+    "--priority", "p0", "--priority-reason", "Production incident 42"]);
+  assert.equal(invocation.options.confirmLabelType, "bug");
+  assert.equal(invocation.options.labelDiffDigest, "a".repeat(64));
+  assert.equal(invocation.options.priority, "p0");
+  assert.equal(invocation.options.priorityReason, "Production incident 42");
+  for (const args of [
+    ["create", "--confirm-label-type", "bug"],
+    ["create", "--label-diff-digest", "a".repeat(64)],
+    ["create", "--confirm-label-type", "anything", "--label-diff-digest", "a".repeat(64)],
+    ["create", "--confirm-label-type", "bug", "--label-diff-digest", "yes"],
+    ["create", "--priority", "p0"],
+    ["create", "--priority", "p9"],
+    ["create", "--priority-reason", "unattached reason"],
+    ["version", "--priority", "p2"],
+  ]) inputError(args);
+});

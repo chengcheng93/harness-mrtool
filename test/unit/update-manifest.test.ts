@@ -31,6 +31,8 @@ import {
   type SigningFixture,
 } from "../helpers/signing.ts";
 
+import bundleManifest from "../../template-bundle/bundle-manifest.json" with { type: "json" };
+
 const repositoryRoot = resolve(import.meta.dirname, "../..");
 const bundleDirectory = resolve(repositoryRoot, "template-bundle");
 const repository = { owner: "example-owner", name: "harness-mrtool" } as const;
@@ -602,7 +604,7 @@ async function bundleReceiptPayload(keyId: string): Promise<{
       signingSequence: 42,
       signingKeyId: keyId,
       repository,
-      releaseTag: "templates-v1.0.0",
+      releaseTag: `templates-v${bundleManifest.version}`,
       bundleId: manifestValue.bundleId!,
       bundleVersion: manifestValue.version!,
       bundleManifest: {
@@ -626,7 +628,7 @@ function trustHistoricalReceipt(
   const historyManifest = manifest(42, {
     templateHistory: [
       {
-        releaseTag: "templates-v1.0.0",
+        releaseTag: `templates-v${bundleManifest.version}`,
         bundleManifestHash,
         receiptPayloadSha256: sha256Utf8(`${canonicalizeJson(receiptPayload)}\n`),
         signingSequence: 42,
@@ -657,7 +659,7 @@ test("historical Bundle requires a signed receipt and binds every manifest file"
 
   assertSecurityError(() => verifyBundleReceiptEnvelope(undefined, state, {
     repository,
-    releaseTag: "templates-v1.0.0",
+    releaseTag: `templates-v${bundleManifest.version}`,
     bundleManifestHash: expectedHash,
   }, fixture.files), /signed.*receipt/i);
 
@@ -666,12 +668,12 @@ test("historical Bundle requires a signed receipt and binds every manifest file"
     state,
     {
       repository,
-      releaseTag: "templates-v1.0.0",
+      releaseTag: `templates-v${bundleManifest.version}`,
       bundleManifestHash: expectedHash,
     },
     fixture.files,
   );
-  assert.equal(verified.receipt.bundleVersion, "1.0.0");
+  assert.equal(verified.receipt.bundleVersion, bundleManifest.version);
   const layoutBefore = verified.readFile("layout.md");
   fixture.files.get("layout.md")![0] = 0;
   assert.deepEqual(verified.readFile("layout.md"), layoutBefore);
@@ -686,7 +688,7 @@ test("historical Bundle requires a signed receipt and binds every manifest file"
     state,
     {
       repository,
-      releaseTag: "templates-v1.0.0",
+      releaseTag: `templates-v${bundleManifest.version}`,
       bundleManifestHash: expectedHash,
     },
     new Map(fixture.files).set("bundle-manifest.json", tamperedManifestBytes),
@@ -702,7 +704,7 @@ test("historical Bundle requires a signed receipt and binds every manifest file"
     badReceiptState,
     {
       repository,
-      releaseTag: "templates-v1.0.0",
+      releaseTag: `templates-v${bundleManifest.version}`,
       bundleManifestHash: expectedHash,
     },
     fixture.files,
@@ -716,7 +718,7 @@ test("historical Bundle requires a signed receipt and binds every manifest file"
     state,
     {
       repository,
-      releaseTag: "templates-v1.0.0",
+      releaseTag: `templates-v${bundleManifest.version}`,
       bundleManifestHash: expectedHash,
     },
     tamperedFiles,
@@ -733,7 +735,7 @@ test("historical Bundle requires a signed receipt and binds every manifest file"
     oversizedState,
     {
       repository,
-      releaseTag: "templates-v1.0.0",
+      releaseTag: `templates-v${bundleManifest.version}`,
       bundleManifestHash: expectedHash,
     },
     fixture.files,
@@ -789,7 +791,7 @@ test("malformed signed Bundle manifest entries fail with the update security con
     state,
     {
       repository,
-      releaseTag: "templates-v1.0.0",
+      releaseTag: `templates-v${bundleManifest.version}`,
       bundleManifestHash: malformedManifestHash,
     },
     actualFiles,
@@ -816,17 +818,17 @@ test("a revoked key cannot backdate a new historical Bundle receipt", async () =
   const historical = verifyBundleReceiptEnvelope(
     signedEnvelope(canonicalPayload(fixture.payload), [key]),
     revokedState,
-    { repository, releaseTag: "templates-v1.0.0", bundleManifestHash: expectedHash },
+    { repository, releaseTag: `templates-v${bundleManifest.version}`, bundleManifestHash: expectedHash },
     fixture.files,
   );
-  assert.equal(historical.receipt.bundleVersion, "1.0.0");
+  assert.equal(historical.receipt.bundleVersion, bundleManifest.version);
 
   const forged = { ...fixture.payload, bundleId: "forged-bundle" };
 
   assertSecurityError(() => verifyBundleReceiptEnvelope(
     signedEnvelope(canonicalPayload(forged), [key]),
     revokedState,
-    { repository, releaseTag: "templates-v1.0.0", bundleManifestHash: expectedHash },
+    { repository, releaseTag: `templates-v${bundleManifest.version}`, bundleManifestHash: expectedHash },
     fixture.files,
   ));
 });

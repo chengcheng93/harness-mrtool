@@ -1,3 +1,4 @@
+import { createProductionUpdateTrustConfig } from "../../src/update/trust-config.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { once } from "node:events";
@@ -208,9 +209,10 @@ test("production entrypoint and build config use the same public source entry", 
   );
 
   assert.equal(result.error, undefined);
-  assert.equal(result.status, 5, result.stderr || result.stdout);
+  assert.ok(createProductionUpdateTrustConfig().bootstrapKeys.length > 0);
+  assert.equal(result.status, 0, result.stderr || result.stdout);
   assert.equal(result.stderr, "");
-  assert.equal((JSON.parse(result.stdout) as { readonly code: string }).code, "UPDATE_SECURITY_ERROR");
+  assert.equal((JSON.parse(result.stdout) as { readonly code: string }).code, "OK");
 });
 
 test("production entry serializes a bootstrap failure as exactly one JSON document", async () => {
@@ -232,7 +234,7 @@ test("production entry serializes a bootstrap failure as exactly one JSON docume
   assert.equal((JSON.parse(serialized) as { readonly code: string }).code, "INTERNAL_ERROR");
 });
 
-test("untrusted production source entry fails closed before GitLab access", async (t) => {
+test("trusted production source profile detection resolves the target without remote mutations", async (t) => {
   const credential = "credential-canary-token";
   const requests: Array<{ readonly token: string | undefined; readonly url: string | undefined }> = [];
   const server = createServer((request, response) => {
@@ -281,9 +283,7 @@ test("untrusted production source entry fails closed before GitLab access", asyn
     readonly entryPoints: readonly string[];
   };
 
-  let result: { readonly status: number; readonly stdout: string; readonly stderr: string };
-  try {
-    await execFileAsync(process.execPath, [
+  const child = await execFileAsync(process.execPath, [
       "--import",
       import.meta.resolve("tsx"),
       buildOptions.entryPoints[0]!,
@@ -301,23 +301,15 @@ test("untrusted production source entry fails closed before GitLab access", asyn
       },
       windowsHide: true,
     });
-    assert.fail("an untrusted production entry must fail closed");
-  } catch (error) {
-    const child = error as { readonly code?: number; readonly stdout?: string; readonly stderr?: string };
-    result = {
-      status: typeof child.code === "number" ? child.code : -1,
-      stdout: typeof child.stdout === "string" ? child.stdout : "",
-      stderr: typeof child.stderr === "string" ? child.stderr : "",
-    };
-  }
-
-  assert.equal(result.status, 5);
+  const result = { status: 0, stdout: child.stdout, stderr: child.stderr };
+  assert.ok(createProductionUpdateTrustConfig().bootstrapKeys.length > 0);
+  assert.equal(result.status, 0);
   assert.equal(result.stderr, "");
   assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, new RegExp(credential, "u"));
   const output = JSON.parse(result.stdout) as { readonly code: string; readonly ok: boolean };
-  assert.equal(output.ok, false);
-  assert.equal(output.code, "UPDATE_SECURITY_ERROR");
-  assert.deepEqual(requests, []);
+  assert.equal(output.ok, true);
+  assert.equal(output.code, "OK");
+  assert.deepEqual(requests, [{ token: credential, url: "/api/v4/projects/group%2Fproject" }]);
   assert.equal(await fixture.git([
     "--git-dir",
     fixture.remotePath,

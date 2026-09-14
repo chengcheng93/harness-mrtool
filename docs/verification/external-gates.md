@@ -28,3 +28,17 @@ the already-published `0.1.4` assets below.
 - Real GitLab acceptance completed against `bjxc-git.maxphotonics.com:bjxcjg/Luban/00-workspace.git` using the preconfigured `id_ed25519_00_workspace` key. MR `!25` was created from `harness-mrtool-ssh-acceptance-20260825` and confirmed through GitLab's SSH merge-request refs; no GitLab API Token was used.
 
 Local tests do not replace the Windows SEA, signing, real GitLab, or real-host gates.
+
+## Mandatory-diff-label working tree (September 14, 2026)
+
+The completed 0.1.5 gates above describe the older SSH-first release, not these
+new mandatory-label bytes. Bundle 1.1.0, real default-Git label selection,
+authenticated historical migration, and guard/verification fixes have local
+coverage documented in `mandatory-labels-2026-09-14.md`.
+
+Fresh pinned Node 24.16.0 application and Darwin SEA builds pass. The full local
+suite includes SEA smoke: **1142 tests, 1134 passed, 0 failed, 8 native-Windows
+skips**. Source/artifact receipt and strict codesign verification pass; the
+original runtime's hash is unchanged. This does not qualify a Windows release
+or claim real GitLab/Skill-host acceptance. GitHub CLI authentication is absent
+in this task's environment; no CI run or new signed publication was dispatched.

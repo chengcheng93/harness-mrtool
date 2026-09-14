@@ -154,7 +154,7 @@ test("SSH Push Options are explicit, newline-safe, and exclude metadata mutation
   ]);
 });
 
-test("manual --ssh-mr exposes an unverified basic MR request without labels or reviewers", async () => {
+test("manual --ssh-mr cannot bypass mandatory labels through SSH push options", async () => {
   const bundle = await loadTemplateBundle(resolve(repositoryRoot, "template-bundle"));
   const raw = JSON.parse(await readFile(
     resolve(repositoryRoot, "test/golden/fixtures/code-docs-request.json"),
@@ -208,16 +208,11 @@ test("manual --ssh-mr exposes an unverified basic MR request without labels or r
       stdout: { write(chunk, callback) { chunks.push(chunk); callback(); return true; } },
     },
   );
-  assert.ok(capturedOptions?.includes("merge_request.create"));
-  assert.equal(capturedOptions?.some((option) => option.includes("label=") || option.includes("assign=")), false);
-  const data = (JSON.parse(chunks[0]!) as Record<string, unknown>).data as Record<string, unknown>;
-  assert.equal(data.mode, "ssh-mr");
-  assert.equal(data.mrCreation, "not-requested");
-  const pushPlan = data.pushPlan as Record<string, unknown>;
-  assert.equal(typeof pushPlan.command, "string");
-  assert.match(pushPlan.command as string, /--no-force/u);
-  assert.ok((pushPlan.command as string).includes('--push-option="merge_request.create"'));
-  assert.doesNotMatch(pushPlan.command as string, /--no-push-option/u);
+  assert.equal(capturedOptions, undefined);
+  const output = JSON.parse(chunks[0]!) as Record<string, unknown>;
+  assert.equal(output.ok, false);
+  assert.equal(output.code, "LABEL_ERROR");
+
 });
 
 test("manual --ssh-mr rejects API auth mode before rendering or writing", async () => {

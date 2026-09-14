@@ -36,6 +36,7 @@ import { canonicalizeJson } from "../../src/contracts/jcs.ts";
 import { runProcess } from "../helpers/process.ts";
 
 import outputSchema from "../../schemas/output-v1.schema.json" with { type: "json" };
+import packageMetadata from "../../package.json" with { type: "json" };
 
 const repositoryRoot = resolve(import.meta.dirname, "../..");
 const templateBundlePath = resolve(repositoryRoot, "template-bundle");
@@ -145,8 +146,6 @@ async function createValidBundleFixture(context: test.TestContext): Promise<stri
   context.after(() => rm(fixtureRoot, { recursive: true, force: true }));
   const bundlePath = resolve(fixtureRoot, "bundle");
   await cp(templateBundlePath, bundlePath, { recursive: true });
-  const built = await buildTemplateBundleManifest(bundlePath);
-  await writeFile(resolve(bundlePath, "bundle-manifest.json"), built.serialized, "utf8");
   return bundlePath;
 }
 
@@ -316,9 +315,9 @@ test("loader accepts canonical SemVer metadata but rejects aliases", async (cont
   const bundlePath = await createValidBundleFixture(context);
   const manifestPath = resolve(bundlePath, "bundle-manifest.json");
   const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as Record<string, unknown>;
-  manifest.version = "1.0.0+bundle.7";
+  manifest.version = "1.1.0+bundle.7";
   await writeFile(manifestPath, `${canonicalizeJson(manifest)}\n`, "utf8");
-  assert.equal((await loadTemplateBundle(bundlePath)).manifest.version, "1.0.0+bundle.7");
+  assert.equal((await loadTemplateBundle(bundlePath)).manifest.version, "1.1.0+bundle.7");
 
   manifest.version = "v1.0.0";
   await writeFile(manifestPath, `${canonicalizeJson(manifest)}\n`, "utf8");
@@ -706,7 +705,6 @@ test("policy declares dynamic label categories, exact lifecycle exception and re
     policySchema: 1,
     labels: {
       categories: {
-        week: { match: "^week::", required: true, max: 1 },
         type: { match: "^type::", required: true, max: 1 },
         priority: { match: "^priority::", required: true, max: 1 },
         status: { match: "^status::", required: true, max: 1 },
@@ -1043,8 +1041,8 @@ test("internal validate-bundle emits one schema-valid JSON success document", ()
   assert.equal(output.ok, true);
   assert.equal(output.code, "OK");
   assert.deepEqual(output.versions, {
-    cliVersion: "0.1.0-dev",
-    templateVersion: "1.0.0",
+    cliVersion: packageMetadata.version,
+    templateVersion: "1.1.0",
     bundleHash: output.versions.bundleHash,
     releaseSetId: null,
     inputSchema: 1,

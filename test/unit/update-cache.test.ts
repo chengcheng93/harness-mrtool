@@ -558,7 +558,9 @@ test("detects a tampered read-only release directory and quarantines it", async 
 
   await assert.rejects(cache.loadLastKnownGood(), securityFailure);
   const entries = await readdir(cache.releaseRoot);
-  assert.equal(entries.some((entry) => entry.startsWith(`${stored.record.transactionId}.corrupt.`)), true);
+  const quarantined = entries.find((entry) => entry.startsWith(`${stored.record.transactionId}.corrupt.`));
+  assert.ok(quarantined);
+  assert.equal(Number((await lstat(resolve(cache.releaseRoot, quarantined))).mode) & 0o222, 0);
 });
 
 
@@ -588,11 +590,18 @@ test("rejects a release directory replaced with a symbolic link without touching
   await mkdir(outside);
   const original = stored.releaseDirectory;
   const moved = `${original}.moved`;
+  // The attacker owns this fixture: macOS requires write permission to rename
+  // a directory. Restore the original seal before testing the cache boundary.
+  await chmod(original, 0o700);
   await rename(original, moved);
+  await chmod(moved, 0o500);
+  const outsideMode = (await lstat(outside)).mode;
   try {
     await symlink(outside, original, process.platform === "win32" ? "junction" : "dir");
   } catch (error) {
+    await chmod(moved, 0o700);
     await rename(moved, original);
+    await chmod(original, 0o500);
     if ((error as NodeJS.ErrnoException).code === "EPERM") {
       t.skip("symbolic links are unavailable in this test environment");
       return;
@@ -605,6 +614,7 @@ test("rejects a release directory replaced with a symbolic link without touching
 
   await assert.rejects(cache.loadLastKnownGood(), securityFailure);
   assert.equal((await lstat(outside)).isDirectory(), true);
+  assert.equal((await lstat(outside)).mode, outsideMode);
 });
 
 
@@ -797,3 +807,81 @@ test("a verified orphan release directory requires the explicit staged commit pa
   assert.equal(recovered.record.releaseSetId, "stable-43");
   assert.equal((await base.loadLastKnownGood()).record.transactionId, "tx-43");
 });
+
+test("publication seals the renamed release before replacing the active pointer", async (t) => {
+  const { directory, cache: writer } = await fixture(t);
+  const previous = await writer.storeVerifiedReleaseSet(snapshot());
+  const next = snapshot({ record: { transactionId: "tx-43", manifestSequence: 43 } });
+  let checkedBoundary = false;
+  const cache: UpdateCache = new UpdateCache({
+    stateDirectory: directory,
+    windowsAclVerifier: allowTestAcl,
+    verifySnapshot: allowTestVerification,
+    faultInjector: {
+      async hit(point): Promise<void> {
+        if (point !== "before-active-replace") return;
+        const release = resolve(cache.releaseRoot, "tx-43");
+        assert.equal(Number((await lstat(release)).mode) & 0o222, 0);
+        for (const name of ["cli.bin", "template.bundle", "bundle-receipt.envelope"]) {
+          assert.equal(Number((await lstat(resolve(release, name))).mode) & 0o222, 0);
+        }
+        assert.deepEqual(JSON.parse(await readFile(cache.activeRecordPath, "utf8")), previous.record);
+        checkedBoundary = true;
+      },
+    },
+  });
+  const stored = await cache.storeVerifiedReleaseSet(next);
+  assert.equal(checkedBoundary, true);
+  assert.deepEqual(stored.record, next.record);
+  assert.deepEqual((await cache.loadLastKnownGood()).record, next.record);
+});
+
+// These fault boundaries exist only in the macOS rename-before-seal path.
+if (process.platform === "darwin") {
+  test("interrupted sealing leaves the old active tuple and rejects the writable orphan", async (t) => {
+    const { directory, cache: writer } = await fixture(t);
+    const previous = await writer.storeVerifiedReleaseSet(snapshot());
+    const next = snapshot({ record: { transactionId: "tx-43", manifestSequence: 43 } });
+    const cache: UpdateCache = new UpdateCache({
+      stateDirectory: directory,
+      windowsAclVerifier: allowTestAcl,
+      verifySnapshot: allowTestVerification,
+      faultInjector: {
+        hit(point) {
+          if (point === "after-release-rename-before-seal") throw new Error("interrupted seal");
+        },
+      },
+    });
+    await assert.rejects(cache.storeVerifiedReleaseSet(next), securityFailure);
+    assert.deepEqual((await writer.loadLastKnownGood()).record, previous.record);
+    await assert.rejects(writer.commitStagedReleaseSet(next.record), securityFailure);
+    assert.deepEqual((await writer.loadLastKnownGood()).record, previous.record);
+  });
+
+  test("a replacement in the rename-to-seal gap is not chmodded or published", async (t) => {
+    const { directory, cache: writer } = await fixture(t);
+    const previous = await writer.storeVerifiedReleaseSet(snapshot());
+    const next = snapshot({ record: { transactionId: "tx-43", manifestSequence: 43 } });
+    const outside = resolve(directory, "outside-seal-target");
+    await mkdir(outside, { mode: 0o700 });
+    await writeFile(resolve(outside, "sentinel"), "untouched");
+    const outsideMode = (await lstat(outside)).mode;
+    const cache: UpdateCache = new UpdateCache({
+      stateDirectory: directory,
+      windowsAclVerifier: allowTestAcl,
+      verifySnapshot: allowTestVerification,
+      faultInjector: {
+        async hit(point): Promise<void> {
+          if (point !== "after-release-rename-before-seal") return;
+          const release = resolve(cache.releaseRoot, "tx-43");
+          await rename(release, `${release}.moved`);
+          await symlink(outside, release, process.platform === "win32" ? "junction" : "dir");
+        },
+      },
+    });
+    await assert.rejects(cache.storeVerifiedReleaseSet(next), securityFailure);
+    assert.equal((await lstat(outside)).mode, outsideMode);
+    assert.equal(await readFile(resolve(outside, "sentinel"), "utf8"), "untouched");
+    assert.deepEqual((await writer.loadLastKnownGood()).record, previous.record);
+  });
+}

@@ -1,3 +1,4 @@
+import { bugLabelDiff } from "../helpers/label-diff.ts";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -65,7 +66,7 @@ class ReadOnlyGitLab {
   readonly credentialCanary = "glpat-production-readonly-canary";
   readonly calls: string[] = [];
   readonly labels: GitLabLabel[] = [
-    label(30, "priority::p1"),
+    label(30, "priority::p2"),
     label(40, "status::doing"),
     label(50, "status::review"),
     label(20, "type::bug"),
@@ -255,6 +256,7 @@ async function fixture() {
     gitlab: api as unknown as GitLabClient,
   };
   const plan: PreparedReadOnlyContext = {
+    labelDiff: bugLabelDiff({ sourceHeadSha: sourceSha, targetRefSha: targetSha, mergeBaseSha: targetSha }),
     assertNoCredentialExposure: () => {},
     selection,
     options,
@@ -319,12 +321,12 @@ async function fixture() {
     },
     mergeRequest: {
       ...rawRequest.mergeRequest,
-      labelCandidateTokens: [candidateToken(2), candidateToken(1), candidateToken(0)],
-      assigneeCandidateToken: candidateToken(3),
+      labelCandidateTokens: [candidateToken(1), candidateToken(0)],
+      assigneeCandidateToken: candidateToken(2),
     },
     review: {
       ...rawRequest.review,
-      reviewerCandidateTokens: [candidateToken(7)],
+      reviewerCandidateTokens: [candidateToken(6)],
     },
   });
   let externalContextReads = 0;
@@ -459,7 +461,6 @@ test("doctor, context, labels.list, and preview stay read-only while context alo
     "contextId",
     "labelCandidates.0.token",
     "labelCandidates.1.token",
-    "labelCandidates.2.token",
     "userCandidates.0.token",
     "userCandidates.1.token",
     "userCandidates.2.token",
@@ -478,9 +479,8 @@ test("doctor, context, labels.list, and preview stay read-only while context alo
   ]);
   assert.deepEqual(previewData.mergeRequestPlan, { action: "create", iid: null, webUrl: null });
   assert.deepEqual((previewData.labels as readonly { readonly name: string }[]).map((entry) => entry.name), [
-    "week::2026-w32-0803-0809",
     "type::bug",
-    "priority::p1",
+    "priority::p2",
     "status::review",
   ]);
 });

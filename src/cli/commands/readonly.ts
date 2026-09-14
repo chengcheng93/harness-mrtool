@@ -1,4 +1,8 @@
+import { labelOptionsForProductionInvocation } from "../production-invocation.ts";
+import type { CanonicalLabelChangeSet } from "../../git/change-set.ts";
+import { selectMandatoryLabels } from "../../app/mandatory-labels.ts";
 import { buildWritePlan, type MergeRequestWritePlan } from "../../app/write-plan.ts";
+import { defaultLabelNames } from "../../app/label-defaults.ts";
 import {
   defaultExternalContextReader,
   type ExternalContextReader,
@@ -94,6 +98,8 @@ export type PreparedExternalContextReadOptions = Omit<ExternalContextReadOptions
 };
 
 export interface PreparedReadOnlyContext {
+  readonly updateConfirmations?: import("../production-invocation.ts").UpdateConfirmationEvidence;
+  readonly labelDiff: CanonicalLabelChangeSet;
   readonly assertNoCredentialExposure: (value: unknown) => void;
   readonly selection: TrustedBundleSelection;
   readonly options: PreparedExternalContextReadOptions;
@@ -116,6 +122,7 @@ export interface ReadOnlyMigrationMetadata {
 
 export interface ReadOnlyContextPlanner {
   readonly prepare: (input: {
+    readonly allowManualDescriptionDrift?: boolean;
     readonly cliVersion: string;
     readonly command: ReadOnlyCommandKind;
     readonly currentBundle: TrustedBundleSelection;
@@ -638,9 +645,18 @@ function validatePreparedContext(
     "options",
     "profileDetection",
     "gitDiffSummary",
+    "labelDiff",
     "pushPlan",
     "mergeRequestPlan",
-  ], ["migration"]);
+  ], ["migration", "updateConfirmations"]);
+  if (value.updateConfirmations !== undefined) {
+    const confirmation = jsonSnapshot(value.updateConfirmations, ["updateMarkerDigest", "descriptionDigest"], ["migrationDigest"]);
+    if (typeof confirmation.updateMarkerDigest !== "string" || !/^[a-f0-9]{64}$/u.test(confirmation.updateMarkerDigest) ||
+        typeof confirmation.descriptionDigest !== "string" || !/^[a-f0-9]{64}$/u.test(confirmation.descriptionDigest) ||
+        (confirmation.migrationDigest !== undefined && (typeof confirmation.migrationDigest !== "string" || !/^[a-f0-9]{64}:[a-f0-9]{64}$/u.test(confirmation.migrationDigest)))) {
+      throw compositionError("invalid update confirmation evidence");
+    }
+  }
   if (typeof value.assertNoCredentialExposure !== "function") {
     throw compositionError("prepared context credential isolation is unavailable");
   }
@@ -704,6 +720,7 @@ function validatePreparedContext(
       (expectedMrIid !== null && mergeRequestPlan.iid !== expectedMrIid)) {
     throw compositionError("merge request plan does not match the invocation");
   }
+  const labelDiff = deepFreeze(copyJsonValue(value.labelDiff) as unknown as CanonicalLabelChangeSet);
   const gitDiffSummary = snapshotGitDiffSummary(value.gitDiffSummary as JsonObject);
   if (
     gitDiffSummary.targetRefSha !== options.git.targetRefSha ||
@@ -733,6 +750,7 @@ function validatePreparedContext(
   const validated = {
     assertNoCredentialExposure: Object.freeze(assertNoCredentialExposure),
     selection: selected,
+    labelDiff,
     options,
     profileDetection,
     gitDiffSummary,
@@ -961,6 +979,7 @@ function snapshotCandidateArray(value: unknown): readonly Candidate[] {
 function snapshotContextLabelCandidate(value: unknown): DiscoveredContext["labelCandidates"][number] {
   const candidate = jsonSnapshot(value, [
     "token", "category", "name", "description", "scopeKind", "scopePath", "currentlyApplied",
+    "defaultSelected",
   ]);
   if (typeof candidate.token !== "string" || !CANDIDATE_BEARER.test(candidate.token) ||
       typeof candidate.category !== "string" || !scalar(candidate.category) ||
@@ -968,7 +987,8 @@ function snapshotContextLabelCandidate(value: unknown): DiscoveredContext["label
       typeof candidate.description !== "string" || /[\r\u0000]/u.test(candidate.description) ||
       (candidate.scopeKind !== "project" && candidate.scopeKind !== "group") ||
       typeof candidate.scopePath !== "string" || !scalar(candidate.scopePath) ||
-      typeof candidate.currentlyApplied !== "boolean") {
+      typeof candidate.currentlyApplied !== "boolean" ||
+      typeof candidate.defaultSelected !== "boolean") {
     throw compositionError("issued label candidate fields are invalid");
   }
   return deepFreeze(candidate) as unknown as DiscoveredContext["labelCandidates"][number];
@@ -1177,6 +1197,7 @@ function contextExecution(
 function labelData(
   candidate: Extract<Candidate, { readonly kind: "label" }>,
   currentlyApplied: ReadonlySet<string>,
+  defaultNames: ReadonlySet<string>,
 ): JsonObject {
   return {
     id: candidate.globalId,
@@ -1189,6 +1210,7 @@ function labelData(
     scopeId: candidate.scopeId,
     scopePath: candidate.scopePath,
     currentlyApplied: currentlyApplied.has(candidate.globalId),
+    defaultSelected: defaultNames.has(candidate.name),
   };
 }
 
@@ -1197,10 +1219,15 @@ function labelsExecution(
   live: Awaited<ReturnType<ExternalContextReader["read"]>>,
 ): CliCommandExecution {
   const applied = new Set(live.snapshot.mergeRequest.labelIds);
+  const defaultNames = live.snapshot.mergeRequest.iid === null
+    ? defaultLabelNames(live.candidates
+      .filter((candidate): candidate is Extract<Candidate, { readonly kind: "label" }> => candidate.kind === "label")
+      .map((candidate) => ({ name: candidate.name, category: candidate.policyCategory })))
+    : new Set<string>();
   const labels = live.candidates
     .filter((candidate): candidate is Extract<Candidate, { readonly kind: "label" }> =>
       candidate.kind === "label")
-    .map((candidate) => labelData(candidate, applied))
+    .map((candidate) => labelData(candidate, applied, defaultNames))
     .sort((left, right) => {
       const leftKey = `${String(left.category)}\u0000${String(left.name)}\u0000${String(left.id)}`;
       const rightKey = `${String(right.category)}\u0000${String(right.name)}\u0000${String(right.id)}`;
@@ -1414,7 +1441,7 @@ export function createReadOnlyCommandServices(
     },
     preview: async (invocation) => {
       assertIssueScope(dependencies, "preview");
-      const request = normalizeProductionRequest(await dependencies.requestSource.read(invocation));
+      let request = normalizeProductionRequest(await dependencies.requestSource.read(invocation));
       const prepared = await prepare(dependencies, "preview", invocation, request);
       const liveValue = await externalContextReader.read(prepared.options);
       prepared.assertNoCredentialExposure(liveValue);
@@ -1435,7 +1462,12 @@ export function createReadOnlyCommandServices(
         throw staleContextError();
       }
       const snapshot = validateExternalContextSnapshot(resolved.snapshot);
+      const selection = selectMandatoryLabels({ diff: prepared.labelDiff, binding: snapshot,
+        inventory: snapshot.labelCandidates, intent: request.intent, options: labelOptionsForProductionInvocation(invocation) });
+      request = normalizeProductionRequest({ ...request, title: { ...request.title, type: selection.titleType } });
       const writePlan = buildWritePlan({
+        labelDiff: prepared.labelDiff,
+        labelOptions: labelOptionsForProductionInvocation(invocation),
         request,
         snapshot,
         resolvedCandidates: resolved.candidates,

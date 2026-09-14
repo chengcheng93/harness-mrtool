@@ -1,4 +1,7 @@
+import { selectMandatoryLabels, type LabelSelectionOptions } from "./mandatory-labels.ts";
+import { normalizeAndValidateRequest } from "../input/normalize.ts";
 import type { LoadedTemplateBundle } from "../bundle/load.ts";
+import type { CanonicalLabelChangeSet } from "../git/change-set.ts";
 import { isToolError, ToolError } from "../contracts/errors.ts";
 import type { Request } from "../contracts/request.ts";
 import type { Candidate } from "../context/types.ts";
@@ -111,6 +114,8 @@ export interface CreateMergeRequestInputs {
   readonly gitlabOrigin: string;
   readonly verificationReceiptWriter: VerificationReceiptWriter;
   readonly upsert?: boolean;
+  readonly labelDiff: CanonicalLabelChangeSet;
+  readonly labelOptions?: LabelSelectionOptions;
 }
 
 export interface CreateMergeRequestResult {
@@ -127,6 +132,14 @@ export interface CreateMergeRequestResult {
 export async function createMergeRequest(
   inputs: CreateMergeRequestInputs,
 ): Promise<CreateMergeRequestResult> {
+  const labels = selectMandatoryLabels({
+    diff: inputs.labelDiff, binding: inputs.initialSnapshot, inventory: inputs.initialSnapshot.labelCandidates,
+    intent: inputs.request.intent,
+    ...(inputs.labelOptions === undefined ? {} : { options: inputs.labelOptions }),
+  });
+  inputs = { ...inputs, request: normalizeAndValidateRequest({
+    ...inputs.request, title: { ...inputs.request.title, type: labels.titleType },
+  }) };
   const initialSnapshot = validateExternalContextSnapshot(inputs.initialSnapshot);
   if (initialSnapshot.mergeRequest.lifecycle !== "new" ||
       typeof inputs.sourceBranch !== "string" || inputs.sourceBranch === "" ||
@@ -138,6 +151,8 @@ export async function createMergeRequest(
     snapshot: initialSnapshot,
     resolvedCandidates: inputs.resolvedCandidates,
     bundle: inputs.bundle,
+    labelDiff: inputs.labelDiff,
+    ...(inputs.labelOptions === undefined ? {} : { labelOptions: inputs.labelOptions }),
   });
   const journal = new TransactionJournal(
     "create",
@@ -176,6 +191,8 @@ export async function createMergeRequest(
     const existing = await inputs.remote.findOpen(createInput);
     if (existing.value.length === 1 && inputs.upsert === true) {
       return updateMergeRequest({
+        labelDiff: inputs.labelDiff,
+        ...(inputs.labelOptions === undefined ? {} : { labelOptions: inputs.labelOptions }),
         request: inputs.request,
         initial: existing.value[0]!,
         resolvedCandidates: inputs.resolvedCandidates,

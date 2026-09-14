@@ -52,6 +52,7 @@ test("parses the complete common CLI flag contract without side effects", () => 
   ]);
 
   assert.deepEqual(parsed, {
+    confirmLabelType: null, labelDiffDigest: null, priority: null, priorityReason: null,
     input: "payload.yaml",
     inputFormat: "json",
     nonInteractive: true,
@@ -73,6 +74,7 @@ test("parses the complete common CLI flag contract without side effects", () => 
 
 test("uses explicit stable defaults", () => {
   assert.deepEqual(parseCliOptions([]), {
+    confirmLabelType: null, labelDiffDigest: null, priority: null, priorityReason: null,
     input: null,
     inputFormat: null,
     nonInteractive: false,

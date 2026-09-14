@@ -60,3 +60,18 @@ test("production invocation never reflects a rejected issue value", () => {
       !`${error.message}\n${JSON.stringify(error.details)}`.includes(secret),
   );
 });
+
+test("production label option handoff preserves CLI options and isolates invocation snapshots", async () => {
+  const { labelOptionsForProductionInvocation, recordWizardLabelOptions, clearWizardLabelOptions } = await import("../../src/cli/production-invocation.ts");
+  const { parseCliInvocation } = await import("../../src/cli/program.ts");
+  const invocation = parseCliInvocation(["preview", "--priority", "p1", "--priority-reason", "Incident"]);
+  assert.deepEqual(labelOptionsForProductionInvocation(invocation), { priority: "p1", priorityReason: "Incident" });
+  const options = { priority: "p0" as const, priorityReason: "Confirmed outage" };
+  recordWizardLabelOptions(invocation, options);
+  options.priorityReason = "mutated";
+  assert.deepEqual(labelOptionsForProductionInvocation(invocation), { priority: "p0", priorityReason: "Confirmed outage" });
+  assert.equal(Object.isFrozen(labelOptionsForProductionInvocation(invocation)), true);
+  assert.deepEqual(labelOptionsForProductionInvocation({ ...invocation }), { priority: "p1", priorityReason: "Incident" });
+  clearWizardLabelOptions(invocation);
+  assert.deepEqual(labelOptionsForProductionInvocation(invocation), { priority: "p1", priorityReason: "Incident" });
+});

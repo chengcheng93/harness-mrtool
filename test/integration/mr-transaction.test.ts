@@ -1,3 +1,4 @@
+import { bugLabelDiff } from "../helpers/label-diff.ts";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -12,6 +13,8 @@ import {
   type RemoteMergeRequest,
 } from "../../src/app/create-mr.ts";
 import {
+  assertReadyGate,
+  assertTransactionStructure,
   buildVerificationReceipt,
   validateVerificationReceipt,
   verifyMergeRequest,
@@ -58,7 +61,7 @@ function labelCandidate(
   };
 }
 
-test("WritePlan resolves opaque selections, derives lifecycle labels, and preserves manual labels", async () => {
+test("WritePlan derives fixed labels and removes retired or unrelated selections", async () => {
   const fixture = (name: string) => resolve(repositoryRoot, "test/golden/fixtures", name);
   const [rawRequest, rawSnapshot, bundle] = await Promise.all([
     readFile(fixture("code-docs-request.json"), "utf8").then(JSON.parse),
@@ -66,7 +69,6 @@ test("WritePlan resolves opaque selections, derives lifecycle labels, and preser
     loadTemplateBundle(resolve(repositoryRoot, "template-bundle")),
   ]);
   rawRequest.mergeRequest.labelCandidateTokens = [
-    "hmrc1_week-token",
     "hmrc1_type-token",
     "hmrc1_priority-token",
   ];
@@ -77,7 +79,7 @@ test("WritePlan resolves opaque selections, derives lifecycle labels, and preser
   rawSnapshot.labelCandidates = [
     { id: "gid://gitlab/ProjectLabel/10", name: "week::2026-w32-0803-0809" },
     { id: "gid://gitlab/ProjectLabel/20", name: "type::bug" },
-    { id: "gid://gitlab/ProjectLabel/30", name: "priority::p1" },
+    { id: "gid://gitlab/ProjectLabel/30", name: "priority::p2" },
     { id: "gid://gitlab/ProjectLabel/40", name: "status::doing" },
     { id: "gid://gitlab/ProjectLabel/50", name: "status::review" },
     { id: "gid://gitlab/ProjectLabel/60", name: "manual::keep" },
@@ -91,9 +93,8 @@ test("WritePlan resolves opaque selections, derives lifecycle labels, and preser
   rawSnapshot.mergeRequest.iid = 88;
   const snapshot = validateExternalContextSnapshot(rawSnapshot);
   const candidates: readonly Candidate[] = [
-    labelCandidate(10, "gid://gitlab/ProjectLabel/10", "week::2026-w32-0803-0809", "week"),
     labelCandidate(20, "gid://gitlab/ProjectLabel/20", "type::bug", "type"),
-    labelCandidate(30, "gid://gitlab/ProjectLabel/30", "priority::p1", "priority"),
+    labelCandidate(30, "gid://gitlab/ProjectLabel/30", "priority::p2", "priority"),
     {
       kind: "assignee",
       userId: "user:10",
@@ -110,29 +111,21 @@ test("WritePlan resolves opaque selections, derives lifecycle labels, and preser
     },
   ];
 
-  const plan = buildWritePlan({ request, snapshot, resolvedCandidates: candidates, bundle });
+  const plan = buildWritePlan({ request, snapshot, resolvedCandidates: candidates, bundle, labelDiff: bugLabelDiff(snapshot) });
 
   assert.equal(plan.intent, "ready");
   assert.equal(plan.provisional.title.startsWith("Draft: "), true);
   assert.equal(plan.desired.title, "[fix][luban-studio] Preserve WebEngine-compatible CSS output");
   assert.deepEqual(plan.draft.labelIds, [
-    "gid://gitlab/ProjectLabel/10",
-    "gid://gitlab/ProjectLabel/20",
-    "gid://gitlab/ProjectLabel/30",
-    "gid://gitlab/ProjectLabel/40",
-    "gid://gitlab/ProjectLabel/60",
+    "gid://gitlab/ProjectLabel/20", "gid://gitlab/ProjectLabel/30", "gid://gitlab/ProjectLabel/40",
   ]);
   assert.deepEqual(plan.desired.labelIds, [
-    "gid://gitlab/ProjectLabel/10",
-    "gid://gitlab/ProjectLabel/20",
-    "gid://gitlab/ProjectLabel/30",
-    "gid://gitlab/ProjectLabel/50",
-    "gid://gitlab/ProjectLabel/60",
+    "gid://gitlab/ProjectLabel/20", "gid://gitlab/ProjectLabel/30", "gid://gitlab/ProjectLabel/50",
   ]);
   assert.equal(plan.draftStatusLabelId, "gid://gitlab/ProjectLabel/40");
   assert.equal(plan.readyStatusLabelId, "gid://gitlab/ProjectLabel/50");
   assert.equal(plan.managedLabelIds.includes("gid://gitlab/ProjectLabel/70"), true);
-  assert.deepEqual(plan.preservedLabelIds, ["gid://gitlab/ProjectLabel/60"]);
+  assert.deepEqual(plan.preservedLabelIds, []);
   assert.equal(plan.desired.assigneeUserId, "user:10");
   assert.deepEqual(plan.desired.reviewerUserIds, ["user:20"]);
 });
@@ -150,6 +143,7 @@ test("a high-risk Draft uses the Draft reviewer minimum", async () => {
   const plan = buildWritePlan({
     request,
     snapshot: fixture.snapshot,
+    labelDiff: bugLabelDiff(fixture.snapshot),
     resolvedCandidates: candidates,
     bundle: fixture.bundle,
   });
@@ -186,6 +180,8 @@ class FakeMergeRequestRemote implements MergeRequestRemote {
   naturalContextDriftOnReadNumber: number | null = null;
   dropReviewerQualificationAfterWrite: WriteKind | null = null;
   renameLabelAfterWrite: { readonly kind: WriteKind; readonly id: string; readonly name: string } | null = null;
+  duplicateLabelAfterWrite: { readonly kind: WriteKind; readonly name: string } | null = null;
+  private activeDuplicateLabelName: string | null = null;
   private activeLabelRename: { readonly id: string; readonly name: string } | null = null;
   private failReadAfterWriteKind: WriteKind | null = null;
   failReadAfterWriteOccurrence = 1;
@@ -207,7 +203,9 @@ class FakeMergeRequestRemote implements MergeRequestRemote {
     return this.readCount;
   }
 
+  readonly initialSnapshot: ExternalContextSnapshot;
   constructor(snapshot: ExternalContextSnapshot) {
+    this.initialSnapshot = snapshot;
     this.baseSnapshot = snapshot;
   }
 
@@ -249,6 +247,10 @@ class FakeMergeRequestRemote implements MergeRequestRemote {
           ? { ...label, name: this.activeLabelRename.name }
           : label);
     }
+    if (this.activeDuplicateLabelName !== null) {
+      const mutable = snapshot as unknown as { labelCandidates: Array<{ id: string; name: string }> };
+      mutable.labelCandidates.push({ id: "gid://gitlab/ProjectLabel/999", name: this.activeDuplicateLabelName });
+    }
     return validateExternalContextSnapshot({
       ...snapshot,
       metadataRead: { status: "available", evidence: "GitLab MR metadata read completed." },
@@ -270,6 +272,10 @@ class FakeMergeRequestRemote implements MergeRequestRemote {
   }
 
   private preparePostWriteSnapshot(kind: WriteKind): void {
+    if (this.duplicateLabelAfterWrite?.kind === kind) {
+      this.activeDuplicateLabelName = this.duplicateLabelAfterWrite.name;
+      this.duplicateLabelAfterWrite = null;
+    }
     if (this.dropReviewerQualificationAfterWrite === kind) {
       this.dropReviewerQualificationAfterWrite = "create-draft";
     }
@@ -289,6 +295,7 @@ class FakeMergeRequestRemote implements MergeRequestRemote {
 
   async createDraft(input: CreateDraftInput) {
     this.record("create-draft");
+    this.preparePostWriteSnapshot("create-draft");
     assert.equal(input.sourceBranch, "fix/webengine-css");
     const provisional: RemoteMergeRequest = {
       iid: 88,
@@ -457,6 +464,7 @@ class FakeMergeRequestRemote implements MergeRequestRemote {
 
 function transactionRuntime(remote: FakeMergeRequestRemote) {
   return {
+    labelDiff: bugLabelDiff(remote.initialSnapshot),
     remote,
     gitlabOrigin: "https://gitlab.example.test",
     verificationReceiptWriter: {
@@ -563,13 +571,13 @@ async function transactionFixture(): Promise<{
     readFile(fixture("code-docs-snapshot.json"), "utf8").then(JSON.parse),
     loadTemplateBundle(resolve(repositoryRoot, "template-bundle")),
   ]);
-  rawRequest.mergeRequest.labelCandidateTokens = ["week-token", "type-token", "priority-token"];
+  rawRequest.mergeRequest.labelCandidateTokens = ["type-token", "priority-token"];
   rawRequest.mergeRequest.assigneeCandidateToken = "assignee-token";
   rawRequest.review.reviewerCandidateTokens = ["reviewer-token"];
   rawSnapshot.labelCandidates = [
     { id: "gid://gitlab/ProjectLabel/10", name: "week::2026-w32-0803-0809" },
     { id: "gid://gitlab/ProjectLabel/20", name: "type::bug" },
-    { id: "gid://gitlab/ProjectLabel/30", name: "priority::p1" },
+    { id: "gid://gitlab/ProjectLabel/30", name: "priority::p2" },
     { id: "gid://gitlab/ProjectLabel/40", name: "status::doing" },
     { id: "gid://gitlab/ProjectLabel/50", name: "status::review" },
   ];
@@ -584,9 +592,8 @@ async function transactionFixture(): Promise<{
   rawSnapshot.metadataRead = { status: "unavailable", evidence: "No MR exists yet." };
   const snapshot = validateExternalContextSnapshot(rawSnapshot);
   const candidates: readonly Candidate[] = [
-    labelCandidate(10, "gid://gitlab/ProjectLabel/10", "week::2026-w32-0803-0809", "week"),
     labelCandidate(20, "gid://gitlab/ProjectLabel/20", "type::bug", "type"),
-    labelCandidate(30, "gid://gitlab/ProjectLabel/30", "priority::p1", "priority"),
+    labelCandidate(30, "gid://gitlab/ProjectLabel/30", "priority::p2", "priority"),
     {
       kind: "assignee", userId: "user:10", globalId: "gid://gitlab/User/10",
       username: "alice", displayName: "Alice Zhang",
@@ -1743,8 +1750,8 @@ test("a selected label renamed under the same stable ID stops the transaction", 
   const fixture = await transactionFixture();
   fixture.remote.renameLabelAfterWrite = {
     kind: "write-fields",
-    id: "gid://gitlab/ProjectLabel/10",
-    name: "week::2026-w33-0810-0816",
+    id: "gid://gitlab/ProjectLabel/20",
+    name: "type::feature",
   };
 
   await assert.rejects(
@@ -1769,8 +1776,8 @@ test("a post-write identity drift records the successful read receipt before mis
   const fixture = await transactionFixture();
   fixture.remote.renameLabelAfterWrite = {
     kind: "write-fields",
-    id: "gid://gitlab/ProjectLabel/10",
-    name: "week::2026-w33-0810-0816",
+    id: "gid://gitlab/ProjectLabel/20",
+    name: "type::feature",
   };
   let caught: unknown;
   try {
@@ -1980,4 +1987,93 @@ test("every confirmed compensation write preserves a failed readback in the audi
     assert.equal(failed?.postcondition, "unavailable", scenario.operation);
     assert.equal(audit?.finalState, "unknown", scenario.operation);
   }
+});
+
+test("final transaction verification independently rejects out-of-pool labels even with an unchanged valid marker", async () => {
+  const { assertTransactionStructure } = await import("../../src/app/verify-mr.ts");
+  const fixture = await transactionFixture();
+  const created = await createMergeRequest({
+    request: fixture.request, initialSnapshot: fixture.snapshot, resolvedCandidates: fixture.candidates,
+    bundle: fixture.bundle, releaseTag: "templates-v1.0.0", cliVersion: "0.1.0-dev",
+    sourceBranch: "fix/webengine-css", ...transactionRuntime(fixture.remote),
+  });
+  const extraId = "gid://gitlab/ProjectLabel/999";
+  const current = { ...created.final, labelIds: [...created.final.labelIds, extraId],
+    snapshot: { ...created.final.snapshot,
+      labelCandidates: [...created.final.snapshot.labelCandidates, { id: extraId, name: "week::retired" }],
+      mergeRequest: { ...created.final.snapshot.mergeRequest, labelIds: [...created.final.labelIds, extraId] },
+    },
+  };
+  assert.throws(() => assertTransactionStructure(current, created.final.description, fixture.bundle, "templates-v1.0.0"), { code: "POSTCONDITION_ERROR" });
+});
+
+for (const name of ["type::bug", "priority::p2", "status::doing", "status::review"]) {
+  test(`a newly ambiguous planned name ${name} stops after Draft creation without further mutation`, async () => {
+    const fixture = await transactionFixture();
+    fixture.remote.duplicateLabelAfterWrite = { kind: "create-draft", name };
+    await assert.rejects(createMergeRequest({
+      request: fixture.request, initialSnapshot: fixture.snapshot, resolvedCandidates: fixture.candidates,
+      bundle: fixture.bundle, releaseTag: "templates-v1.0.0", cliVersion: "0.1.0-dev",
+      sourceBranch: "fix/webengine-css", ...transactionRuntime(fixture.remote),
+    }), { code: "PARTIAL_REMOTE_STATE" });
+    assert.deepEqual(fixture.remote.writes, ["create-draft"]);
+    assert.equal(fixture.remote.current?.draft, true);
+  });
+}
+test("an update cannot advance to Ready after a selected name becomes ambiguous", async () => {
+  const fixture = await transactionFixture();
+  const created = await createMergeRequest({
+    request: fixture.request, initialSnapshot: fixture.snapshot, resolvedCandidates: fixture.candidates,
+    bundle: fixture.bundle, releaseTag: "templates-v1.0.0", cliVersion: "0.1.0-dev",
+    sourceBranch: "fix/webengine-css", ...transactionRuntime(fixture.remote),
+  });
+  fixture.remote.writes.length = 0;
+  fixture.remote.duplicateLabelAfterWrite = { kind: "write-fields", name: "type::bug" };
+  await assert.rejects(updateMergeRequest({
+    request: fixture.request, initial: created.final, resolvedCandidates: fixture.candidates,
+    bundle: fixture.bundle, releaseTag: "templates-v1.0.0", cliVersion: "0.1.0-dev",
+    sourceBranch: "fix/webengine-css", ...transactionRuntime(fixture.remote),
+  }), { code: "PARTIAL_REMOTE_STATE" });
+  assert.deepEqual(fixture.remote.writes, ["mark-draft", "add-labels", "remove-labels", "write-fields"]);
+  assert.equal(fixture.remote.current?.draft, true);
+});
+for (const gate of ["structure", "ready", "verify"] as const) {
+  test(`${gate} independently rejects ambiguous live selected names with unchanged applied IDs`, async () => {
+    const fixture = await transactionFixture();
+    const created = await createMergeRequest({
+      request: fixture.request, initialSnapshot: fixture.snapshot, resolvedCandidates: fixture.candidates,
+      bundle: fixture.bundle, releaseTag: "templates-v1.0.0", cliVersion: "0.1.0-dev",
+      sourceBranch: "fix/webengine-css", ...transactionRuntime(fixture.remote),
+    });
+    const snapshot = validateExternalContextSnapshot({ ...created.final.snapshot,
+      labelCandidates: [...created.final.snapshot.labelCandidates,
+        { id: "gid://gitlab/ProjectLabel/999", name: "type::bug" }],
+    });
+    const current = { ...created.final, snapshot };
+    assert.throws(() => {
+      if (gate === "structure") assertTransactionStructure(current, created.final.description, fixture.bundle, "templates-v1.0.0");
+      else if (gate === "ready") assertReadyGate(snapshot, fixture.request, created.writePlan.desired, fixture.bundle);
+      else verifyMergeRequest({ level: "ready", current, expected: created.verification, bundle: fixture.bundle });
+    }, { code: "POSTCONDITION_ERROR" });
+  });
+}
+
+test("stored verification rejects live name ambiguity under the mandatory-label policy", async () => {
+  const fixture = await transactionFixture();
+  const created = await createMergeRequest({
+    request: fixture.request, initialSnapshot: fixture.snapshot, resolvedCandidates: fixture.candidates,
+    bundle: fixture.bundle, releaseTag: "templates-v1.0.0", cliVersion: "0.1.0-dev",
+    sourceBranch: "fix/webengine-css", ...transactionRuntime(fixture.remote),
+  });
+  const receipt = buildVerificationReceipt({ gitlabOrigin: "https://gitlab.example.test",
+    current: created.final, expected: created.verification, bundle: fixture.bundle });
+  const current = { ...created.final, snapshot: validateExternalContextSnapshot({ ...created.final.snapshot,
+    labelCandidates: [...created.final.snapshot.labelCandidates,
+      { id: "gid://gitlab/ProjectLabel/999", name: "type::bug" }],
+  }) };
+  await assert.rejects(verifyStoredMergeRequest({
+    level: "ready", current, gitlabOrigin: "https://gitlab.example.test",
+    receiptLoader: { loadVerified: async () => ({ trusted: true as const, receipt }) },
+    bundleLoader: { loadVerifiedExact: async () => ({ trusted: true as const, bundle: fixture.bundle }) },
+  }), { code: "POSTCONDITION_ERROR" });
 });

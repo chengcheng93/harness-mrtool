@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { constants } from "node:fs";
+import { constants, lstatSync, realpathSync } from "node:fs";
 import { chmod, lstat, open, realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 
@@ -103,12 +103,16 @@ function waitForHelper(
     let output = "";
     let settled = false;
     let helperExited = false;
+    let releasing: Promise<void> | undefined;
     const timeout = setTimeout(() => {
       if (settled) return;
       settled = true;
       child.kill();
       rejectPromise(new ProcessLockError("timeout"));
     }, timeoutMs);
+    // The helper can exit between the liveness check and a release write.
+    // A closed pipe must not become an unhandled EPIPE in the owner process.
+    child.stdin.on("error", () => child.kill());
     child.stdout.setEncoding("utf8");
     child.stderr.resume();
     child.stdout.on("data", (chunk: string) => {
@@ -133,21 +137,28 @@ function waitForHelper(
       clearTimeout(timeout);
       resolvePromise({
         assertHeld() {
-          if (helperExited || child.exitCode !== null) throw new ProcessLockError("unavailable");
+          if (releasing !== undefined || helperExited || child.exitCode !== null || child.signalCode !== null) {
+            throw new ProcessLockError("unavailable");
+          }
         },
         async release() {
-          if (helperExited || child.exitCode !== null) return;
-          child.stdin.end("release\n");
-          await new Promise<void>((resolveExit) => {
+          if (releasing !== undefined) return releasing;
+          if (helperExited || child.exitCode !== null || child.signalCode !== null) return;
+          releasing = new Promise<void>((resolveExit, rejectExit) => {
             const releaseTimeout = setTimeout(() => {
-              child.kill();
-              resolveExit();
+              child.kill("SIGKILL");
             }, 1_000);
+            const exitTimeout = setTimeout(() => {
+              rejectExit(new ProcessLockError("unavailable"));
+            }, 2_000);
             child.once("exit", () => {
               clearTimeout(releaseTimeout);
+              clearTimeout(exitTimeout);
               resolveExit();
             });
+            child.stdin.end("release\n");
           });
+          return releasing;
         },
       });
     });
@@ -205,6 +216,95 @@ async function acquireLinux(path: string, timeoutMs: number): Promise<ProcessLoc
 }
 
 
+// macOS ships /usr/bin/perl with Fcntl and native flock support. Do not use
+// shlock: it uses PID files and stale-file unlinking, not an OS advisory lock.
+async function acquireDarwin(
+  path: string,
+  timeoutMs: number,
+  expected: LockFileIdentity,
+): Promise<ProcessLockLease> {
+  const executable = "/usr/bin/perl";
+  try {
+    const runtime = await lstat(executable);
+    if (!runtime.isFile() || runtime.isSymbolicLink() || runtime.uid !== 0 ||
+        (runtime.mode & 0o022) !== 0 || await realpath(executable) !== executable) {
+      throw new ProcessLockError("unavailable");
+    }
+  } catch {
+    throw new ProcessLockError("unavailable");
+  }
+
+  // Pass the checked open file description, never a pathname for Perl to reopen.
+  // O_NONBLOCK also prevents a substituted FIFO from blocking before fstat.
+  let handle;
+  let lease: ProcessLockLease;
+  try {
+    handle = await open(path, constants.O_RDWR | constants.O_NONBLOCK | NOFOLLOW);
+    const opened = await handle.stat({ bigint: true });
+    if (!opened.isFile() || opened.dev !== expected.dev || opened.ino !== expected.ino) {
+      throw new ProcessLockError("unsafe");
+    }
+    await assertLockIdentity(path, expected);
+    const script = [
+      "use strict; use warnings; use Config; use Fcntl qw(:flock); use Errno qw(EWOULDBLOCK EINTR)",
+      // Refuse a Perl built with emulated locking; this contract requires flock(2).
+      '$Config{d_flock} eq "define" or die "native flock unavailable"',
+      'open(my $lock, "+<&=3") or die "lock descriptor unavailable"',
+      'my @identity = stat($lock)',
+      '@identity && -f $lock && "$identity[0]" eq $ARGV[0] && "$identity[1]" eq $ARGV[1] or die "lock identity mismatch"',
+      // A blocking flock would orphan a waiter if Node died before acquisition.
+      // Poll stdin alongside LOCK_NB so EOF cancels waiting as well as holding.
+      'while (!flock($lock, LOCK_EX | LOCK_NB)) { ' +
+        '$! == EWOULDBLOCK || $! == EINTR or die "flock failed"; ' +
+        'my $readers = ""; vec($readers, fileno(STDIN), 1) = 1; ' +
+        'my $ready = select($readers, undef, undef, 0.01); ' +
+        'defined($ready) or die "owner pipe failed"; exit 0 if $ready > 0 }',
+      '$| = 1; print "LOCKED\\n" or die "readiness failed"',
+      // EOF when the owner exits (including SIGKILL) releases the advisory lock.
+      'scalar <STDIN>',
+      'close($lock) or die "lock close failed"',
+    ].join("; ");
+    const child = spawn(executable, ["-T", "-e", script, String(expected.dev), String(expected.ino)], {
+      stdio: ["pipe", "pipe", "pipe", handle.fd],
+      // No PERL5OPT/PERL5LIB, dynamic-loader injection, or PATH-selected runtime.
+      env: { PATH: "/usr/bin:/bin" },
+    }) as ChildProcessWithoutNullStreams;
+    const pending = waitForHelper(child, timeoutMs);
+    // Close OUR duplicate immediately: retaining it would keep a flock alive
+    // even after the helper exits. The helper now owns the only description.
+    const closing = handle.close();
+    handle = undefined;
+    try {
+      [lease] = await Promise.all([pending, closing]);
+    } catch (error) {
+      child.kill("SIGKILL");
+      throw error;
+    }
+  } catch (error) {
+    if (error instanceof ProcessLockError) throw error;
+    throw new ProcessLockError("unsafe");
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+  return {
+    assertHeld() {
+      lease.assertHeld();
+      try {
+        const current = lstatSync(path, { bigint: true });
+        if (!current.isFile() || current.isSymbolicLink() ||
+            current.dev !== expected.dev || current.ino !== expected.ino ||
+            !samePath(realpathSync(path), path)) {
+          throw new ProcessLockError("unsafe");
+        }
+      } catch {
+        throw new ProcessLockError("unsafe");
+      }
+    },
+    release: () => lease.release(),
+  };
+}
+
+
 export const systemProcessLockProvider: ProcessLockProvider = {
   async acquire(path, timeoutMs) {
     const expected = await prepareLockFile(path);
@@ -212,7 +312,9 @@ export const systemProcessLockProvider: ProcessLockProvider = {
       ? await acquireWindows(path, timeoutMs)
       : process.platform === "linux"
         ? await acquireLinux(path, timeoutMs)
-        : null;
+        : process.platform === "darwin"
+          ? await acquireDarwin(path, timeoutMs, expected)
+          : null;
     if (lease === null) throw new ProcessLockError("unavailable");
     try {
       await assertLockIdentity(path, expected);

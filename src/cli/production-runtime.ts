@@ -1,3 +1,6 @@
+import { loadMrBundle } from "../app/load-mr-bundle.ts";
+import { VerificationReceiptStore } from "../platform/verification-receipt-store.ts";
+import { createDefaultHistoricalBundleLoader, type DefaultHistoricalBundleLoaderOptions } from "./default-historical-bundles.ts";
 import type {
   LoadedMrBundle,
   MrBundleIdentity,
@@ -9,14 +12,17 @@ import { isToolError, ToolError } from "../contracts/errors.ts";
 import {
   canonicalizeJson,
   sha256Utf8,
+  sha256CanonicalJson,
   type JsonValue,
 } from "../contracts/jcs.ts";
 import type { Request } from "../contracts/request.ts";
 import { CandidateContextStore } from "../context/store.ts";
 import type { CandidateContextStore as CandidateContextStoreType } from "../context/store.ts";
 import { getContext } from "../app/get-context.ts";
+import { defaultExternalContextReader } from "../app/external-context.ts";
 import type { CanonicalChangeSet } from "../git/change-set.ts";
-import { readCanonicalChangeSet } from "../git/change-set.ts";
+import { readCanonicalChangeSet, readCanonicalLabelDiff, type CanonicalLabelChangeSet } from "../git/change-set.ts";
+import { createDefaultWriteServices } from "./default-write-services.ts";
 import { planSourceBranchPush } from "../git/push-plan.ts";
 import type {
   GitLabProjectIdentity,
@@ -86,6 +92,11 @@ export interface ProductionHistoricalMrBundleLoader {
 }
 
 export interface ProductionReadOnlyDefaultOverrides {
+  /** In-process composition only: no CLI/request/environment override of signing roots.
+   * Keep persistence and exact historical validation real; replace only trust bootstrap
+   * and external transports for controlled embeddings and integration tests. */
+  readonly historicalBundleDefaults?: Pick<DefaultHistoricalBundleLoaderOptions,
+    "trustConfig" | "channelTransport" | "channelUrl" | "releaseAssets">;
   readonly contextStore?: DefaultContextStore;
   readonly historicalMrBundleLoader?: ProductionHistoricalMrBundleLoader;
   readonly inputIo?: InputIo;
@@ -195,9 +206,9 @@ function fixedPushCommand(
   return `git push --no-force ${remote} ${sourceHeadSha}:${remoteRef}`;
 }
 
-const defaultReadOnlyRepository: ProductionReadOnlyRepositoryRuntime = Object.freeze({
+export const defaultReadOnlyRepository: ProductionReadOnlyRepositoryRuntime = Object.freeze({
   discover: discoverProfileDetectionRepository,
-  readChangeSet: readCanonicalChangeSet,
+  readChangeSet: readCanonicalLabelDiff,
   async planPush(repository: RepositorySnapshot): Promise<ReadOnlyPushPlan> {
     const plan = await planSourceBranchPush(repository, { allowPush: false, dryRun: true });
     if (plan.kind === "up-to-date") {
@@ -252,7 +263,10 @@ function profileDetection(
       }))),
     });
   }
-  const detected = detectProfiles(selection.bundle, changeSet.items);
+  const detected = detectProfiles(selection.bundle, changeSet.items.map((item) => ({
+    status: item.status, binary: item.binary, submodule: item.submodule,
+    ...("oldPath" in item ? { oldPath: item.oldPath } : {}), ...("newPath" in item ? { newPath: item.newPath } : {}),
+  })) as CanonicalChangeSet["items"]);
   if (detected.kind === "detected") {
     return Object.freeze({
       kind: "detected",
@@ -729,6 +743,7 @@ export function createProductionReadOnlyDefaults(
           currentBundle: options.currentBundle,
           cwd: options.cwd,
           invocation: contextInvocation,
+          allowManualDescriptionDrift: invocation.command.kind === "update" && (invocation.command.forceReplaceDescription || invocation.command.migrateTemplate),
           request: null,
           contextIssueIid: issueIid,
         });
@@ -740,10 +755,11 @@ export function createProductionReadOnlyDefaults(
         return buildWizardCatalog({
           bundle: prepared.selection.bundle,
           discovered,
+          labelDiff: prepared.labelDiff,
           suggestedProfileIds: prepared.profileDetection.kind === "detected"
             ? prepared.profileDetection.profileIds
             : [],
-          confirmations: null,
+          confirmations: prepared.updateConfirmations ?? null,
         });
       },
     }),
@@ -759,6 +775,7 @@ export function createProductionReadOnlyDefaults(
   composition = Object.freeze({
     contextIssueIid: options.contextIssueIid,
     contextStore,
+    externalContextReader: defaultExternalContextReader,
     doctorProbe: Object.freeze({
       inspect: async ({ currentBundle }: Parameters<ReadOnlyCommandDependencies["doctorProbe"]["inspect"]>[0]) => productionDoctorReport(
         currentBundle,
@@ -784,7 +801,15 @@ export function createProductionReadOnlyDefaults(
         if (mr !== null) assertNoCredentialExposure(mr);
         const historical = mr === null
           ? null
-          : await loadHistorical(options.historicalMrBundleLoader, {
+          : await loadHistorical(options.historicalMrBundleLoader ?? {
+              loadVerifiedExact: (current) => loadMrBundle({ current, source: {
+                gitlabOrigin: session.origin,
+                allowManualDescriptionDrift: input.allowManualDescriptionDrift === true,
+                receiptLoader: new VerificationReceiptStore({ stateDirectory: options.stateDirectory ?? defaultStateDirectory(),
+                  ...(options.windowsAclVerifier === undefined ? {} : { windowsAclVerifier: options.windowsAclVerifier }) }),
+                bundleLoader: createDefaultHistoricalBundleLoader(options.currentBundle, { ...options.historicalBundleDefaults, stateDirectory: options.stateDirectory }),
+              } }),
+            }, {
               iid: mrIid!,
               targetProjectId: session.project.id,
               description: mr.description,
@@ -811,6 +836,12 @@ export function createProductionReadOnlyDefaults(
         }
 
         const prepared: PreparedReadOnlyContext = {
+          ...(mr === null || historical === null ? {} : { updateConfirmations: {
+            updateMarkerDigest: sha256CanonicalJson(historical.marker),
+            descriptionDigest: sha256Utf8(mr.description),
+            ...(operation === "migrate" ? { migrationDigest: `${historical.bundleManifestHash}:${options.currentBundle.bundleManifestHash}` } : {}),
+          } }),
+          labelDiff: changeSet,
           assertNoCredentialExposure,
           selection,
           options: Object.freeze({
@@ -888,6 +919,7 @@ export function createProductionReadOnlyDefaults(
   return composition;
 }
 
+
 export interface ProductionRuntimeDependencies {
   readonly cliVersion: string;
   readonly cwd: string;
@@ -895,12 +927,14 @@ export interface ProductionRuntimeDependencies {
   /** This port is scoped to profiles.detect and must not resolve MR targets. */
   readonly profileRepository: ProfileDetectionRepositoryRuntime;
   readonly targetProjectResolver: TargetProjectResolver;
+  readonly writeDefaults?: ProductionReadOnlyDefaultsOptions;
   readonly readOnly?: Omit<
     ReadOnlyCommandDependencies,
     "cliVersion" | "currentBundle" | "cwd"
   >;
   readonly services?: Omit<ProductionCommandServices, "cliVersion" | "profilesDetect">;
 }
+
 
 export function createProductionRuntime(
   dependencies: ProductionRuntimeDependencies,
@@ -913,8 +947,16 @@ export function createProductionRuntime(
         currentBundle: dependencies.currentBundle,
         cwd: dependencies.cwd,
       });
+  const writeServices = dependencies.writeDefaults === undefined || dependencies.readOnly === undefined
+    ? {}
+    : createDefaultWriteServices({
+        options: dependencies.writeDefaults,
+        currentBundle: dependencies.currentBundle,
+        readOnly: dependencies.readOnly as Omit<ReadOnlyCommandDependencies, "cliVersion" | "currentBundle" | "cwd">,
+      });
   return createProductionCommandHandlers({
     cliVersion: dependencies.cliVersion,
+    ...writeServices,
     ...dependencies.services,
     ...readOnly,
     ...createProfileDetectionCommandServices(dependencies),

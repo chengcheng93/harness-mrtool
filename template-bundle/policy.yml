@@ -1,10 +1,6 @@
 policySchema: 1
 labels:
   categories:
-    week:
-      match: "^week::"
-      required: true
-      max: 1
     type:
       match: "^type::"
       required: true

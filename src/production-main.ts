@@ -148,6 +148,7 @@ async function publicCommandHandlers(
     },
     readOnly,
     targetProjectResolver: dependencies.targetProjectResolver ?? createGitLabTargetProjectResolver(),
+    writeDefaults: { cliVersion, cwd, currentBundle, contextIssueIid, ...dependencies.readOnlyDefaults },
     services: {
       ...(dependencies.updateService === undefined
         ? lazyDefaultUpdaterCommandServices()

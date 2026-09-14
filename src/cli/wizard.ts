@@ -2,7 +2,14 @@ import { ToolError } from "../contracts/errors.ts";
 import { copyJsonValue, type JsonObject, type JsonValue } from "../contracts/jcs.ts";
 import type { InputFormat, InputIo } from "../input/load-input.ts";
 import { decodeInputBytes, MAX_INPUT_BYTES } from "../input/load-input.ts";
-import type { InteractiveRequestWizard } from "./production-input.ts";
+import { normalizeProductionRequest, type InteractiveRequestWizard } from "./production-input.ts";
+import { DEFAULT_LABEL_POOL } from "../app/label-defaults.ts";
+import type { DiffTypeLabel } from "../app/diff-labels.ts";
+import { selectMandatoryLabels, type MandatoryLabelInput, type LabelSelectionOptions } from "../app/mandatory-labels.ts";
+import {
+  clearWizardLabelOptions, labelOptionsForProductionInvocation, recordWizardLabelOptions,
+  recordWizardUpdateConfirmations, type UpdateConfirmationEvidence,
+} from "./production-invocation.ts";
 import type { CliInvocation } from "./program.ts";
 import { stringify as stringifyYaml } from "yaml";
 
@@ -44,6 +51,9 @@ interface CatalogEntry {
 }
 
 export interface WizardCatalog {
+  // Optional only for source compatibility with custom catalog ports. Collection
+  // fails closed when absent; a legacy token catalog is never a fallback.
+  readonly automaticLabels?: Omit<MandatoryLabelInput, "intent" | "options">;
   readonly contextId: string;
   readonly issueIid: number | null;
   readonly targetBranch: string;
@@ -67,6 +77,7 @@ export interface WizardCatalog {
     readonly scopeKind: "project" | "group";
     readonly scopePath: string;
     readonly currentlyApplied: boolean;
+    readonly defaultSelected: boolean;
   }[];
   readonly userCandidates: readonly {
     readonly token: string;
@@ -77,11 +88,7 @@ export interface WizardCatalog {
     readonly defaultSelected: boolean;
     readonly qualifiedReviewer: boolean;
   }[];
-  readonly confirmations: null | {
-    readonly updateMarkerDigest?: string;
-    readonly descriptionDigest?: string;
-    readonly migrationDigest?: string;
-  };
+  readonly confirmations: UpdateConfirmationEvidence | null;
 }
 
 export interface WizardCatalogSource {
@@ -235,7 +242,7 @@ function snapshotCatalog(value: WizardCatalog): WizardCatalog {
     "titleTypes", "impactAreas", "verificationItems", "documentationItems",
     "profileFields", "labelCategories", "labelCandidates", "userCandidates",
     "confirmations",
-  ]);
+  ], ["automaticLabels"]);
   for (const entry of catalogArray(root.profiles)) catalogObject(entry, ["id", "label"]);
   for (const entry of catalogArray(root.impactAreas)) catalogObject(entry, ["id", "label"]);
   for (const entry of catalogArray(root.verificationItems)) catalogObject(entry, ["id", "label"]);
@@ -249,7 +256,7 @@ function snapshotCatalog(value: WizardCatalog): WizardCatalog {
   for (const entry of catalogArray(root.labelCandidates)) {
     catalogObject(entry, [
       "token", "category", "name", "description", "scopeKind", "scopePath",
-      "currentlyApplied",
+      "currentlyApplied", "defaultSelected",
     ]);
   }
   for (const entry of catalogArray(root.userCandidates)) {
@@ -261,9 +268,7 @@ function snapshotCatalog(value: WizardCatalog): WizardCatalog {
   catalogArray(root.suggestedProfileIds);
   catalogArray(root.titleTypes);
   if (root.confirmations !== null) {
-    catalogObject(root.confirmations, [], [
-      "updateMarkerDigest", "descriptionDigest", "migrationDigest",
-    ]);
+    catalogObject(root.confirmations, ["updateMarkerDigest", "descriptionDigest"], ["migrationDigest"]);
   }
   return deepFreezeCatalog(root) as unknown as WizardCatalog;
 }
@@ -310,7 +315,8 @@ function validateCatalog(catalogValue: WizardCatalog): WizardCatalog {
     !categoryIds.has(candidate.category) || !scalar(candidate.name) ||
     (candidate.description !== "" && !scalar(candidate.description)) ||
     (candidate.scopeKind !== "project" && candidate.scopeKind !== "group") ||
-    !scalar(candidate.scopePath) || typeof candidate.currentlyApplied !== "boolean"
+    !scalar(candidate.scopePath) || typeof candidate.currentlyApplied !== "boolean" ||
+    typeof candidate.defaultSelected !== "boolean"
   ) || catalog.userCandidates.some((candidate) =>
     (candidate.kind !== "assignee" && candidate.kind !== "reviewer") ||
     !scalar(candidate.username) || !scalar(candidate.displayName) ||
@@ -320,16 +326,11 @@ function validateCatalog(catalogValue: WizardCatalog): WizardCatalog {
   )) {
     throw wizardError("candidate metadata is invalid");
   }
-  if (catalog.labelCategories.some((category) =>
-    category.required && !catalog.labelCandidates.some((candidate) => candidate.category === category.id)
-  )) {
-    throw wizardError("a required label category has no candidates");
-  }
   if (catalog.confirmations !== null) {
     const confirmation = catalog.confirmations;
     if (
-      (confirmation.updateMarkerDigest !== undefined && !SHA256.test(confirmation.updateMarkerDigest)) ||
-      (confirmation.descriptionDigest !== undefined && !SHA256.test(confirmation.descriptionDigest)) ||
+      (typeof confirmation.updateMarkerDigest !== "string" || !SHA256.test(confirmation.updateMarkerDigest)) ||
+      (typeof confirmation.descriptionDigest !== "string" || !SHA256.test(confirmation.descriptionDigest)) ||
       (confirmation.migrationDigest !== undefined && !SHA256_PAIR.test(confirmation.migrationDigest))
     ) {
       throw wizardError("confirmation catalog is invalid");
@@ -362,34 +363,45 @@ async function confirmInteractiveUpdate(
   invocation: CliInvocation,
   catalog: WizardCatalog,
   console: WizardConsole,
-): Promise<void> {
-  if (invocation.command.kind !== "update") return;
+): Promise<UpdateConfirmationEvidence | null> {
+  const command = invocation.command;
+  if (command.kind !== "update") return null;
+  const evidence = catalog.confirmations;
+  // Preflight the complete operation before asking for any partial approval.
+  if (evidence === null || (command.migrateTemplate && evidence.migrationDigest === undefined)) {
+    throw wizardError("required update confirmation is unavailable");
+  }
+  if (command.migrateTemplate && command.confirmation !== null && command.confirmation !== evidence.migrationDigest) {
+    throw confirmationMismatch();
+  }
   await assertExactConfirmation(
     console,
     "confirmation.update-marker",
-    "Type the exact managed marker digest to update",
-    catalog.confirmations?.updateMarkerDigest,
+    `Update MR !${command.iid}. Current description SHA-256: ${evidence.descriptionDigest}. ` +
+      `Type the exact managed marker digest to update. Confirmation digest: ${evidence.updateMarkerDigest}`,
+    evidence.updateMarkerDigest,
   );
-  if (invocation.command.forceReplaceDescription) {
+  if (command.forceReplaceDescription) {
     await assertExactConfirmation(
       console,
       "confirmation.force-replace",
-      "Type the exact current description digest to replace it",
-      catalog.confirmations?.descriptionDigest,
+      `Replace the current description of MR !${command.iid}. Type its exact SHA-256. Confirmation digest: ${evidence.descriptionDigest}`,
+      evidence.descriptionDigest,
     );
   }
-  if (invocation.command.migrateTemplate) {
-    const expected = catalog.confirmations?.migrationDigest;
-    if (invocation.command.confirmation !== null && invocation.command.confirmation !== expected) {
-      throw confirmationMismatch();
-    }
+  if (command.migrateTemplate) {
     await assertExactConfirmation(
       console,
       "confirmation.migration",
-      "Type the exact old:new Bundle hash pair to migrate",
-      expected,
+      `Migrate MR !${command.iid}. Type the exact old:new Bundle hash pair. Confirmation digest: ${evidence.migrationDigest}`,
+      evidence.migrationDigest,
     );
   }
+  return {
+    updateMarkerDigest: evidence.updateMarkerDigest,
+    descriptionDigest: evidence.descriptionDigest,
+    ...(command.migrateTemplate ? { migrationDigest: evidence.migrationDigest! } : {}),
+  };
 }
 
 function choices(values: readonly string[]): readonly WizardChoice[] {
@@ -588,26 +600,82 @@ async function collectWorkItem(console: WizardConsole): Promise<WorkItemSelectio
   return Object.freeze({ relation, iid });
 }
 
+interface CollectedRequest {
+  readonly request: JsonObject;
+  readonly labelOptions: LabelSelectionOptions;
+  readonly updateConfirmations: UpdateConfirmationEvidence | null;
+}
+
+async function collectAutomaticLabels(
+  invocation: CliInvocation,
+  catalog: WizardCatalog,
+  intent: "draft" | "ready",
+  console: WizardConsole,
+) {
+  const evidence = catalog.automaticLabels;
+  if (evidence === undefined) throw wizardError("canonical automatic-label evidence is unavailable");
+  let options = labelOptionsForProductionInvocation(invocation);
+  const select = () => selectMandatoryLabels({ ...evidence, intent, options });
+  let selection;
+  try {
+    selection = select();
+  } catch (error) {
+    // Only this precise ambiguity is recoverable interactively. Stale evidence,
+    // stale CLI confirmations and inventory failures must not become a fallback.
+    const actual = error instanceof ToolError ? error.details.actual : undefined;
+    if (error instanceof ToolError && error.code === "LABEL_ERROR" &&
+        actual !== null && typeof actual === "object" && !Array.isArray(actual) &&
+        actual.reason === "diff type requires confirmation" && typeof actual.diffDigest === "string") {
+      const digest = actual.diffDigest;
+      const types = DEFAULT_LABEL_POOL.filter((name) => name.startsWith("type::"))
+        .map((name) => name.slice("type::".length) as DiffTypeLabel);
+      const confirmedType = await chooseOne(console, "labels.confirm-type",
+        `Diff type is ambiguous. Review the committed diff and confirm its type. Diff digest: ${digest}`,
+        types, String);
+      await assertExactConfirmation(console, "labels.confirm-digest",
+        `Type the exact diff digest to bind your type confirmation: ${digest}`, digest);
+      options = { ...options, confirmedType, confirmationDigest: digest };
+      selection = select();
+    } else {
+      throw error;
+    }
+  }
+  if (invocation.options.priority === null && await console.confirm({
+    id: "labels.escalate",
+    prompt: `Automatic labels: ${selection.names.join(", ")}. Diff digest: ${selection.diffDigest}. Escalate priority above p2?`,
+    defaultValue: false,
+  })) {
+    const priority = await chooseOne(console, "labels.priority", "Select explicit priority escalation",
+      ["p1", "p0"] as const, String);
+    const priorityReason = (await console.text({ id: "labels.priority-reason", prompt: "Explain why this priority escalation is required" })).trim();
+    options = { ...options, priority, priorityReason };
+    selection = select();
+  }
+  if (!await console.confirm({
+    id: "labels.accept",
+    prompt: `Automatic labels: ${selection.names.join(", ")}. Diff digest: ${selection.diffDigest}. Continue?`,
+    defaultValue: true,
+  })) throw wizardError("automatic labels were not accepted");
+  return { selection, options };
+}
+
 async function collectRequest(
   invocation: CliInvocation,
   catalogValue: WizardCatalog,
   console: WizardConsole,
   editor: WizardLongFormEditor,
   workItemSelection: WorkItemSelection,
-): Promise<JsonObject> {
+): Promise<CollectedRequest> {
   const catalog = validateCatalog(catalogValue);
   if (catalog.issueIid !== workItemSelection.iid) {
     throw wizardError("wizard context issue binding changed");
   }
-  await confirmInteractiveUpdate(invocation, catalog, console);
+  const updateConfirmations = await confirmInteractiveUpdate(invocation, catalog, console);
   const profiles = await explicitOrSelectedProfiles(invocation, catalog, console);
   const profileIds = profiles.map((profile) => profile.id);
   const intent = await chooseOne(console, "intent", "Select merge request intent", ["draft", "ready"] as const, String);
-  const titleType = invocation.options.type === null
-    ? await chooseOne(console, "title.type", "Select title type", catalog.titleTypes, String)
-    : catalog.titleTypes.includes(invocation.options.type)
-      ? invocation.options.type
-      : (() => { throw wizardError("CLI title type is not enumerated"); })();
+  const automaticLabels = await collectAutomaticLabels(invocation, catalog, intent, console);
+  const titleType = automaticLabels.selection.titleType;
   const module = invocation.options.module ?? await console.text({ id: "title.module", prompt: "Enter title module" });
   const titleSummary = invocation.options.titleSummary ?? await console.text({
     id: "title.titleSummary",
@@ -651,24 +719,6 @@ async function collectRequest(
     ["low", "medium", "high"] as const,
     String,
   );
-  const labelTokens: string[] = [];
-  for (const category of catalog.labelCategories) {
-    const candidates = catalog.labelCandidates.filter((candidate) => candidate.category === category.id);
-    const defaults = candidates.flatMap((candidate, index) => candidate.currentlyApplied ? [index] : []);
-    const selected = await chooseMany(
-      console,
-      `labels.${category.id}`,
-      `Select ${category.id} labels`,
-      candidates,
-      (candidate) => `${candidate.name} | ${candidate.description === "" ? "(no description)" : candidate.description}` +
-        ` | category=${candidate.category} | scope=${candidate.scopeKind}:${candidate.scopePath}` +
-        ` | ${candidate.currentlyApplied ? "currently applied" : "not currently applied"}`,
-      category.required ? 1 : 0,
-      category.max,
-      defaults,
-    );
-    labelTokens.push(...selected.map((candidate) => candidate.token));
-  }
   const assignees = catalog.userCandidates.filter((candidate) => candidate.kind === "assignee");
   const assigneeOptions = [null, ...assignees] as const;
   const defaultAssignee = Math.max(0, assignees.findIndex((candidate) => candidate.defaultSelected) + 1);
@@ -710,7 +760,7 @@ async function collectRequest(
   const workItem = workItemSelection.relation === "none"
     ? { relation: workItemSelection.relation, noIssueReason: parsed.noIssueReason }
     : { relation: workItemSelection.relation, iid: workItemSelection.iid };
-  return {
+  const request = {
     schemaVersion: 1,
     contextId: catalog.contextId,
     intent,
@@ -748,11 +798,12 @@ async function collectRequest(
     },
     mergeRequest: {
       assigneeCandidateToken: assignee?.token ?? null,
-      labelCandidateTokens: labelTokens,
+      labelCandidateTokens: [],
       removeSourceBranch,
       squash,
     },
   } as JsonObject;
+  return { request, labelOptions: automaticLabels.options, updateConfirmations };
 }
 
 export function createInteractiveRequestWizard(
@@ -765,9 +816,12 @@ export function createInteractiveRequestWizard(
   });
   return Object.freeze({
     collect: async ({ invocation }: Parameters<InteractiveRequestWizard["collect"]>[0]) => {
+      clearWizardLabelOptions(invocation);
+      recordWizardUpdateConfirmations(invocation, null);
+      let collected: CollectedRequest;
       try {
         const workItem = await collectWorkItem(console);
-        return await collectRequest(
+        collected = await collectRequest(
           invocation,
           await callWizardPort("catalog", async () =>
             options.catalogSource.load({ invocation, issueIid: workItem.iid })),
@@ -775,9 +829,14 @@ export function createInteractiveRequestWizard(
           editor,
           workItem,
         );
+        // Do not publish decisions from an invalid editor document.
+        normalizeProductionRequest(collected.request);
       } finally {
         await console.close?.();
       }
+      recordWizardLabelOptions(invocation, collected.labelOptions);
+      recordWizardUpdateConfirmations(invocation, collected.updateConfirmations);
+      return collected.request;
     },
   });
 }

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, symlink } from "node:fs/promises";
+import { mkdtemp, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -13,8 +13,8 @@ import {
 } from "../../src/platform/process-lock.ts";
 
 test("update locking rejects a linked state directory before acquiring a lock", async (t) => {
-  const container = await mkdtemp(resolve(tmpdir(), "harness-mrtool-lock-link-"));
-  const target = await mkdtemp(resolve(tmpdir(), "harness-mrtool-lock-target-"));
+  const container = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-lock-link-"));
+  const target = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-lock-target-"));
   t.after(async () => Promise.all([
     rm(container, { recursive: true, force: true }),
     rm(target, { recursive: true, force: true }),
@@ -37,7 +37,7 @@ test("update locking rejects a linked state directory before acquiring a lock", 
 });
 
 test("the callback can assert that its update lease remains held", async (t) => {
-  const directory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-lock-held-"));
+  const directory = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-lock-held-"));
   t.after(async () => rm(directory, { recursive: true, force: true }));
   let held = true;
   let assertions = 0;
@@ -71,11 +71,11 @@ test("the callback can assert that its update lease remains held", async (t) => 
 });
 
 test("system lock contention never exceeds its declared timeout by a helper grace period", async (t) => {
-  if (process.platform !== "linux" && process.platform !== "win32") {
+  if (process.platform !== "linux" && process.platform !== "win32" && process.platform !== "darwin") {
     t.skip("system process lock provider is not available on this platform");
     return;
   }
-  const directory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-lock-timeout-"));
+  const directory = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-lock-timeout-"));
   t.after(async () => rm(directory, { recursive: true, force: true }));
   const path = resolve(directory, "update.lock");
   const held = await systemProcessLockProvider.acquire(path, 2_000);

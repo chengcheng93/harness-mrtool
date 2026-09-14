@@ -1,3 +1,4 @@
+import { assertMandatoryLabelNames } from "./mandatory-labels.ts";
 import type { LoadedTemplateBundle } from "../bundle/load.ts";
 import { validateTemplateBundle } from "../bundle/validate.ts";
 import { ToolError } from "../contracts/errors.ts";
@@ -465,6 +466,33 @@ export function isVerificationReceiptStageError(error: unknown): boolean {
   return error instanceof ToolError && error.details.field === "verificationReceipt";
 }
 
+/** Resolve planned/applied labels only while both their IDs and names stay unique. */
+export function resolveUniqueLiveLabelNames(
+  snapshot: ExternalContextSnapshot,
+  labelIds: readonly string[],
+): readonly string[] {
+  return labelIds.map((id) => {
+    const matches = snapshot.labelCandidates.filter((label) => label.id === id);
+    const match = matches[0];
+    if (matches.length !== 1 || match === undefined ||
+        snapshot.labelCandidates.filter((label) => label.name === match.name).length !== 1) {
+      throw verificationError("a planned or applied label identity is missing or ambiguous");
+    }
+    return match.name;
+  });
+}
+
+function assertCurrentMandatoryLabels(current: RemoteMergeRequest, bundle: LoadedTemplateBundle): void {
+  // Callers validate the pinned bundle first. Its authenticated historical policy
+  // must not be replaced with today's fixed pool during verification.
+  const categories = (bundle.policy.labels as { categories: Record<string, unknown> }).categories;
+  if (Object.hasOwn(categories, "week")) return;
+  try {
+    const names = resolveUniqueLiveLabelNames(current.snapshot, current.labelIds);
+    assertMandatoryLabelNames(names, current.draft ? "draft" : "ready");
+  } catch { throw verificationError("applied labels violate the mandatory fixed-pool policy"); }
+}
+
 export function assertTransactionStructure(
   current: RemoteMergeRequest,
   expectedDescription: string,
@@ -472,6 +500,7 @@ export function assertTransactionStructure(
   releaseTag: string,
 ): void {
   assertManagedDescription(current.description, bundle, releaseTag);
+  assertCurrentMandatoryLabels(current, bundle);
   if (current.description !== expectedDescription ||
       parseDiagnosticMarker(current.description).renderPhase !== "final") {
     throw verificationError("description body or diagnostic marker drifted during the transaction");
@@ -535,6 +564,7 @@ export function assertReadyGate(
   if (request.intent !== "ready") {
     throw verificationError("Ready gate requires a Ready-intent Request");
   }
+  resolveUniqueLiveLabelNames(snapshot, writePlan.labelIds);
   const policy = reviewPolicy(bundle);
   const minimum = request.risk.level === "high"
     ? Math.max(policy.ready, policy.highRisk)
@@ -562,6 +592,7 @@ function assertStructure(inputs: VerifyMergeRequestInputs): {
   );
   assertVerificationLevel(inputs.level);
   const currentSnapshot = validateExternalContextSnapshot(inputs.current.snapshot);
+  assertCurrentMandatoryLabels(inputs.current, inputs.bundle);
   const expectedSnapshot = validateExternalContextSnapshot(inputs.expected.snapshot);
   const writePlan = validateDesiredWritePlan(inputs.expected.writePlan);
   const expectedLifecycle = inputs.expected.request.intent;
@@ -668,6 +699,7 @@ function assertReceiptStructure(
     throw verificationError("the verified historical Bundle does not match the durable receipt");
   }
   const snapshot = validateExternalContextSnapshot(current.snapshot);
+  assertCurrentMandatoryLabels(current, bundle);
   let marker: ReturnType<typeof parseDiagnosticMarker>;
   try {
     marker = parseDiagnosticMarker(current.description);

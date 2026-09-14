@@ -24,11 +24,13 @@ import {
   signedEnvelope,
 } from "../helpers/signing.ts";
 
+import { historicalManifest, historicalPolicy } from "../helpers/historical-template-bundle.ts";
+
 const repositoryRoot = resolve(import.meta.dirname, "../..");
 const bundleDirectory = resolve(repositoryRoot, "template-bundle");
 const repository = Object.freeze({ owner: "fixture-owner", name: "harness-mrtool" });
 
-async function exactReleaseFixture(): Promise<{
+async function exactReleaseFixture(historical = false): Promise<{
   readonly reference: {
     readonly releaseTag: string;
     readonly bundleId: string;
@@ -46,13 +48,15 @@ async function exactReleaseFixture(): Promise<{
   readonly channelPayload: JsonObject;
 }> {
   const key = createSigningFixture("fixture-release-key-1");
-  const manifestText = await readFile(resolve(bundleDirectory, "bundle-manifest.json"), "utf8");
+  const manifestText = historical ? historicalManifest : await readFile(resolve(bundleDirectory, "bundle-manifest.json"), "utf8");
   const manifest = JSON.parse(manifestText) as JsonObject;
   const manifestBytes = new TextEncoder().encode(manifestText);
   const bundleManifestHash = sha256Utf8(manifestText);
   const files = new Map<string, Uint8Array>([["bundle-manifest.json", manifestBytes]]);
   for (const file of manifest.files as JsonObject[]) {
-    files.set(String(file.path), await readFile(resolve(bundleDirectory, String(file.path))));
+    files.set(String(file.path), historical && file.path === "policy.yml"
+      ? new TextEncoder().encode(historicalPolicy)
+      : await readFile(resolve(bundleDirectory, String(file.path))));
   }
   const receiptPayload: JsonObject = {
     receiptVersion: 1,
@@ -60,7 +64,7 @@ async function exactReleaseFixture(): Promise<{
     signingSequence: 42,
     signingKeyId: key.keyId,
     repository,
-    releaseTag: "templates-v1.0.0",
+    releaseTag: `templates-v${String(manifest.version)}`,
     bundleId: manifest.bundleId!,
     bundleVersion: manifest.version!,
     bundleManifest: {
@@ -101,8 +105,8 @@ async function exactReleaseFixture(): Promise<{
         },
       },
       templates: {
-        version: "1.0.0",
-        tag: "templates-v1.0.0",
+        version: manifest.version!,
+        tag: `templates-v${String(manifest.version)}`,
         inputSchema: 1,
         policySchema: 1,
         minCliVersion: "1.2.0",
@@ -121,14 +125,14 @@ async function exactReleaseFixture(): Promise<{
         activation: "explicit-host-refresh",
       },
     },
-    releaseSet: { id: "stable-42", cli: "1.2.3", templates: "1.0.0" },
+    releaseSet: { id: "stable-42", cli: "1.2.3", templates: manifest.version! },
     security: {
       minimumAllowedCliVersion: "1.0.0",
       revokedCliVersions: [],
       revokedReleaseSetIds: [],
     },
     templateHistory: [{
-      releaseTag: "templates-v1.0.0",
+      releaseTag: `templates-v${String(manifest.version)}`,
       bundleManifestHash,
       receiptPayloadSha256: sha256Utf8(`${canonicalizeJson(receiptPayload)}\n`),
       signingSequence: 42,
@@ -155,7 +159,7 @@ async function exactReleaseFixture(): Promise<{
   ).nextTrustState;
   return {
     reference: {
-      releaseTag: "templates-v1.0.0",
+      releaseTag: `templates-v${String(manifest.version)}`,
       bundleId: String(manifest.bundleId),
       bundleVersion: String(manifest.version),
       bundleManifestHash,
@@ -165,7 +169,7 @@ async function exactReleaseFixture(): Promise<{
     trustState,
     assets: {
       repository,
-      releaseTag: "templates-v1.0.0",
+      releaseTag: `templates-v${String(manifest.version)}`,
       receiptEnvelope: signedEnvelope(canonicalPayload(receiptPayload), [key]),
       files,
     },
@@ -362,7 +366,7 @@ test("rejects a historical anchor signed at a sequence where its key is revoked 
     ...fixture.channelPayload,
     sequence: 43,
     issuedAt: "2026-08-16T00:00:01Z",
-    releaseSet: { id: "stable-43", cli: "1.2.3", templates: "1.0.0" },
+    releaseSet: { id: "stable-43", cli: "1.2.3", templates: fixture.reference.bundleVersion },
     templateHistory: [
       oldAnchor,
       {
@@ -466,4 +470,19 @@ test("rejects a persisted trust state rooted in different bootstrap keys", async
     trustState: fixture.trustState,
     releaseAssets: { loadExact: async () => fixture.assets },
   }), (error: unknown) => isToolError(error, "UPDATE_SECURITY_ERROR"));
+});
+
+
+test("signed historical loader retains frozen 1.0.0 week policy and rejects old-byte tampering", async () => {
+  const fixture = await exactReleaseFixture(true);
+  assert.equal(fixture.reference.bundleVersion, "1.0.0");
+  assert.equal(fixture.reference.bundleManifestHash, "f9a35f36f124f76561a507b96b643f9493d7883f6e46af71b21209788bbe7d69");
+  const loaded = await loaderFor(fixture, fixture.assets).loadVerifiedExact(fixture.reference);
+  assert.equal(loaded.trusted, true);
+  if (!loaded.trusted) assert.fail("historical bundle was not authenticated");
+  assert.equal(loaded.bundle.manifest.version, "1.0.0");
+  assert.ok(Object.hasOwn((loaded.bundle.policy.labels as JsonObject).categories as JsonObject, "week"));
+  const files = new Map(fixture.mutableFiles);
+  files.set("policy.yml", new TextEncoder().encode(historicalPolicy.replace("^week::", "^weak::")));
+  await assertUpdateSecurity(() => loaderFor(fixture, withAssets(fixture, { files })).loadVerifiedExact(fixture.reference));
 });

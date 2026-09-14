@@ -1,0 +1,106 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { discoverRepository } from "../../src/git/repository.ts";
+import * as changes from "../../src/git/change-set.ts";
+import { typeLabelFromDiff } from "../../src/app/diff-labels.ts";
+import { GitFixture } from "../helpers/git-fixture.ts";
+
+test("reads label evidence from committed blobs, not the dirty working tree or commit title", async () => {
+  const fixture = await GitFixture.create();
+  try {
+    await fixture.commitFile("src/public.ts", "export function run() { return 1; }\n", "fix: misleading title");
+    const repository = await discoverRepository({ cwd: fixture.worktreePath, targetBranch: "main" });
+    await fixture.write("src/public.ts", "working tree is not committed evidence\n");
+    assert.equal(typeof changes.readCanonicalLabelDiff, "function");
+    const diff = await changes.readCanonicalLabelDiff(repository);
+    assert.equal(diff.sourceHeadSha, await fixture.head());
+    assert.equal(diff.targetRefSha, await fixture.targetHead());
+    assert.deepEqual(diff.items, [{
+      status: "added", newPath: "src/public.ts", binary: false, submodule: false,
+      after: "export function run() { return 1; }\n",
+    }]);
+    assert.equal(typeLabelFromDiff(diff.items), "type::feature");
+    assert.equal(Object.isFrozen(diff), true);
+    assert.equal(Object.isFrozen(diff.items[0]), true);
+  } finally { await fixture.dispose(); }
+});
+
+test("reads both sides of a committed comparison fix and supporting tests", async () => {
+  const fixture = await GitFixture.create();
+  try {
+    await fixture.commitFile("src/login.ts", "if (attempts > max) { return false; }\n", "baseline");
+    await fixture.git(["update-ref", "refs/remotes/origin/main", await fixture.head()]);
+    await fixture.write("src/login.ts", "if (attempts >= max) { return false; }\n");
+    await fixture.write("test/login.test.ts", "test('boundary', () => {});\n");
+    await fixture.commitAll("chore: misleading title");
+    const repository = await discoverRepository({ cwd: fixture.worktreePath, targetBranch: "main" });
+    assert.equal(typeof changes.readCanonicalLabelDiff, "function");
+    const diff = await changes.readCanonicalLabelDiff(repository);
+    assert.equal(typeLabelFromDiff(diff.items), "type::bug");
+    const source = diff.items.find((item) => "newPath" in item && item.newPath === "src/login.ts");
+    assert.equal(source?.before, "if (attempts > max) { return false; }\n");
+    assert.equal(source?.after, "if (attempts >= max) { return false; }\n");
+  } finally { await fixture.dispose(); }
+});
+
+test("binary content and symlinks cannot masquerade as readable documentation", async () => {
+  const fixture = await GitFixture.create();
+  try {
+    await fixture.write("docs/binary.md", Buffer.from([0, 255, 0, 1]));
+    await fixture.commitAll("docs");
+    const repository = await discoverRepository({ cwd: fixture.worktreePath, targetBranch: "main" });
+    assert.equal(typeof changes.readCanonicalLabelDiff, "function");
+    const diff = await changes.readCanonicalLabelDiff(repository);
+    assert.equal(typeLabelFromDiff(diff.items), null);
+    assert.equal(diff.items[0]?.after, undefined);
+  } finally { await fixture.dispose(); }
+});
+
+test("symlinks named as Markdown remain ambiguous and are never followed", async () => {
+  const { symlink } = await import("node:fs/promises");
+  const { resolve } = await import("node:path");
+  const fixture = await GitFixture.create();
+  try {
+    await symlink("src/modified.ts", resolve(fixture.worktreePath, "link.md"));
+    await fixture.commitAll("docs");
+    const repository = await discoverRepository({ cwd: fixture.worktreePath, targetBranch: "main" });
+    const diff = await changes.readCanonicalLabelDiff(repository);
+    assert.equal(typeLabelFromDiff(diff.items), null);
+    assert.equal(diff.items[0]?.after, undefined);
+  } finally { await fixture.dispose(); }
+});
+
+test("untrusted git attributes cannot make binary blobs classify as docs", async () => {
+  const fixture = await GitFixture.create();
+  try {
+    await fixture.commitFile(".gitattributes", "*.md diff\n", "attributes baseline");
+    await fixture.git(["update-ref", "refs/remotes/origin/main", await fixture.head()]);
+    await fixture.write("docs/binary.md", Buffer.from([97, 0, 98]));
+    await fixture.commitAll("docs");
+    const repository = await discoverRepository({ cwd: fixture.worktreePath, targetBranch: "main" });
+    const diff = await changes.readCanonicalLabelDiff(repository);
+    assert.equal(typeLabelFromDiff(diff.items), null);
+    assert.equal(diff.items[0]?.after, undefined);
+  } finally { await fixture.dispose(); }
+});
+
+test("reads renamed before/after blobs without matching other glob-like filenames", async () => {
+  const fixture = await GitFixture.create();
+  try {
+    await fixture.rename("src/rename-old.ts", "src/[new]*.ts");
+    await fixture.commitAll("refactor");
+    const repository = await discoverRepository({ cwd: fixture.worktreePath, targetBranch: "main" });
+    const diff = await changes.readCanonicalLabelDiff(repository);
+    assert.equal(typeLabelFromDiff(diff.items), "type::refactor");
+    assert.equal(diff.items[0]?.before, diff.items[0]?.after);
+  } finally { await fixture.dispose(); }
+});
+
+test("rejects oversized content before classifying or allocating an unbounded diff", async () => {
+  const fixture = await GitFixture.create();
+  try {
+    await fixture.commitFile("README.md", "x".repeat(1024 * 1024 + 1), "docs");
+    const repository = await discoverRepository({ cwd: fixture.worktreePath, targetBranch: "main" });
+    await assert.rejects(changes.readCanonicalLabelDiff(repository), { code: "REPOSITORY_ERROR" });
+  } finally { await fixture.dispose(); }
+});

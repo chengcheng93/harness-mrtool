@@ -1,4 +1,5 @@
 import { Ajv } from "ajv";
+import { SemVer } from "semver";
 
 import { isToolError, ToolError } from "../contracts/errors.ts";
 import {
@@ -441,8 +442,16 @@ function validatePolicy(bundle: JsonObject): void {
   const labels = asRecord(policy.labels, "label policy");
   exactFields(labels, new Set(["categories", "lifecycle"]), "label policy");
   const categories = asRecord(labels.categories, "label categories");
-  exactFields(categories, new Set(["week", "type", "priority", "status"]), "label categories");
-  for (const id of ["week", "type", "priority", "status"] as const) {
+  // Bundle 1.1 introduces the no-week policy without changing either wire schema.
+  // Keep earlier signed releases immutable; build metadata does not change policy,
+  // and prereleases of 1.1 already carry the new contract.
+  const manifest = asRecord(bundle.manifest, "manifest");
+  const version = new SemVer(manifest.version as string, { loose: false });
+  const categoryIds = version.compare("1.1.0-0") < 0
+    ? ["week", "type", "priority", "status"]
+    : ["type", "priority", "status"];
+  exactFields(categories, new Set(categoryIds), "label categories");
+  for (const id of categoryIds) {
     const category = asRecord(categories[id], `label category ${id}`);
     exactFields(category, new Set(["match", "required", "max"]), `label category ${id}`);
     if (category.match !== `^${id}::` || category.required !== true || category.max !== 1) {

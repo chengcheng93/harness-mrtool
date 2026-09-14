@@ -1,3 +1,5 @@
+import type { CanonicalLabelChangeSet } from "../../git/change-set.ts";
+import { selectMandatoryLabels, type LabelSelectionOptions } from "../../app/mandatory-labels.ts";
 import {
   createMergeRequest,
   type CreateMergeRequestResult,
@@ -14,9 +16,11 @@ import {
   type TransactionReadAudit,
   type TransactionStepOperation,
 } from "../../app/transaction-journal.ts";
-import { isRemoteMutationError, isRemoteReadError } from "../../app/remote-outcome.ts";
+import { isRemoteMutationError, isRemoteReadError, RemoteMutationError } from "../../app/remote-outcome.ts";
 import {
   updateMergeRequest,
+  validateUpdateMigration,
+  type UpdateMergeRequestMigration,
   type UpdateMergeRequestResult,
 } from "../../app/update-mr.ts";
 import {
@@ -51,6 +55,8 @@ import {
 import type { CliCommandExecution } from "../execute.ts";
 
 export interface PreparedMergeRequestCommandBase {
+  readonly labelDiff: CanonicalLabelChangeSet;
+  readonly labelOptions?: LabelSelectionOptions;
   readonly request: Request;
   readonly binding: ContextBinding;
   readonly bundle: LoadedTemplateBundle;
@@ -66,6 +72,7 @@ export interface PreparedCreateMergeRequestCommand extends PreparedMergeRequestC
 
 export interface PreparedUpdateMergeRequestCommand extends PreparedMergeRequestCommandBase {
   readonly initial: RemoteMergeRequest;
+  readonly migration?: UpdateMergeRequestMigration;
 }
 
 export interface PreparedVerifyMergeRequestCommand {
@@ -85,7 +92,7 @@ export interface MergeRequestCommandDomain {
 export interface MergeRequestCommandAdapterDependencies {
   readonly gitlabOrigin: string;
   readonly readCurrentBinding: (input: {
-    readonly operation: "create" | "update";
+    readonly operation: "create" | "update" | "migrate";
     readonly mrIid: number | null;
     readonly remote: MergeRequestRemote;
   }) => Promise<ContextBinding>;
@@ -172,11 +179,12 @@ function assertExactBinding(actual: ContextBinding, expected: ContextBinding): v
 }
 
 const PREPARED_BASE_FIELDS = [
-  "request", "binding", "bundle", "releaseTag", "cliVersion", "sourceBranch", "remote",
+  "request", "binding", "bundle", "releaseTag", "cliVersion", "sourceBranch", "remote", "labelDiff",
 ] as const;
 
 function assertPreparedFields(value: object, extra: string): void {
-  if (!exactFields(value as JsonObject, [...PREPARED_BASE_FIELDS, extra])) {
+  if (!exactFields(value as JsonObject, [...PREPARED_BASE_FIELDS, extra, ...("labelOptions" in value ? ["labelOptions"] : []),
+    ...(extra === "initial" && "migration" in value ? ["migration"] : [])])) {
     throw preparedInputFailure();
   }
 }
@@ -234,6 +242,8 @@ function snapshotPreparedBase(value: PreparedMergeRequestCommandBase) {
   }
   assertRemotePort(value.remote);
   return {
+    labelDiff: deepFreeze(copyJsonValue(value.labelDiff) as unknown as CanonicalLabelChangeSet),
+    ...(value.labelOptions === undefined ? {} : { labelOptions: deepFreeze(copyJsonValue(value.labelOptions) as unknown as LabelSelectionOptions) }),
     request: normalizeAndValidateRequest(copyJsonValue(value.request, "$request")),
     binding: snapshotBinding(value.binding),
     bundle: snapshotBundle(value.bundle),
@@ -254,7 +264,16 @@ function snapshotPreparedCreate(value: PreparedCreateMergeRequestCommand): Prepa
 
 function snapshotPreparedUpdate(value: PreparedUpdateMergeRequestCommand): PreparedUpdateMergeRequestCommand {
   assertPreparedFields(value, "initial");
-  return Object.freeze({ ...snapshotPreparedBase(value), initial: snapshotRemoteMergeRequest(value.initial) });
+  const base = snapshotPreparedBase(value);
+  const migration = value.migration === undefined ? undefined
+    : deepFreeze(copyJsonValue(value.migration, "$migration") as unknown as UpdateMergeRequestMigration);
+  if (migration !== undefined) {
+    if (migration === null || !exactFields(migration as unknown as JsonObject,
+      ["previousBundle", "previousReleaseTag", "confirmation", "oldHash", "newHash"])) throw preparedInputFailure();
+    validateUpdateMigration(migration, base.bundle, base.releaseTag);
+  }
+  return Object.freeze({ ...base, initial: snapshotRemoteMergeRequest(value.initial),
+    ...(migration === undefined ? {} : { migration }) });
 }
 
 function assertCurrentSelfConsistent(current: RemoteMergeRequest): void {
@@ -290,12 +309,15 @@ function snapshotPreparedVerify(value: PreparedVerifyMergeRequestCommand): Prepa
 }
 
 function preparedFingerprint(
-  value: PreparedMergeRequestCommandBase,
+  value: PreparedMergeRequestCommandBase & { readonly migration?: UpdateMergeRequestMigration },
   snapshot: ExternalContextSnapshot,
   mrIid: number | null,
 ): string {
   return canonicalizeJson({
     request: value.request,
+    ...(value.migration === undefined ? {} : { migration: value.migration }),
+    labelDiff: value.labelDiff,
+    ...(value.labelOptions === undefined ? {} : { labelOptions: value.labelOptions }),
     binding: value.binding,
     bundle: value.bundle,
     releaseTag: value.releaseTag,
@@ -347,7 +369,7 @@ function preparedInputFailure(): ToolError<"INTERNAL_ERROR"> {
 
 function assertPreparedBinding(
   prepared: PreparedMergeRequestCommandBase,
-  operation: "create" | "update",
+  operation: "create" | "update" | "migrate",
   snapshot: ExternalContextSnapshot,
   mrIid: number | null,
   gitlabOrigin: string,
@@ -791,6 +813,7 @@ function writeExecution(
   result: CreateMergeRequestResult | UpdateMergeRequestResult,
   candidates: readonly Candidate[],
   binding: ContextBinding,
+  prepared: PreparedMergeRequestCommandBase,
 ): CliCommandExecution {
   const data = copyJsonValue({
     command,
@@ -801,6 +824,10 @@ function writeExecution(
     completedWrites: result.completedWrites,
     recoveredUnknownOutcome: result.recoveredUnknownOutcome,
     selectedCandidates: selectedCandidates(candidates),
+    mandatoryLabels: selectMandatoryLabels({ diff: prepared.labelDiff, binding: result.final.snapshot,
+      inventory: result.final.snapshot.labelCandidates, intent: prepared.request.intent,
+      ...(prepared.labelOptions === undefined ? {} : { options: prepared.labelOptions }),
+    }),
     transaction: result.transaction,
     ...(command === "update" && "forcedDescriptionReplacement" in result
       ? { forcedDescriptionReplacement: result.forcedDescriptionReplacement }
@@ -1036,7 +1063,12 @@ function mutationGatedRemote(
   ): Promise<T> => {
     proof.pendingMutationCalls += 1;
     try {
-      await beforeMutation();
+      try { await beforeMutation(); }
+      catch {
+        // The guard failed before calling the transport. Never classify this as
+        // an uncertain remote mutation or perform create-outcome recovery.
+        throw new RemoteMutationError("rejected", "conflict", null);
+      }
       const attempt: MutationAttemptProof = {
         sequence: ++callSequence,
         method,
@@ -1171,7 +1203,7 @@ export function createMergeRequestCommandAdapter(
   const prepareWrite = async <Prepared extends PreparedMergeRequestCommandBase>(
     prepare: () => Promise<Prepared>,
     snapshotPrepared: (prepared: Prepared) => Prepared,
-    operation: "create" | "update",
+    writeOperation: "create" | "update",
     snapshotOf: (prepared: Prepared) => ExternalContextSnapshot,
     mrIid: (prepared: Prepared) => number | null,
   ): Promise<{
@@ -1183,10 +1215,20 @@ export function createMergeRequestCommandAdapter(
   }> => {
     const supplied = await prepare();
     const suppliedRemote = supplied.remote;
-    const prepared = snapshotPrepared(supplied);
-    const expectedSnapshot = snapshotOf(prepared);
+    const original = snapshotPrepared(supplied);
+    const operation = writeOperation === "update" && "migration" in original && original.migration !== undefined
+      ? "migrate" : writeOperation;
+    const expectedSnapshot = snapshotOf(original);
+    const selection = selectMandatoryLabels({ diff: original.labelDiff, binding: expectedSnapshot,
+      inventory: expectedSnapshot.labelCandidates, intent: original.request.intent,
+      ...(original.labelOptions === undefined ? {} : { options: original.labelOptions }),
+    });
+    const prepared = { ...original, request: normalizeAndValidateRequest({ ...original.request,
+      title: { ...original.request.title, type: selection.titleType },
+    }) };
+
     const expectedMrIid = mrIid(prepared);
-    const fingerprint = preparedFingerprint(prepared, expectedSnapshot, expectedMrIid);
+    const fingerprint = preparedFingerprint(original, expectedSnapshot, expectedMrIid);
     const assertUnchanged = (): void => {
       const current = snapshotPrepared(supplied);
       if (current.remote !== suppliedRemote ||
@@ -1264,6 +1306,8 @@ export function createMergeRequestCommandAdapter(
         () => null,
       );
       const domainResult = await domain.create({
+        labelDiff: prepared.labelDiff,
+        ...(prepared.labelOptions === undefined ? {} : { labelOptions: prepared.labelOptions }),
         request: prepared.request,
         initialSnapshot: prepared.initialSnapshot,
         resolvedCandidates: candidates,
@@ -1285,7 +1329,7 @@ export function createMergeRequestCommandAdapter(
         candidates,
         proof,
       );
-      return writeExecution(validated.command, validated.result, candidates, prepared.binding);
+      return writeExecution(validated.command, validated.result, candidates, prepared.binding, prepared);
     },
 
     async update(input: UpdateMergeRequestCommandInput): Promise<CliCommandExecution> {
@@ -1297,6 +1341,8 @@ export function createMergeRequestCommandAdapter(
         (value) => value.initial.iid,
       );
       const domainResult = await domain.update({
+        labelDiff: prepared.labelDiff,
+        ...(prepared.labelOptions === undefined ? {} : { labelOptions: prepared.labelOptions }),
         request: prepared.request,
         initial: prepared.initial,
         resolvedCandidates: candidates,
@@ -1308,6 +1354,7 @@ export function createMergeRequestCommandAdapter(
         gitlabOrigin: dependencies.gitlabOrigin,
         verificationReceiptWriter: dependencies.verificationReceiptWriter,
         forceReplaceDescription: input.forceReplaceDescription,
+        ...(prepared.migration === undefined ? {} : { migration: prepared.migration }),
       });
       const validated = validateSuccessfulWrite(
         domainResult,
@@ -1318,7 +1365,7 @@ export function createMergeRequestCommandAdapter(
         candidates,
         proof,
       );
-      return writeExecution(validated.command, validated.result, candidates, prepared.binding);
+      return writeExecution(validated.command, validated.result, candidates, prepared.binding, prepared);
     },
 
     async verify(input: VerifyMergeRequestCommandInput): Promise<CliCommandExecution> {

@@ -28,6 +28,8 @@ import {
   type DiagnosticMarkerMetadata,
 } from "../../src/render/marker.ts";
 
+import { loadHistoricalTemplateBundle } from "../helpers/historical-template-bundle.ts";
+
 const repositoryRoot = resolve(import.meta.dirname, "../..");
 const OLD_HASH = "f9a35f36f124f76561a507b96b643f9493d7883f6e46af71b21209788bbe7d69";
 
@@ -59,13 +61,11 @@ function markerBody(): string {
 }
 
 async function fixtureBundle(): Promise<LoadedTemplateBundle> {
-  return loadTemplateBundle(resolve(repositoryRoot, "template-bundle"));
+  return loadHistoricalTemplateBundle();
 }
 
 async function nextBundle(): Promise<{ readonly bundle: LoadedTemplateBundle; readonly hash: string }> {
-  const current = await fixtureBundle();
-  const bundle = structuredClone(current) as LoadedTemplateBundle;
-  (bundle.manifest as { version: string }).version = "1.1.0";
+  const bundle = await loadTemplateBundle(resolve(repositoryRoot, "template-bundle"));
   validateTemplateBundle(bundle);
   // The application hash contract includes the canonical manifest's final LF.
   const hash = sha256Utf8(`${canonicalizeJson(bundle.manifest)}\n`);
@@ -132,6 +132,7 @@ function descriptionForBundle(description: string, bundle: LoadedTemplateBundle,
   const encoded = description.match(/harness-mrtool:v1 ([A-Za-z0-9_-]+) -->\n$/u)?.[1];
   if (encoded === undefined) throw new Error("test marker missing");
   const metadata = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Record<string, unknown>;
+  metadata.releaseTag = `templates-v${bundle.manifest.version}`;
   metadata.bundleVersion = bundle.manifest.version;
   metadata.bundleManifestHash = hash;
   const body = description.slice(0, description.indexOf("<!-- harness-mrtool:v1"));

@@ -920,7 +920,7 @@ test("discovers tokenized live candidates while keeping lifecycle labels derived
       store,
     });
 
-    assert.deepEqual(context.requiredLabelCategories, ["week", "type", "priority"]);
+    assert.deepEqual(context.requiredLabelCategories, ["type", "priority"]);
     assert.deepEqual({
       sourceProject: context.binding.sourceProject,
       sourceBranch: context.binding.sourceBranch,
@@ -931,7 +931,7 @@ test("discovers tokenized live candidates while keeping lifecycle labels derived
       targetRefSha: "a".repeat(40),
     });
     assert.deepEqual(context.labelCandidates.map((candidate) => candidate.name), [
-      "priority::p1", "type::bug", "week::2026-w32-0803-0809",
+      "priority::p1", "type::bug",
     ]);
     assert.equal(context.labelCandidates.some((candidate) => candidate.name.startsWith("status::")), false);
     assert.equal(context.userCandidates.filter((candidate) => candidate.kind === "assignee").length, 3);

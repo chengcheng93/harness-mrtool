@@ -7,6 +7,8 @@ import test from "node:test";
 // @ts-expect-error The build script intentionally has no declaration file.
 import { createApplicationBuildOptions } from "../../scripts/build.mjs";
 
+import bundleManifest from "../../template-bundle/bundle-manifest.json" with { type: "json" };
+
 const repositoryRoot = resolve(import.meta.dirname, "../..");
 
 test("build injects the package version and verified Bundle as compile-time constants", () => {
@@ -23,7 +25,7 @@ test("build injects the package version and verified Bundle as compile-time cons
     };
   };
   assert.equal(embeddedBundle.manifest.bundleId, "harness-mr-default");
-  assert.equal(embeddedBundle.manifest.version, "1.0.0");
+  assert.equal(embeddedBundle.manifest.version, bundleManifest.version);
   assert.equal(embeddedBundle.manifest.files.length, 9);
 });
 

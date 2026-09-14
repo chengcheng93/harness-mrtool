@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { link, lstat, mkdtemp, readdir, readFile, rename, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import { link, lstat, mkdtemp, realpath, readdir, readFile, rename, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import test from "node:test";
@@ -208,7 +208,7 @@ test("rejects a blank state directory before resolving or touching disk", () => 
 });
 
 test("stores and reloads a validated receipt under its exact locator digest", async (t) => {
-  const stateDirectory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-receipt-store-"));
+  const stateDirectory = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-receipt-store-"));
   t.after(async () => rm(stateDirectory, { recursive: true, force: true }));
   const receipt = receiptFixture();
   const locator = locatorFor(receipt);
@@ -247,7 +247,7 @@ test("stores and reloads a validated receipt under its exact locator digest", as
 });
 
 test("records safe corruption evidence without moving non-canonical receipt bytes", async (t) => {
-  const stateDirectory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-receipt-corrupt-"));
+  const stateDirectory = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-receipt-corrupt-"));
   t.after(async () => rm(stateDirectory, { recursive: true, force: true }));
   const receipt = receiptFixture();
   const locator = locatorFor(receipt);
@@ -273,7 +273,7 @@ test("records safe corruption evidence without moving non-canonical receipt byte
 });
 
 test("records one deterministic evidence file for repeated reads of the same corruption", async (t) => {
-  const stateDirectory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-receipt-evidence-once-"));
+  const stateDirectory = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-receipt-evidence-once-"));
   t.after(async () => rm(stateDirectory, { recursive: true, force: true }));
   const receipt = receiptFixture();
   const locator = locatorFor(receipt);
@@ -295,7 +295,7 @@ test("records one deterministic evidence file for repeated reads of the same cor
 });
 
 test("preserves and resumes a pending evidence file after a handled write failure", async (t) => {
-  const stateDirectory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-receipt-evidence-failure-"));
+  const stateDirectory = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-receipt-evidence-failure-"));
   t.after(async () => rm(stateDirectory, { recursive: true, force: true }));
   const receipt = receiptFixture();
   const locator = locatorFor(receipt);
@@ -334,7 +334,7 @@ test("preserves and resumes a pending evidence file after a handled write failur
 });
 
 test("caps store-wide corruption evidence without moving repeatedly tampered source bytes", async (t) => {
-  const stateDirectory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-receipt-evidence-cap-"));
+  const stateDirectory = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-receipt-evidence-cap-"));
   t.after(async () => rm(stateDirectory, { recursive: true, force: true }));
   const receipt = receiptFixture();
   const locator = locatorFor(receipt);
@@ -375,7 +375,7 @@ test("caps store-wide corruption evidence without moving repeatedly tampered sou
 });
 
 test("fails closed before creating evidence when the directory scan hard limit is exceeded", async (t) => {
-  const stateDirectory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-receipt-scan-cap-"));
+  const stateDirectory = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-receipt-scan-cap-"));
   t.after(async () => rm(stateDirectory, { recursive: true, force: true }));
   const receipt = receiptFixture();
   const locator = locatorFor(receipt);
@@ -404,7 +404,7 @@ test("fails closed before creating evidence when the directory scan hard limit i
 });
 
 test("never moves an active replacement when identity diverges at the evidence boundary", async (t) => {
-  const stateDirectory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-receipt-evidence-race-"));
+  const stateDirectory = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-receipt-evidence-race-"));
   t.after(async () => rm(stateDirectory, { recursive: true, force: true }));
   const receipt = receiptFixture();
   const locator = locatorFor(receipt);
@@ -442,7 +442,7 @@ test("never moves an active replacement when identity diverges at the evidence b
 });
 
 test("detects a receipt path replacement after opening without quarantining the replacement", async (t) => {
-  const stateDirectory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-receipt-race-"));
+  const stateDirectory = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-receipt-race-"));
   t.after(async () => rm(stateDirectory, { recursive: true, force: true }));
   const receipt = receiptFixture();
   const locator = locatorFor(receipt);
@@ -481,7 +481,7 @@ test("detects a receipt path replacement after opening without quarantining the 
 });
 
 test("detects same-inode timestamp mutation after opening and does not record stale evidence", async (t) => {
-  const stateDirectory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-receipt-in-place-"));
+  const stateDirectory = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-receipt-in-place-"));
   t.after(async () => rm(stateDirectory, { recursive: true, force: true }));
   const receipt = receiptFixture();
   const locator = locatorFor(receipt);
@@ -514,7 +514,7 @@ test("detects same-inode timestamp mutation after opening and does not record st
 });
 
 test("rejects a hard-linked receipt while preserving both links and recording evidence", async (t) => {
-  const stateDirectory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-receipt-hardlink-"));
+  const stateDirectory = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-receipt-hardlink-"));
   t.after(async () => rm(stateDirectory, { recursive: true, force: true }));
   const receipt = receiptFixture();
   const locator = locatorFor(receipt);
@@ -537,7 +537,7 @@ test("rejects a hard-linked receipt while preserving both links and recording ev
 });
 
 test("create-once storage is idempotent for an exact receipt and rejects a conflicting receipt", async (t) => {
-  const stateDirectory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-receipt-immutable-"));
+  const stateDirectory = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-receipt-immutable-"));
   t.after(async () => rm(stateDirectory, { recursive: true, force: true }));
   const original = receiptFixture();
   const conflicting = validateVerificationReceipt({
@@ -569,7 +569,7 @@ test("create-once storage is idempotent for an exact receipt and rejects a confl
 });
 
 test("re-establishes file and directory durability before idempotent hard-link success after restart", async (t) => {
-  const stateDirectory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-receipt-idempotent-sync-"));
+  const stateDirectory = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-receipt-idempotent-sync-"));
   t.after(async () => rm(stateDirectory, { recursive: true, force: true }));
   const receipt = receiptFixture();
   let crashed = false;
@@ -610,7 +610,7 @@ test("re-establishes file and directory durability before idempotent hard-link s
 });
 
 test("write-through move publishes once and refreshes an exact final without republishing", async (t) => {
-  const stateDirectory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-receipt-move-publish-"));
+  const stateDirectory = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-receipt-move-publish-"));
   t.after(async () => rm(stateDirectory, { recursive: true, force: true }));
   const receipt = receiptFixture();
   const names = receiptNames(locatorFor(receipt));
@@ -642,7 +642,7 @@ test("write-through move publishes once and refreshes an exact final without rep
 });
 
 test("recovers an initial durable write-through pending receipt after restart", async (t) => {
-  const stateDirectory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-receipt-move-recovery-"));
+  const stateDirectory = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-receipt-move-recovery-"));
   t.after(async () => rm(stateDirectory, { recursive: true, force: true }));
   const receipt = receiptFixture();
   const locator = locatorFor(receipt);
@@ -682,7 +682,7 @@ test("recovers an initial durable write-through pending receipt after restart", 
 });
 
 test("idempotent write-through durability faults leave the final loadable without republishing", async (t) => {
-  const stateDirectory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-receipt-final-recovery-"));
+  const stateDirectory = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-receipt-final-recovery-"));
   t.after(async () => rm(stateDirectory, { recursive: true, force: true }));
   const receipt = receiptFixture();
   const locator = locatorFor(receipt);
@@ -730,7 +730,7 @@ test("idempotent write-through durability faults leave the final loadable withou
 });
 
 test("preserves an exact pending prefix after failure and resumes it without deletion", async (t) => {
-  const stateDirectory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-receipt-create-failure-"));
+  const stateDirectory = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-receipt-create-failure-"));
   t.after(async () => rm(stateDirectory, { recursive: true, force: true }));
   const receipt = receiptFixture();
   const locator = locatorFor(receipt);
@@ -776,7 +776,7 @@ test("preserves an exact pending prefix after failure and resumes it without del
 });
 
 test("never writes through or removes a replacement installed at the pending path", async (t) => {
-  const stateDirectory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-receipt-pending-race-"));
+  const stateDirectory = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-receipt-pending-race-"));
   t.after(async () => rm(stateDirectory, { recursive: true, force: true }));
   const receipt = receiptFixture();
   const locator = locatorFor(receipt);
@@ -810,7 +810,7 @@ test("never writes through or removes a replacement installed at the pending pat
 });
 
 test("atomic publication never overwrites or removes an existing final-path replacement", async (t) => {
-  const stateDirectory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-receipt-publish-race-"));
+  const stateDirectory = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-receipt-publish-race-"));
   t.after(async () => rm(stateDirectory, { recursive: true, force: true }));
   const receipt = receiptFixture();
   const locator = locatorFor(receipt);
@@ -841,7 +841,7 @@ test("atomic publication never overwrites or removes an existing final-path repl
 });
 
 test("never links, overwrites, or removes a replacement installed at the link source", async (t) => {
-  const stateDirectory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-receipt-link-source-race-"));
+  const stateDirectory = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-receipt-link-source-race-"));
   t.after(async () => rm(stateDirectory, { recursive: true, force: true }));
   const receipt = receiptFixture();
   const locator = locatorFor(receipt);
@@ -876,7 +876,7 @@ test("never links, overwrites, or removes a replacement installed at the link so
 });
 
 test("never accepts or removes a source replacement installed inside the publisher gap", async (t) => {
-  const stateDirectory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-receipt-publisher-source-race-"));
+  const stateDirectory = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-receipt-publisher-source-race-"));
   t.after(async () => rm(stateDirectory, { recursive: true, force: true }));
   const receipt = receiptFixture();
   const locator = locatorFor(receipt);
@@ -911,7 +911,7 @@ test("never accepts or removes a source replacement installed inside the publish
 });
 
 test("preserves every path and fails closed when final diverges after a successful link", async (t) => {
-  const stateDirectory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-receipt-post-link-race-"));
+  const stateDirectory = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-receipt-post-link-race-"));
   t.after(async () => rm(stateDirectory, { recursive: true, force: true }));
   const receipt = receiptFixture();
   const locator = locatorFor(receipt);
@@ -946,7 +946,7 @@ test("preserves every path and fails closed when final diverges after a successf
 });
 
 test("rechecks the publication witness after directory sync and preserves a late replacement", async (t) => {
-  const stateDirectory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-receipt-post-sync-race-"));
+  const stateDirectory = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-receipt-post-sync-race-"));
   t.after(async () => rm(stateDirectory, { recursive: true, force: true }));
   const receipt = receiptFixture();
   const locator = locatorFor(receipt);
@@ -981,7 +981,7 @@ test("rechecks the publication witness after directory sync and preserves a late
 });
 
 test("does not load a full-length pending receipt until a restart fsyncs and publishes it", async (t) => {
-  const stateDirectory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-receipt-prefsync-crash-"));
+  const stateDirectory = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-receipt-prefsync-crash-"));
   t.after(async () => rm(stateDirectory, { recursive: true, force: true }));
   const receipt = receiptFixture();
   const locator = locatorFor(receipt);
@@ -1017,7 +1017,7 @@ test("does not load a full-length pending receipt until a restart fsyncs and pub
 });
 
 test("rejects a final receipt whose required pending publication witness is missing", async (t) => {
-  const stateDirectory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-receipt-missing-witness-"));
+  const stateDirectory = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-receipt-missing-witness-"));
   t.after(async () => rm(stateDirectory, { recursive: true, force: true }));
   const receipt = receiptFixture();
   const locator = locatorFor(receipt);
@@ -1039,11 +1039,11 @@ test("rejects a final receipt whose required pending publication witness is miss
 });
 
 test("concurrent writers share one OS lock and cannot overwrite a published receipt", async (t) => {
-  if (process.platform !== "win32" && process.platform !== "linux") {
+  if (process.platform !== "win32" && process.platform !== "linux" && process.platform !== "darwin") {
     t.skip("system process locks are unavailable on this platform");
     return;
   }
-  const stateDirectory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-receipt-writers-"));
+  const stateDirectory = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-receipt-writers-"));
   t.after(async () => rm(stateDirectory, { recursive: true, force: true }));
   const original = receiptFixture();
   const conflicting = validateVerificationReceipt({
@@ -1096,11 +1096,11 @@ test("concurrent writers share one OS lock and cannot overwrite a published rece
 });
 
 test("a reader waits for the writer's OS-lock publication before loading", async (t) => {
-  if (process.platform !== "win32" && process.platform !== "linux") {
+  if (process.platform !== "win32" && process.platform !== "linux" && process.platform !== "darwin") {
     t.skip("system process locks are unavailable on this platform");
     return;
   }
-  const stateDirectory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-receipt-reader-writer-"));
+  const stateDirectory = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-receipt-reader-writer-"));
   t.after(async () => rm(stateDirectory, { recursive: true, force: true }));
   const receipt = receiptFixture();
   const locator = locatorFor(receipt);
@@ -1144,7 +1144,7 @@ test("a reader waits for the writer's OS-lock publication before loading", async
 });
 
 test("returns null unless origin, target project, IID, and marker digest locate an exact receipt", async (t) => {
-  const stateDirectory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-receipt-locator-"));
+  const stateDirectory = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-receipt-locator-"));
   t.after(async () => rm(stateDirectory, { recursive: true, force: true }));
   const receipt = receiptFixture();
   const locator = locatorFor(receipt);
@@ -1175,7 +1175,7 @@ test("rejects standard bearer credentials before opening any store file", async 
     "JOB-TOKEN: persisted-secret-value",
     "Job-Token = persisted-secret-value",
   ]) {
-    const stateDirectory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-receipt-secret-"));
+    const stateDirectory = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-receipt-secret-"));
     t.after(async () => rm(stateDirectory, { recursive: true, force: true }));
     const receipt = receiptFixture();
     const unsafe = {
@@ -1202,7 +1202,7 @@ test("rejects standard bearer credentials before opening any store file", async 
 test("records evidence for duplicate keys, locator-bound receipt tampering, and oversized bytes", async (t) => {
   const scenarios = ["duplicate", "binding", "oversized"] as const;
   for (const scenario of scenarios) {
-    const stateDirectory = await mkdtemp(resolve(tmpdir(), `harness-mrtool-receipt-${scenario}-`));
+    const stateDirectory = await mkdtemp(resolve(await realpath(tmpdir()), `harness-mrtool-receipt-${scenario}-`));
     t.after(async () => rm(stateDirectory, { recursive: true, force: true }));
     const receipt = receiptFixture();
     const locator = locatorFor(receipt);
@@ -1233,7 +1233,7 @@ test("records evidence for duplicate keys, locator-bound receipt tampering, and 
 });
 
 test("records linked-receipt evidence without reading, moving, or changing its target", async (t) => {
-  const stateDirectory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-receipt-link-"));
+  const stateDirectory = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-receipt-link-"));
   t.after(async () => rm(stateDirectory, { recursive: true, force: true }));
   const receipt = receiptFixture();
   const locator = locatorFor(receipt);

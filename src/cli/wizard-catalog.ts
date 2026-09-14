@@ -2,11 +2,13 @@ import type { DiscoveredContext } from "../app/get-context.ts";
 import type { LoadedTemplateBundle } from "../bundle/load.ts";
 import { validateTemplateBundle } from "../bundle/validate.ts";
 import { ToolError } from "../contracts/errors.ts";
-import type { JsonObject, JsonValue } from "../contracts/jcs.ts";
+import type { CanonicalLabelChangeSet } from "../git/change-set.ts";
+import { copyJsonValue, type JsonObject, type JsonValue } from "../contracts/jcs.ts";
 import type { WizardCatalog } from "./wizard.ts";
 
 export interface BuildWizardCatalogInput {
   readonly bundle: LoadedTemplateBundle;
+  readonly labelDiff?: CanonicalLabelChangeSet;
   readonly discovered: DiscoveredContext;
   readonly suggestedProfileIds: readonly string[];
   readonly confirmations: WizardCatalog["confirmations"];
@@ -79,6 +81,17 @@ export function buildWizardCatalog(input: BuildWizardCatalogInput): WizardCatalo
       .map((entry) => ({ id: text(entry.id), label: text(entry.label) }));
 
     const catalog: WizardCatalog = {
+      ...(input.labelDiff === undefined ? {} : {
+        automaticLabels: copyJsonValue({
+          diff: input.labelDiff,
+          binding: {
+            sourceHeadSha: input.discovered.snapshot.sourceHeadSha,
+            targetRefSha: input.discovered.snapshot.targetRefSha,
+            mergeBaseSha: input.discovered.snapshot.mergeBaseSha,
+          },
+          inventory: input.discovered.snapshot.labelCandidates.map(({ id, name }) => ({ id, name })),
+        }) as unknown as NonNullable<WizardCatalog["automaticLabels"]>,
+      }),
       contextId: input.discovered.contextId,
       issueIid: input.discovered.snapshot.issue.kind === "linked"
         ? input.discovered.snapshot.issue.iid
@@ -109,6 +122,7 @@ export function buildWizardCatalog(input: BuildWizardCatalogInput): WizardCatalo
         scopeKind: candidate.scopeKind,
         scopePath: candidate.scopePath,
         currentlyApplied: candidate.currentlyApplied,
+        defaultSelected: candidate.defaultSelected,
       })),
       userCandidates: input.discovered.userCandidates.map((candidate) => ({ ...candidate })),
       confirmations: input.confirmations === null ? null : { ...input.confirmations },

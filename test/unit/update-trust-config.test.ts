@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash, createPublicKey } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
@@ -40,9 +41,15 @@ function assertSecurityError(action: () => unknown): void {
   assert.throws(action, (error: unknown) => isToolError(error, "UPDATE_SECURITY_ERROR"));
 }
 
-test("production trust is source-pinned and fails closed until reviewed roots exist", () => {
-  assert.deepEqual(PRODUCTION_UPDATE_BOOTSTRAP_KEYS, []);
-  assert.deepEqual(PRODUCTION_UPDATE_BOOTSTRAP_KEY_FINGERPRINTS, []);
+test("production trust validates reviewed source-pinned roots and rejects caller replacements", () => {
+  assert.ok(PRODUCTION_UPDATE_BOOTSTRAP_KEYS.length > 0);
+  assert.equal(PRODUCTION_UPDATE_BOOTSTRAP_KEY_FINGERPRINTS.length, PRODUCTION_UPDATE_BOOTSTRAP_KEYS.length);
+  for (const [index, key] of PRODUCTION_UPDATE_BOOTSTRAP_KEYS.entries()) {
+    const publicKey = createPublicKey({ key: Buffer.from(key.publicKeySpki, "base64url"), format: "der", type: "spki" });
+    assert.equal(publicKey.asymmetricKeyType, "ed25519");
+    assert.equal(createHash("sha256").update(publicKey.export({ format: "der", type: "spki" })).digest("hex"),
+      PRODUCTION_UPDATE_BOOTSTRAP_KEY_FINGERPRINTS[index]);
+  }
   assert.equal(PRODUCTION_UPDATE_REPOSITORY.owner, "chengcheng93");
   assert.equal(PRODUCTION_UPDATE_REPOSITORY.name, "harness-mrtool");
   assert.equal(PRODUCTION_UPDATE_PAGES_ORIGIN, "https://chengcheng93.github.io");
@@ -51,7 +58,10 @@ test("production trust is source-pinned and fails closed until reviewed roots ex
     "https://chengcheng93.github.io/harness-mrtool/stable.envelope.json",
   );
 
-  assertSecurityError(() => createProductionUpdateTrustConfig());
+  const production = createProductionUpdateTrustConfig();
+  assert.equal(production.testOnly, false);
+  assert.deepEqual(production.bootstrapKeys, PRODUCTION_UPDATE_BOOTSTRAP_KEYS);
+  assert.deepEqual(parseProductionUpdateTrustConfig(JSON.parse(canonicalUpdateTrustConfigJson(production))), production);
   assertSecurityError(() => (createProductionUpdateTrustConfig as (...args: unknown[]) => unknown)(
     [signingKey()],
   ));

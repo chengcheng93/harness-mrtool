@@ -523,7 +523,34 @@ async function quarantine(path: string, parent: string): Promise<string> {
   await assertPlainDirectory(parent);
   const destination = `${path}.corrupt.${randomSuffix()}`;
   try {
-    await rename(path, destination);
+    if (process.platform === "darwin" && (await lstat(path)).isDirectory()) {
+      // macOS cannot rename a sealed directory. Change only the checked open
+      // directory, never chmod a pathname that could resolve through a link.
+      const before = await assertPlainDirectory(path);
+      const handle = await open(path, READ_ONLY_FLAGS);
+      let reseal = false;
+      try {
+        const opened = await handle.stat({ bigint: true });
+        if (!opened.isDirectory() || !identityEqual(before, opened)) return fail();
+        reseal = true;
+        await handle.chmod(0o700);
+        const current = await assertPlainDirectory(path);
+        if (!identityEqual(opened, current)) return fail();
+        await rename(path, destination);
+      } finally {
+        try {
+          if (reseal) {
+            await handle.chmod(Number(before.mode) & 0o777);
+            await ignoreUnsupportedDirectorySync(handle);
+          }
+        } finally {
+          await handle.close();
+        }
+      }
+    } else {
+      // Rename links themselves without opening or modifying their targets.
+      await rename(path, destination);
+    }
     await syncDirectory(parent);
     return destination;
   } catch {
@@ -892,9 +919,33 @@ export class UpdateCache {
       for (const name of RELEASE_FILES) {
         await chmod(paths[name], 0o400);
       }
-      await chmod(stagingDirectory, 0o500);
-      await syncDirectory(stagingDirectory);
-      await rename(stagingDirectory, releaseDirectory);
+      if (process.platform === "darwin") {
+        // macOS requires write permission on the directory being renamed.
+        // Pin its identity, rename while private, then seal through the open
+        // descriptor so a substituted pathname can never redirect chmod.
+        const before = await assertPlainDirectory(stagingDirectory);
+        const handle = await open(stagingDirectory, READ_ONLY_FLAGS);
+        try {
+          const opened = await handle.stat({ bigint: true });
+          if (!opened.isDirectory() || !identityEqual(before, opened)) return fail();
+          await ignoreUnsupportedDirectorySync(handle);
+          await rename(stagingDirectory, releaseDirectory);
+          await this.faultInjector?.hit("after-release-rename-before-seal");
+          const current = await assertPlainDirectory(releaseDirectory);
+          if (!identityEqual(opened, current)) return fail();
+          await handle.chmod(0o500);
+          await ignoreUnsupportedDirectorySync(handle);
+        } finally {
+          await handle.close();
+        }
+        // A crash before sealing leaves an unreferenced writable directory,
+        // which readRelease (including staged recovery) refuses to activate.
+        await this.readRelease(snapshot.record);
+      } else {
+        await chmod(stagingDirectory, 0o500);
+        await syncDirectory(stagingDirectory);
+        await rename(stagingDirectory, releaseDirectory);
+      }
       await syncDirectory(this.releaseRoot);
       await atomicWrite(
         this.activeRecordPath,

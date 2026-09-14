@@ -5,7 +5,7 @@
 `harness-mrtool` 现在采用双通道：
 
 - 默认 SSH-first：本地生成 MR 内容，通过 SSH 推送分支，再由用户在 GitLab 网页创建 MR。
-- 可选 SSH Push Options：显式使用 `--ssh-mr` 请求 GitLab 创建基础 MR；Draft 请求会额外发送 `merge_request.draft`。
+- SSH MR 创建禁用：`manual --ssh-mr` 返回 `LABEL_ERROR`，在 push 规划或执行前停止。
 - API 完整模式：显式使用 `--auth api`，用于实时标签、负责人、审核人、已有 MR 更新和回读验证。
 
 GitLab Token 不再是普通提交流程的前置条件。SSH 只负责 Git 传输，不会替代 GitLab API 的实时元数据能力。
@@ -20,6 +20,9 @@ codex plugin add harness-mrtool@harness-mrtool
 ```
 
 安装后新开一个 Codex task/thread。进入目标 Git 仓库后使用“准备当前分支的 merge request”。
+
+源码运行精确固定 Node `24.16.0`。macOS native process lock 依赖 Perl 的
+`flock`；这不代表已声明 macOS 发布平台验收通过。
 
 ## 一次性配置 SSH
 
@@ -59,30 +62,13 @@ harness-mrtool manual --auth ssh --input request.json --input-format json --outp
 harness-mrtool manual --auth ssh --input request.json --input-format json --push --output json
 ```
 
-成功推送后，在 GitLab 网页中选择源分支和目标分支，粘贴标题/正文，然后手动选择标签、负责人和审核人。
+普通 SSH push 只更新分支，不代表 MR 标签已完成。强制标签池使用一个类型、默认 `priority::p2` 和一个状态标签，不包含排期标签。需要由工具创建 MR 时必须经过 API 标签写入和回读链路；默认 production 入口已接入 create/update/upsert/verify 和自动标签向导，但这不是已发布或真实 GitLab 验收声明。不能用 SSH 基础 MR 创建替代。
 
-## SSH Push Options（显式可选）
+## SSH MR 创建已禁用
 
-仅当目标 GitLab 支持 Push Options，且 Git 版本为 2.18 或更高时使用：
-
-```text
-harness-mrtool manual --auth ssh --ssh-mr --input request.json --input-format json --output json
-harness-mrtool manual --auth ssh --ssh-mr --input request.json --input-format json --push --output json
-```
-
-工具只生成以下选项：
-
-- `merge_request.create`
-- `merge_request.target=<branch>`
-- `merge_request.title=<title>`
-- `merge_request.description=<description>`
-- `merge_request.draft`（仅 Draft 请求）
-
-工具不会通过 SSH Push Options 发送标签、负责人、审核人、目标项目、自动合并或删除源分支选项。原因是标签选项可能自动创建不存在的标签，且 Push Options 没有完整的审核人和回读能力。
-
-输出状态为 `mrCreation=requested-unverified` 时，只能表示“已请求 GitLab 创建”，不能表示已验证创建。必须打开 GitLab 网页确认 MR 存在，再补充标签和审核人。
-
-如果远端分支已经等于本地 SHA，工具会拒绝 `--ssh-mr`，因为没有新的 push 事件可以触发 GitLab MR 创建。此时使用普通 `manual --push` 或直接在网页创建 MR。
+`manual --ssh-mr` 返回 `LABEL_ERROR`，在规划或执行 push 之前停止。
+SSH-only 路径没有标签库存校验和完整回读能力，因此不能声称满足强制标签流程。
+不再提供无标签的 `merge_request.create` 绕过路径。
 
 ## API 完整模式
 
@@ -100,6 +86,19 @@ harness-mrtool preview --auth api --client codex-skill --client-version <skill-s
 harness-mrtool create --auth api --client codex-skill --client-version <skill-semver> --skill-protocol <protocol> --input - --input-format json --output json
 ```
 
+API 标签规则见[标签选择策略](label-selection-policy.md)：Bundle `1.1.0` 固定
+14 标签池，最终恰好 type/priority/status 各一个；默认 p2，提升至 p0/p1 必须
+提供理由，Draft/Ready 对应 doing/review。更新移除额外标签和 week 标签；
+所需标签必须已存在，CLI 不会自动创建远端标签。类型来自绑定 HEAD/target/
+merge-base 的真实 canonical diff；未知类型必须显式确认并绑定 CLI digest，
+不能用标题提示代替。向导自动接入相同规则。
+
+`preview` 和 API create/update `--dry-run` 无远端写入且不消费候选 context，
+但仍可进行实时读取。`create --upsert` 认证已有 MR 的 receipt；Bundle 不同
+时使用 `context --mr <iid>` 后 `update <iid>` 或显式迁移，不静默回退当前
+Bundle。可信旧签名 policy 仍可读取；迁移 adapter 正在单独补齐，不在此
+宣称完成或验收。这些保证仅覆盖 mrtool，不限制原始 Git/API 或网页操作。
+
 Token 不得进入命令行参数、Remote URL、Request、日志、MR 正文或聊天消息。使用结束后清理当前会话：
 
 ```powershell
@@ -112,9 +111,8 @@ Remove-Item Env:HARNESS_MRTOOL_GITLAB_HOST
 | 状态 | 含义 | 操作 |
 | --- | --- | --- |
 | `manual` | 本地生成内容和普通 SSH 推送计划 | 确认后 `--push`，再在网页创建 MR |
-| `ssh-mr` + `not-requested` | 只生成了 Push Options 计划 | 审查后重新加 `--push` |
-| `ssh-mr` + `requested-unverified` | 推送完成，但没有 API/UI 回读 | 打开 GitLab 确认 MR，不能重复执行 |
-| `AUTH_ERROR` | API 模式没有可用 Host-scoped Token | 改用 SSH，或配置 `--auth api` 所需环境变量 |
+| `LABEL_ERROR`（`--ssh-mr`） | 在 push 前拒绝 SSH MR 创建 | 使用 API 验证路径，或仅生成普通 manual handoff |
+| `AUTH_ERROR` | API 模式没有可用 Host-scoped Token | 配置 API 所需环境变量；仅需手工 handoff 时可改用 SSH |
 | `REPOSITORY_ERROR` | Remote、权限、分支或 SSH 不满足 | 检查 `git remote -v`、`ssh -T` 和分支权限 |
 | `PARTIAL_REMOTE_STATE` | 远端写入结果无法证明 | 先读取远端/MR 状态，不要立即重试 |
 
@@ -123,8 +121,11 @@ Remove-Item Env:HARNESS_MRTOOL_GITLAB_HOST
 - [ ] Git Remote 为 SSH，`ssh -T` 成功。
 - [ ] 普通 `manual --auth ssh` 不读取 GitLab API，也不要求 Token。
 - [ ] 普通推送不 force push，且执行前后校验本地/远端 SHA。
-- [ ] `--ssh-mr` 只发送批准的五类 Push Options。
+- [ ] `--ssh-mr`（含 `--push`）返回 `LABEL_ERROR`，未规划或执行 push。
 - [ ] 全局 `push.pushOption` 不会注入或覆盖工具生成的选项。
 - [ ] 标签、负责人和审核人不会被 SSH 模式猜测或自动创建。
 - [ ] API 模式仍可执行完整 `context -> preview -> create/update -> verify`。
-- [ ] 未回读的 SSH MR 创建结果不会报告为已验证成功。
+- [ ] 普通 manual handoff 或分支 push 不会报告为已验证 MR。
+- [ ] `--dry-run` 无远端写入且不消费 context；最终标签恰好三个且无 week/额外标签。
+
+以上是待执行的验收清单，不是本次已通过的现场验收记录。

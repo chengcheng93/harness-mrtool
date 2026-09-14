@@ -10,6 +10,8 @@ import {
   type WizardConsole,
   type WizardLongFormEditor,
 } from "../../src/cli/wizard.ts";
+import { bugLabelDiff } from "../helpers/label-diff.ts";
+import { labelDiffDigest } from "../../src/app/mandatory-labels.ts";
 import type { InputIo } from "../../src/input/load-input.ts";
 
 const secretTokens = [
@@ -18,7 +20,12 @@ const secretTokens = [
   "reviewer-token:fixture-reviewer",
 ] as const;
 
+const binding = { sourceHeadSha: "a".repeat(40), targetRefSha: "b".repeat(40), mergeBaseSha: "c".repeat(40) };
 const catalog: WizardCatalog = {
+  automaticLabels: {
+    diff: bugLabelDiff(binding), binding,
+    inventory: ["type::bug", "priority::p2", "status::review", "status::doing"].map((name, index) => ({ id: String(index + 1), name })),
+  },
   contextId: "context:wizard-fixture",
   issueIid: 51,
   targetBranch: "develop",
@@ -50,6 +57,7 @@ const catalog: WizardCatalog = {
     scopeKind: "project",
     scopePath: "group/project",
     currentlyApplied: false,
+    defaultSelected: false,
   }],
   userCandidates: [
     {
@@ -123,7 +131,6 @@ function consoleFixture(options: {
     selectOne: async ({ id, choices }) => {
       const selected: Readonly<Record<string, number>> = {
         intent: 1,
-        "title.type": 1,
         "workItem.relation": options.relationIndex ?? 1,
         "impact.nature": 1,
         "risk.level": 1,
@@ -140,7 +147,6 @@ function consoleFixture(options: {
         "impact.areaIds": [0],
         "verification.itemIds": [0, 1, 2, 3, 4],
         "documentation.itemIds": [0],
-        "labels.type": [0],
         reviewers: [0],
       };
       const indexes = selected[id];
@@ -163,7 +169,7 @@ function consoleFixture(options: {
       assert.notEqual(value, undefined, `unexpected text input ${id}`);
       return value!;
     },
-    confirm: async () => true,
+    confirm: async ({ id }) => id !== "labels.escalate",
   };
 }
 
@@ -230,12 +236,12 @@ test("TTY wizard derives candidate values only from enumerated choices and keeps
     "docs.content-impact": ["Input workflow documentation is updated."],
     "docs.target-audience": ["Developers using the manual CLI."],
   });
-  assert.deepEqual(request.mergeRequest.labelCandidateTokens, [secretTokens[0]]);
+  assert.deepEqual(request.mergeRequest.labelCandidateTokens, []);
   assert.equal(request.mergeRequest.assigneeCandidateToken, secretTokens[1]);
   assert.deepEqual(request.review.reviewerCandidateTokens, [secretTokens[2]]);
 });
 
-test("TTY label choices display description, category, scope, and current state while allowing an empty description", async () => {
+test("TTY displays automatic labels and digest without exposing tokens or offering legacy choices", async () => {
   const baseConsole = consoleFixture();
   const shownLabels: string[] = [];
   const emptyDescriptionCatalog: WizardCatalog = {
@@ -251,10 +257,12 @@ test("TTY label choices display description, category, scope, and current state 
     console: {
       ...baseConsole,
       selectMany: async (input) => {
-        if (input.id === "labels.type") {
-          shownLabels.push(...input.choices.map((choice) => choice.label));
-        }
+        assert.equal(input.id.startsWith("labels."), false);
         return baseConsole.selectMany(input);
+      },
+      confirm: async (input) => {
+        if (input.id === "labels.accept") shownLabels.push(input.prompt);
+        return baseConsole.confirm(input);
       },
     },
     editor: { edit: async () => Buffer.from(JSON.stringify(longForm), "utf8") },
@@ -263,11 +271,12 @@ test("TTY label choices display description, category, scope, and current state 
   const request = await createProductionRequestSource({ stdinIsTerminal: () => true, wizard })
     .read(parseCliInvocation(["preview"]));
 
-  assert.deepEqual(shownLabels, [
-    "type::bug | (no description) | category=type | scope=project:group/project | currently applied",
-  ]);
+  assert.equal(shownLabels.length, 1);
+  for (const expected of ["type::bug", "priority::p2", "status::review", labelDiffDigest(catalog.automaticLabels!.diff)]) {
+    assert.ok(shownLabels[0]!.includes(expected));
+  }
   assert.equal(shownLabels.some((label) => label.includes(secretTokens[0])), false);
-  assert.deepEqual(request.mergeRequest.labelCandidateTokens, [secretTokens[0]]);
+  assert.deepEqual(request.mergeRequest.labelCandidateTokens, []);
 });
 
 for (const kind of ["accessor", "unknown-key"] as const) {
@@ -322,6 +331,7 @@ test("TTY catalog is a detached snapshot unaffected by later source mutation", a
           mutated = true;
           (mutable.titleTypes as string[])[1] = "mutated";
           (mutable.labelCandidates as unknown as { token: string }[])[0]!.token = replacementToken;
+          (mutable.automaticLabels!.diff.items[0] as { after: string }).after = "unsupported mutation";
         }
         return baseConsole.selectMany(input);
       },
@@ -341,15 +351,15 @@ test("TTY catalog is a detached snapshot unaffected by later source mutation", a
 
   assert.equal(mutated, true);
   assert.equal(request.title.type, "fix");
-  assert.deepEqual(request.mergeRequest.labelCandidateTokens, [secretTokens[0]]);
+  assert.deepEqual(request.mergeRequest.labelCandidateTokens, []);
 });
 
-test("TTY catalog rejects a missing required label candidate before prompting or editing", async () => {
+test("TTY catalog rejects a missing mandatory inventory label before label prompting or editing", async () => {
   const baseConsole = consoleFixture();
   let labelPrompts = 0;
   let editorCalls = 0;
   const wizard = createInteractiveRequestWizard({
-    catalogSource: { load: async () => ({ ...catalog, labelCandidates: [] }) },
+    catalogSource: { load: async () => ({ ...catalog, automaticLabels: { ...catalog.automaticLabels!, inventory: [] } }) },
     console: {
       ...baseConsole,
       selectMany: async (input) => {
@@ -368,8 +378,7 @@ test("TTY catalog rejects a missing required label candidate before prompting or
   await assert.rejects(
     createProductionRequestSource({ stdinIsTerminal: () => true, wizard })
       .read(parseCliInvocation(["preview"])),
-    (error: unknown) => isToolError(error, "INPUT_ERROR") &&
-      error.message === "Interactive request input is invalid",
+    (error: unknown) => isToolError(error, "LABEL_ERROR"),
   );
   assert.equal(labelPrompts, 0);
   assert.equal(editorCalls, 0);

@@ -12,7 +12,7 @@
 
 ## 1. 架构目标
 
-本架构把 MR 生成从 AI 临场组织文本改为确定性编译过程：调用者提交结构化 Request，CLI 固定完成解析、Schema 校验、模板渲染和 Git 事务校验。默认 SSH-first 路径不要求 GitLab Token：CLI 生成可审计的 title/body/push plan，用户通过 SSH 推送后在 GitLab 网页创建 MR。显式 `--auth api` 才启用实时上下文、候选解析、MR 写入和最终回读；API 路径返回成功意味着远端实际状态已满足当前 Bundle 合同。工具不代表 GitLab 合并门禁。
+本架构把 MR 生成从 AI 临场组织文本改为确定性编译过程：调用者提交结构化 Request，CLI 固定完成解析、Schema 校验、模板渲染和 Git 事务校验。默认 SSH-first 路径不要求 GitLab Token：CLI 生成可审计的 title/body/push plan，用户通过 SSH 推送后在 GitLab 网页创建 MR。API 命令启用实时上下文、候选解析、MR 写入和最终回读，建议显式传入 `--auth api`；`auto` 对直接 API 命令保留兼容行为。API 路径返回成功意味着远端实际状态已满足该事务固定的 Bundle 及强制写入合同。工具不代表 GitLab 合并门禁，也无法限制原始 Git/API 或网页操作。
 
 V1 的优先级依次为：
 
@@ -35,7 +35,8 @@ V1 的优先级依次为：
 | GitLab 访问 | 生产 adapter 直接调用 REST/GraphQL；不依赖额外 CLI |
 | 模板事实源 | 公开 GitHub 仓库中的版本化 Template Bundle |
 | 自动更新 | 每次业务调用短预算检查，可信 last-known-good 离线继续 |
-| 默认认证 | SSH-first；GitLab API 是显式 opt-in 的完整能力 |
+| 默认认证 | Skill manual 路径 SSH-first；直接 API 命令在 auto 下保留兼容行为，建议显式 `--auth api` |
+| macOS 本地锁 | native process lock 使用 Perl `flock`；源码环境需可用 Perl，不等于正式平台支持声明 |
 | Windows 更新 | staging 新 CLI 执行业务，临时 helper 在旧进程退出后持久化替换 |
 | 代码组织 | 端口与适配器；领域层不得导入 CLI、HTTP、文件系统或进程实现 |
 
@@ -98,7 +99,7 @@ domain         -X-> concrete HTTP, fs, process, console or CLI parsing
 schema show -> profiles list -> manual --auth ssh -> review -> SSH push -> GitLab Web MR
 ```
 
-`manual` 使用已验证 Bundle 在本地生成 title、description、target branch、source SHA 和普通非强制 push plan。显式 `--ssh-mr` 时，工具将 create/target/title/description/optional-draft 编码为 GitLab Push Options；它不发送标签、负责人、审核人、目标项目或自动合并选项。由于没有 API/UI 回读，输出只能是 `requested-unverified`，用户必须在 GitLab 网页确认。
+`manual` 只生成本地 handoff 和普通分支 push plan。`--ssh-mr` 已在命令层拒绝，不能绕过强制标签策略创建基础 MR。新的事务层从绑定 merge-base/HEAD 的 diff 自动计算类型，默认 `priority::p2`，按 Draft/Ready 选择状态；不再使用排期标签。必须写入并回读恰好三个固定池标签。默认 production 入口已装配 create/update/upsert/verify，交互向导也接入相同自动标签选择器。普通手工 handoff/push 不是已验证 MR。可执行入口的本地实现不等于已发布或真实 GitLab 验收通过。
 
 context 必须使用当前用户私有目录、原子替换和跨进程锁。Windows 通过 ACL 保障当前用户可读；类 Unix 目标若以后支持则要求 mode `0600`。原始 token 不写日志、marker 或诊断文件。
 
@@ -138,16 +139,24 @@ profiles/general.yml
 
 ### 5.4 标签解析
 
-Bundle 只声明标签类别、正则、数量和 lifecycle 映射，不复制项目的全部标签值。CLI 从 GitLab 实时读取项目标签和祖先组标签：
+新 Template Bundle `1.1.0` 的固定池包含 14 个标签：
 
-- 过滤 archived 值；
-- 同名时项目标签优先于组标签；
-- 仍有歧义则拒绝；
-- `week`、`type`、`priority` 由用户从候选 token 选择；
-- `status` 由 intent 和 Policy 派生；
-- 写入只做必要的 ID ADD/REMOVE，不做整套 REPLACE；
-- Policy 范围外的人工标签保留；
-- scoped label 可能被 GitLab 替换，preview 必须披露，写后必须验证。
+- `type::feature`、`type::bug`、`type::doc`、`type::test`、`type::refactor`、`type::performance`、`type::build`、`type::ci`、`type::chore`；
+- `priority::p0`、`priority::p1`、`priority::p2`；
+- `status::doing`、`status::review`。
+
+CLI 从 GitLab 实时读取项目及祖先组库存并解析真实 ID；所需标签必须已存在，
+缺失或仍有歧义则失败关闭，绝不自动创建远端标签定义。
+
+- `type` 基于 canonical actual committed diff，绑定 source HEAD、target SHA、merge-base 和规范化 diff digest，不信任标题/分支名或调用者摘要；
+- 有界分类无法确定类型时必须显式提供类型与匹配 digest，不兜底为 chore；`--type` 标题提示不是确认，过期或冲突确认必须拒绝；
+- `priority` 默认 p2，提升为 p0/p1 必须明确选择并提供非空理由；
+- Draft 使用 `status::doing`，Ready 使用 `status::review`；
+- 最终恰好三个标签，type/priority/status 各一；新策略拥有完整标签集合，更新移除 week 和池外人工标签，不再保留额外标签；
+- mutation 可通过必要的 ID ADD/REMOVE 达到精确集合替换，不能把最小 mutation 理解为保留额外标签；
+- preview 披露计划，写前重验 diff/库存，写后回读完整集合。自动向导使用同一选择器并收集歧义确认和提优先级理由。
+
+详见[标签选择策略](../usage/label-selection-policy.md)。
 
 GitLab 没有 MR 字段 CAS，不能声称无并发窗口。实现采用即时预读、最小 mutation、source SHA 绑定和每步回读；发现漂移立即停止，已发生写入时返回 `PARTIAL_REMOTE_STATE`。
 
@@ -170,6 +179,16 @@ stateDiagram-v2
 
 `Ready` 是正常流程最后一次远端写操作。切 Ready 前必须已经完成所有可能失败的正文写入和 structure 校验；切换后只做只读回读。任何未知结果都先查询实际状态。若切 Ready 或 lifecycle label 更新形成不一致，执行有界补偿回 Draft + Draft status；补偿无法证明时返回 `PARTIAL_REMOTE_STATE`，不得报告成功。
 
+`preview` 和 API create/update 的 `--dry-run` 执行计划校验但不推送、不写 GitLab、
+不消费候选 context；实时只读请求仍可发生，不能将 dry-run 当作离线或已完成 MR。
+
+`create --upsert` 在复用已有 MR 前认证 receipt 并固定历史 Bundle；若它与
+create context 的 Bundle 不同，当前路径失败关闭并提示 `context --mr <iid>`
+后 `update <iid>` 或显式迁移，而不是自动回退当前 Bundle。默认 production
+迁移 adapter 验证旧 receipt 与精确历史 Bundle，绑定迁移 context，并校验
+old:new manifest-hash 显式确认；事务使用目标 Bundle 写入并生成新回执。
+受控生产入口测试覆盖旧 1.0.0 week 策略迁移至 1.1.0；真实 GitLab 验收另行记录。
+
 update 默认使用 MR marker 固定的原 Bundle。description 有人工漂移时默认拒绝，只有显式 `--force-replace-description` 才可覆盖受管 description；无合法 marker 的 MR 返回 `UNMANAGED_MR`，V1 不接管。
 
 ## 7. 更新信任模型
@@ -185,6 +204,10 @@ update 默认使用 MR marker 固定的原 Bundle。description 有人工漂移�
 运行时不得接受任意 update URL 或 caller-supplied public key。GitHub Pages signed envelope 的 `payload` 原始 base64url 字节必须先验签，后解析 JSON。客户端保存最高已接受 `sequence`，低 sequence 普通更新一律拒绝。
 
 ### 7.2 历史 Bundle 收据
+
+旧签名 Bundle/policy 在可信证据校验后仍可读取和验证；不能为适配新规则而
+原地改写历史 policy 或将旧 MR 静默重新解释为 `1.1.0`。历史可读性不取消
+新写入的三标签后置条件；更换模板必须走显式迁移。
 
 MR marker 可被 MR 作者修改，因此不是信任根。每个 `templates-v*` Immutable Release 必须包含 `bundle-receipt.envelope.json`，其 payload 至少固定：
 
@@ -283,6 +306,15 @@ SEA 配置固定 `useSnapshot=false`、`useCodeCache=false`、`execArgvExtension
 本地构建可以注入测试 origin/key；正式产物必须固化最终公开 origin 和 production public key，且不得保留任意 URL override。
 
 ## 12. 修订记录
+
+### 工作树更新说明（2026-09-14，未发布）
+
+Bundle `1.1.0` 固定 14 标签池和恰好三标签合同；默认 production
+create/update/upsert/verify、零远端写入且不消费 context 的 dry-run、自动向导、
+历史 policy 兼容读取已接入。SSH MR 创建在 push 前拒绝；Node 固定 `24.16.0`，
+macOS native lock 依赖 Perl。迁移 adapter 并行补齐，发布签名、平台和真实
+GitLab/Codex 验收仍是独立门禁，不能由这份更新说明推定通过。
+
 
 | 版本 | 日期 | 状态 | 说明 |
 | --- | --- | --- | --- |

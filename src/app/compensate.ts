@@ -19,6 +19,7 @@ import {
 } from "./remote-outcome.ts";
 import type { RemoteMutationReceipt, RemoteValueReceipt } from "./remote-receipt.ts";
 import {
+  resolveUniqueLiveLabelNames,
   stageVerificationReceipt,
   type VerificationReceiptWriter,
 } from "./verify-mr.ts";
@@ -85,6 +86,12 @@ export function assertRemoteIdentity(
   const { initialSnapshot, request, sourceBranch } = context;
   const snapshot = validateExternalContextSnapshot(current.snapshot);
   const expectedLifecycle = current.draft ? "draft" : "ready";
+  // Both lifecycle labels must remain unambiguous, including the one not yet
+  // applied. Check on every pre-read/readback, before another mutation can run.
+  resolveUniqueLiveLabelNames(snapshot, [...new Set([
+    ...context.writePlan.draft.labelIds,
+    ...context.writePlan.desired.labelIds,
+  ])]);
   const relevantLabelIds = new Set([
     ...context.writePlan.managedLabelIds,
     ...context.writePlan.draft.labelIds,

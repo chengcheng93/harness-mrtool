@@ -62,7 +62,7 @@ export interface ManualCommandDependencies {
 }
 
 function manualError(
-  code: "INPUT_ERROR" | "REPOSITORY_ERROR" | "RENDER_ERROR",
+  code: "INPUT_ERROR" | "REPOSITORY_ERROR" | "RENDER_ERROR" | "LABEL_ERROR",
   message: string,
   field: string | null,
   expected: string,
@@ -102,7 +102,6 @@ function scalar(value: unknown, subject: string): string {
 
 function manualLabelName(categoryId: string, request: Request, expectedStatus: string): string {
   if (categoryId === "status") return expectedStatus;
-  if (categoryId === "week") return "week::manual";
   if (categoryId === "priority") return "priority::manual";
   if (categoryId === "type") {
     const typeNames: Readonly<Record<string, string>> = {
@@ -355,6 +354,16 @@ export function createManualCommandServices(
           "Use manual --auth ssh --ssh-mr, or use the API create flow without --ssh-mr.",
         );
       }
+      if (invocation.command.kind === "manual" && invocation.command.sshMergeRequest) {
+        throw manualError(
+          "LABEL_ERROR",
+          "SSH-only MR creation cannot enforce and verify mandatory labels",
+          "labels",
+          "API creation with fixed-pool selection and label readback",
+          "SSH push options have no verified label inventory/readback",
+          "Use the API create flow; manual remains a draft handoff and cannot create an unlabeled MR.",
+        );
+      }
       if (invocation.options.authMode === "ssh" && invocation.options.input === null) {
         throw manualError(
           "INPUT_ERROR",
@@ -455,6 +464,7 @@ export function createManualCommandServices(
             ? "The SSH push requested a Draft Merge Request with generated title and description; creation is not API-verified. Open GitLab and verify it before adding labels, assignee, and reviewers."
             : "The SSH push requested a Merge Request with generated title and description; creation is not API-verified. Open GitLab and verify it before adding labels, assignee, and reviewers."
           : "Open the GitLab project, create the Merge Request manually, paste the title and description, and choose labels, assignee, and reviewers in the UI.",
+        "Use the fixed label pool: one type:: label, priority::p2 by default, and the lifecycle status:: label. Never create a guessed label.",
       ];
       const targetProject = repository.targetProject;
       return {
@@ -478,6 +488,13 @@ export function createManualCommandServices(
             },
             pushPlan: pushData(repository, plan, pushError, pushResult),
             manualLabelPlaceholders: labels.map((label) => label.name),
+            labelSelection: {
+              automatic: false,
+              source: "gitlab-ui-or-api-context",
+              defaultPriority: "priority::p2",
+              defaultMilestone: null,
+              note: "SSH mode cannot read or validate live labels. Use API context to obtain candidate tokens for automatic label writes.",
+            },
             manualSteps,
             ...(invocation.command.kind === "manual" && invocation.command.sshMergeRequest
               ? { mrCreation: pushResult?.kind === "pushed" || pushResult?.kind === "synchronized-after-unknown" ? "requested-unverified" : "not-requested" }

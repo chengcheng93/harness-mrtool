@@ -22,6 +22,7 @@ test("wizard catalog is derived only from the verified Bundle and discovered can
       scopeKind: "project",
       scopePath: "group/project",
       currentlyApplied: false,
+      defaultSelected: true,
     }],
     userCandidates: [{
       token: `hmrc1_${"u".repeat(43)}`,
@@ -56,7 +57,6 @@ test("wizard catalog is derived only from the verified Bundle and discovered can
     "ops.configuration-compatibility",
   ]);
   assert.deepEqual(catalog.labelCategories, [
-    { id: "week", required: true, max: 1 },
     { id: "type", required: true, max: 1 },
     { id: "priority", required: true, max: 1 },
   ]);
@@ -68,6 +68,7 @@ test("wizard catalog is derived only from the verified Bundle and discovered can
     scopeKind: candidate.scopeKind,
     scopePath: candidate.scopePath,
     currentlyApplied: candidate.currentlyApplied,
+    defaultSelected: candidate.defaultSelected,
   })));
   assert.deepEqual(catalog.userCandidates, discovered.userCandidates);
   assert.equal(catalog.contextId, discovered.contextId);
@@ -75,4 +76,25 @@ test("wizard catalog is derived only from the verified Bundle and discovered can
   assert.equal(catalog.targetBranch, "develop");
   assert.equal(Object.isFrozen(catalog), true);
   assert.equal(Object.isFrozen(catalog.labelCandidates), true);
+});
+
+test("wizard catalog snapshots canonical diff, independent context binding and real inventory for automatic labels", async () => {
+  const bundle = await loadTemplateBundle(resolve(repositoryRoot, "template-bundle"));
+  const binding = { sourceHeadSha: "a".repeat(40), targetRefSha: "b".repeat(40), mergeBaseSha: "c".repeat(40) };
+  const diff = { ...binding, items: [{ status: "modified" as const, newPath: "README.md", binary: false, submodule: false,
+    before: "old", after: "new" }] };
+  const labels = [{ id: "1", name: "type::doc" }, { id: "2", name: "priority::p2" }, { id: "3", name: "status::review" }];
+  const discovered = {
+    contextId: "context:labels", binding: { ...binding, targetBranch: "develop" },
+    snapshot: { ...binding, issue: { kind: "none" }, labelCandidates: labels },
+    labelCandidates: [], userCandidates: [],
+  } as unknown as DiscoveredContext;
+  const catalog = buildWizardCatalog({ bundle, discovered, labelDiff: diff, suggestedProfileIds: ["docs"], confirmations: null });
+  assert.deepEqual(catalog.automaticLabels, { diff, binding, inventory: labels });
+  diff.items[0]!.after = "mutated";
+  labels[0]!.name = "type::bug";
+  assert.equal(catalog.automaticLabels!.diff.items[0]!.after, "new");
+  assert.equal(catalog.automaticLabels!.inventory[0]!.name, "type::doc");
+  assert.equal(Object.isFrozen(catalog.automaticLabels!.diff.items), true);
+  assert.equal(Object.isFrozen(diff.items), false);
 });

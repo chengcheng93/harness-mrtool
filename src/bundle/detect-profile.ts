@@ -29,6 +29,12 @@ export type DiffItem =
       readonly newPath: string;
     });
 
+export type DiffEvidenceItem = DiffItem & {
+  readonly unsupported?: boolean;
+  readonly before?: string;
+  readonly after?: string;
+};
+
 export type ProfileDetectionReason =
   | "empty-diff"
   | "invalid-change-set"

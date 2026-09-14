@@ -1,4 +1,9 @@
+import { selectMandatoryLabels, type LabelSelectionOptions } from "./mandatory-labels.ts";
+import { normalizeAndValidateRequest } from "../input/normalize.ts";
+import { validateTemplateBundle } from "../bundle/validate.ts";
+import { canonicalizeJson, sha256Utf8 } from "../contracts/jcs.ts";
 import type { LoadedTemplateBundle } from "../bundle/load.ts";
+import type { CanonicalLabelChangeSet } from "../git/change-set.ts";
 import { isToolError, ToolError } from "../contracts/errors.ts";
 import type { Request } from "../contracts/request.ts";
 import type { Candidate } from "../context/types.ts";
@@ -48,6 +53,41 @@ function concurrentUpdateError(): ToolError<"CONCURRENT_UPDATE"> {
   });
 }
 
+/** Prior Bundle/tag must come from authenticated historical lookup, not MR metadata alone. */
+export interface UpdateMergeRequestMigration {
+  readonly previousBundle: LoadedTemplateBundle;
+  readonly previousReleaseTag: string;
+  readonly confirmation: string;
+  readonly oldHash: string;
+  readonly newHash: string;
+}
+
+/** Shared by the immutable adapter boundary and the direct transaction entry point. */
+export function validateUpdateMigration(
+  migration: UpdateMergeRequestMigration,
+  bundle: LoadedTemplateBundle,
+  releaseTag: string,
+): void {
+  validateTemplateBundle(migration.previousBundle);
+  validateTemplateBundle(bundle);
+  const oldHash = sha256Utf8(`${canonicalizeJson(migration.previousBundle.manifest)}\n`);
+  const newHash = sha256Utf8(`${canonicalizeJson(bundle.manifest)}\n`);
+  if (migration.oldHash !== oldHash || migration.newHash !== newHash ||
+      migration.confirmation !== `${oldHash}:${newHash}`) {
+    throw new ToolError("INPUT_ERROR", "Migration confirmation does not match the exact old and new Bundles", {
+      field: "migration.confirmation", expected: `${oldHash}:${newHash}`, actual: "stale or mismatched migration confirmation",
+      safeNextStep: "Refresh migration context and explicitly confirm the exact old:new Bundle hashes.",
+    });
+  }
+  if (migration.previousReleaseTag !== `templates-v${migration.previousBundle.manifest.version}` ||
+      releaseTag !== `templates-v${bundle.manifest.version}`) {
+    throw new ToolError("TEMPLATE_ERROR", "Migration release tags do not match the verified Bundles", {
+      field: "migration", expected: "canonical release tags for the verified old and new Bundle versions",
+      actual: "release tag mismatch", safeNextStep: "Reload the exact authenticated historical and destination Bundles.",
+    });
+  }
+}
+
 export interface UpdateMergeRequestInputs {
   readonly request: Request;
   readonly initial: RemoteMergeRequest;
@@ -60,6 +100,9 @@ export interface UpdateMergeRequestInputs {
   readonly gitlabOrigin: string;
   readonly verificationReceiptWriter: VerificationReceiptWriter;
   readonly forceReplaceDescription?: boolean;
+  readonly migration?: UpdateMergeRequestMigration;
+  readonly labelDiff: CanonicalLabelChangeSet;
+  readonly labelOptions?: LabelSelectionOptions;
 }
 
 export interface UpdateMergeRequestResult extends CreateMergeRequestResult {
@@ -106,10 +149,21 @@ function hasPossibleWrite(journal: TransactionJournal): boolean {
 export async function updateMergeRequest(
   inputs: UpdateMergeRequestInputs,
 ): Promise<UpdateMergeRequestResult> {
+  if (inputs.migration !== undefined) validateUpdateMigration(inputs.migration, inputs.bundle, inputs.releaseTag);
+  const ownershipBundle = inputs.migration?.previousBundle ?? inputs.bundle;
+  const ownershipReleaseTag = inputs.migration?.previousReleaseTag ?? inputs.releaseTag;
+  const labels = selectMandatoryLabels({
+    diff: inputs.labelDiff, binding: inputs.initial.snapshot, inventory: inputs.initial.snapshot.labelCandidates,
+    intent: inputs.request.intent,
+    ...(inputs.labelOptions === undefined ? {} : { options: inputs.labelOptions }),
+  });
+  inputs = { ...inputs, request: normalizeAndValidateRequest({
+    ...inputs.request, title: { ...inputs.request.title, type: labels.titleType },
+  }) };
   const forcedDescriptionReplacement = assertManagedDescription(
     inputs.initial.description,
-    inputs.bundle,
-    inputs.releaseTag,
+    ownershipBundle,
+    ownershipReleaseTag,
     inputs.forceReplaceDescription === true,
   ).manuallyChanged;
   if (inputs.initial.snapshot.mergeRequest.lifecycle === "new" ||
@@ -121,6 +175,8 @@ export async function updateMergeRequest(
     snapshot: inputs.initial.snapshot,
     resolvedCandidates: inputs.resolvedCandidates,
     bundle: inputs.bundle,
+    labelDiff: inputs.labelDiff,
+    ...(inputs.labelOptions === undefined ? {} : { labelOptions: inputs.labelOptions }),
   });
   const journal = new TransactionJournal(
     "update",
@@ -152,8 +208,8 @@ export async function updateMergeRequest(
     assertRemoteIdentity(current, context);
     assertManagedDescription(
       current.description,
-      inputs.bundle,
-      inputs.releaseTag,
+      ownershipBundle,
+      ownershipReleaseTag,
       inputs.forceReplaceDescription === true,
     );
   } catch (error) {

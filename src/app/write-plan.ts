@@ -4,7 +4,9 @@ import { validateTemplateBundle } from "../bundle/validate.ts";
 import { isToolError, ToolError } from "../contracts/errors.ts";
 import { canonicalizeJson, copyJsonValue, type JsonObject, type JsonValue } from "../contracts/jcs.ts";
 import type { Request } from "../contracts/request.ts";
-import type { Candidate, LabelCandidate, UserCandidate } from "../context/types.ts";
+import type { Candidate, UserCandidate } from "../context/types.ts";
+import { selectMandatoryLabels, type LabelSelectionOptions } from "./mandatory-labels.ts";
+import type { CanonicalLabelChangeSet } from "../git/change-set.ts";
 import { normalizeAndValidateRequest } from "../input/normalize.ts";
 import { renderTitle } from "../render/title.ts";
 import {
@@ -19,6 +21,8 @@ export interface BuildWritePlanInputs {
   readonly snapshot: ExternalContextSnapshot;
   readonly resolvedCandidates: readonly Candidate[];
   readonly bundle: LoadedTemplateBundle;
+  readonly labelDiff: CanonicalLabelChangeSet;
+  readonly labelOptions?: LabelSelectionOptions;
 }
 
 export interface MergeRequestWritePlan {
@@ -155,50 +159,17 @@ function validateSelections(
   candidates: readonly Candidate[],
   policy: PolicyContract,
 ): {
-  readonly selectedLabelIds: readonly string[];
   readonly assigneeUserId: string | null;
   readonly reviewerUserIds: readonly string[];
 } {
-  const labels = candidates.filter((candidate): candidate is LabelCandidate => candidate.kind === "label");
   const assignees = candidates.filter((candidate): candidate is UserCandidate => candidate.kind === "assignee");
   const reviewers = candidates.filter((candidate): candidate is UserCandidate => candidate.kind === "reviewer");
-  if (labels.length !== request.mergeRequest.labelCandidateTokens.length ||
-      reviewers.length !== request.review.reviewerCandidateTokens.length ||
+  // Label candidates supplied by an AI/request are deliberately ignored. The
+  // mandatory selector derives labels from the canonical diff and live inventory.
+  if (reviewers.length !== request.review.reviewerCandidateTokens.length ||
       assignees.length !== (request.mergeRequest.assigneeCandidateToken === null ? 0 : 1)) {
-    throw policyError("INPUT_ERROR", "resolved candidates do not match Request candidate selections");
+    throw policyError("INPUT_ERROR", "resolved users do not match Request selections");
   }
-
-  const snapshotLabels = new Map(snapshot.labelCandidates.map((label) => [label.id, label.name] as const));
-  const selectedByCategory = new Map<string, LabelCandidate[]>();
-  for (const label of labels) {
-    if (snapshotLabels.get(label.globalId) !== label.name) {
-      throw policyError("LABEL_ERROR", "a selected label changed after context discovery");
-    }
-    const category = categoryFor(label.name, policy);
-    if (category === null || category === policy.statusCategory || category !== label.policyCategory) {
-      throw policyError("LABEL_ERROR", "a selected label is not an eligible user-managed category");
-    }
-    const values = selectedByCategory.get(category) ?? [];
-    values.push(label);
-    selectedByCategory.set(category, values);
-  }
-  for (const category of policy.categories) {
-    if (category.id === policy.statusCategory) continue;
-    const count = selectedByCategory.get(category.id)?.length ?? 0;
-    if ((category.required && count === 0) || count > category.max) {
-      throw policyError("LABEL_ERROR", "selected labels violate a Policy category cardinality");
-    }
-  }
-  const selectedType = selectedByCategory.get("type")?.[0];
-  const compatibility = policy.typeCompatibility[request.title.type];
-  if (selectedType === undefined || compatibility === undefined) {
-    throw policyError("LABEL_ERROR", "the title type has no selected compatible type label");
-  }
-  compatibility.lastIndex = 0;
-  if (!compatibility.test(selectedType.name)) {
-    throw policyError("LABEL_ERROR", "the selected type label is incompatible with the title type");
-  }
-
   const snapshotUsers = new Map(snapshot.userCandidates.map((user) => [user.id, user] as const));
   for (const candidate of [...assignees, ...reviewers]) {
     const current = snapshotUsers.get(candidate.userId);
@@ -221,7 +192,6 @@ function validateSelections(
     throw policyError("INPUT_ERROR", "reviewer selection does not satisfy the current Policy minimum");
   }
   return {
-    selectedLabelIds: Object.freeze(labels.map((label) => label.globalId).sort()),
     assigneeUserId: assignees[0]?.userId ?? null,
     reviewerUserIds: Object.freeze(reviewerIds),
   };
@@ -245,21 +215,26 @@ export function buildWritePlan(input: BuildWritePlanInputs): MergeRequestWritePl
     composeProfiles(input.bundle, request.profileIds, { impactNature: request.impact.nature });
     const snapshot = validateExternalContextSnapshot(input.snapshot);
     const policy = readPolicy(input.bundle);
-    const selected = validateSelections(request, snapshot, input.resolvedCandidates, policy);
+    const selection = selectMandatoryLabels({
+      diff: input.labelDiff,
+      binding: snapshot,
+      inventory: snapshot.labelCandidates,
+      intent: request.intent,
+      ...(input.labelOptions === undefined ? {} : { options: input.labelOptions }),
+    });
+    const effectiveRequest = normalizeAndValidateRequest({
+      ...request, title: { ...request.title, type: selection.titleType },
+    });
+    const selected = validateSelections(effectiveRequest, snapshot, input.resolvedCandidates, policy);
+    const selectedLabelIds = selection.ids.slice(0, 2);
     const draftStatusLabelId = exactLifecycleLabel(snapshot, policy, policy.draftName);
     const readyStatusLabelId = exactLifecycleLabel(snapshot, policy, policy.readyName);
-    const managedCategoryIds = new Set(policy.categories.map((category) => category.id));
-    const namesById = new Map(snapshot.labelCandidates.map((label) => [label.id, label.name] as const));
-    const preservedLabelIds = snapshot.mergeRequest.labelIds.filter((id) => {
-      const name = namesById.get(id);
-      return name !== undefined && !managedCategoryIds.has(categoryFor(name, policy) ?? "");
-    }).sort();
-    const currentManagedLabelIds = snapshot.mergeRequest.labelIds.filter((id) => {
-      const name = namesById.get(id);
-      return name !== undefined && categoryFor(name, policy) !== null;
-    });
+    // This policy owns the complete label set: old week/out-of-pool labels are
+    // removed, not silently preserved alongside the three mandatory labels.
+    const preservedLabelIds: string[] = [];
+    const currentManagedLabelIds = snapshot.mergeRequest.labelIds;
     const managedLabelIds = [
-      ...selected.selectedLabelIds,
+      ...selectedLabelIds,
       draftStatusLabelId,
       readyStatusLabelId,
       ...currentManagedLabelIds,
@@ -270,13 +245,13 @@ export function buildWritePlan(input: BuildWritePlanInputs): MergeRequestWritePl
       writePlanVersion: 1 as const,
       assigneeUserId: selected.assigneeUserId,
       reviewerUserIds: selected.reviewerUserIds,
-      removeSourceBranch: request.mergeRequest.removeSourceBranch,
-      squash: request.mergeRequest.squash,
+      removeSourceBranch: effectiveRequest.mergeRequest.removeSourceBranch,
+      squash: effectiveRequest.mergeRequest.squash,
     };
-    const readyTitle = renderTitle(request, input.bundle);
-    const draftTitle = request.intent === "draft"
+    const readyTitle = renderTitle(effectiveRequest, input.bundle);
+    const draftTitle = effectiveRequest.intent === "draft"
       ? readyTitle
-      : renderTitle({ ...request, intent: "draft" }, input.bundle);
+      : renderTitle({ ...effectiveRequest, intent: "draft" }, input.bundle);
     const provisional = validateDesiredWritePlan({
       ...base,
       title: draftTitle,
@@ -287,18 +262,18 @@ export function buildWritePlan(input: BuildWritePlanInputs): MergeRequestWritePl
     const draft = validateDesiredWritePlan({
       ...base,
       title: draftTitle,
-      labelIds: [...selected.selectedLabelIds, draftStatusLabelId, ...preservedLabelIds],
+      labelIds: [...selectedLabelIds, draftStatusLabelId, ...preservedLabelIds],
     });
-    const desired = request.intent === "ready"
+    const desired = effectiveRequest.intent === "ready"
       ? validateDesiredWritePlan({
           ...base,
           title: readyTitle,
-          labelIds: [...selected.selectedLabelIds, readyStatusLabelId, ...preservedLabelIds],
+          labelIds: [...selectedLabelIds, readyStatusLabelId, ...preservedLabelIds],
         })
       : draft;
     return freezePlan({
       writePlanVersion: 1,
-      intent: request.intent,
+      intent: effectiveRequest.intent,
       provisional,
       draft,
       desired,

@@ -73,6 +73,7 @@ const REQUEST_COMMON_FLAGS = new Set([
   "--type",
   "--module",
   "--title-summary",
+  "--confirm-label-type", "--label-diff-digest", "--priority", "--priority-reason",
 ]);
 const LOCAL_COMMON_FLAGS = new Set([
   ...BASE_COMMON_FLAGS,

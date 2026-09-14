@@ -1,3 +1,5 @@
+import type { DiffTypeLabel } from "../app/diff-labels.ts";
+import type { LabelSelectionOptions } from "../app/mandatory-labels.ts";
 import { valid as validSemver } from "semver";
 
 import { ToolError } from "../contracts/errors.ts";
@@ -12,6 +14,10 @@ export type CliProfileSelection =
   | { readonly kind: "explicit"; readonly ids: readonly string[] };
 
 export interface CliOptions {
+  readonly confirmLabelType: DiffTypeLabel | null;
+  readonly labelDiffDigest: string | null;
+  readonly priority: "p0" | "p1" | "p2" | null;
+  readonly priorityReason: string | null;
   readonly input: string | null;
   readonly inputFormat: InputFormat | null;
   readonly nonInteractive: boolean;
@@ -31,6 +37,10 @@ export interface CliOptions {
 }
 
 interface MutableOptions {
+  confirmLabelType: DiffTypeLabel | null;
+  labelDiffDigest: string | null;
+  priority: "p0" | "p1" | "p2" | null;
+  priorityReason: string | null;
   input: string | null;
   inputFormat: InputFormat | null;
   nonInteractive: boolean;
@@ -58,6 +68,7 @@ const BOOLEAN_FLAGS = new Set([
 ]);
 
 const VALUE_FLAGS = new Set([
+  "--confirm-label-type", "--label-diff-digest", "--priority", "--priority-reason",
   "--input",
   "--input-format",
   "--output",
@@ -154,6 +165,23 @@ function applyBoolean(options: MutableOptions, flag: string): void {
 
 function applyValue(options: MutableOptions, flag: string, value: string): void {
   switch (flag) {
+    case "--confirm-label-type":
+      if (!["feature", "bug", "doc", "test", "refactor", "performance", "build", "ci", "chore"].includes(value)) {
+        invalidFlag(flag, "a fixed-pool type suffix", "unknown type");
+      }
+      options.confirmLabelType = value as DiffTypeLabel;
+      break;
+    case "--label-diff-digest":
+      if (!/^[a-f0-9]{64}$/u.test(value)) invalidFlag(flag, "current diff SHA-256 digest", "invalid digest");
+      options.labelDiffDigest = value;
+      break;
+    case "--priority":
+      if (value !== "p0" && value !== "p1" && value !== "p2") invalidFlag(flag, "p0, p1 or p2", "unknown priority");
+      options.priority = value;
+      break;
+    case "--priority-reason":
+      options.priorityReason = assertScalar(flag, value);
+      break;
     case "--input":
       options.input = assertScalar(flag, value);
       break;
@@ -233,6 +261,7 @@ export function parseCliOptions(arguments_: readonly string[]): CliOptions {
     throw cliInputError(null, "an array of command-line strings", "invalid argument vector");
   }
   const options: MutableOptions = {
+    confirmLabelType: null, labelDiffDigest: null, priority: null, priorityReason: null,
     input: null,
     inputFormat: null,
     nonInteractive: false,
@@ -292,6 +321,13 @@ export function parseCliOptions(arguments_: readonly string[]): CliOptions {
   if (options.offline && options.noUpdate) {
     throw cliInputError(null, "either --offline or --no-update", "conflicting update modes");
   }
+  if ((options.confirmLabelType === null) !== (options.labelDiffDigest === null)) {
+    invalidFlag("--confirm-label-type", "type and diff digest together", "incomplete confirmation");
+  }
+  if (((options.priority === "p0" || options.priority === "p1") && options.priorityReason === null) ||
+      (options.priority === null && options.priorityReason !== null)) {
+    invalidFlag("--priority", "explicit priority with elevation reason", "incomplete priority selection");
+  }
   assertClientTuple(options);
   return options;
 }
@@ -301,4 +337,14 @@ export function mayPrompt(options: CliOptions, stdinIsTerminal: boolean): boolea
     !options.nonInteractive &&
     options.input !== "-" &&
     stdinIsTerminal;
+}
+
+/** The ordinary --type title hint never serves as classification confirmation. */
+export function labelOptionsFromCli(options: CliOptions): LabelSelectionOptions {
+  return Object.freeze({
+    ...(options.confirmLabelType === null ? {} : { confirmedType: options.confirmLabelType }),
+    ...(options.labelDiffDigest === null ? {} : { confirmationDigest: options.labelDiffDigest }),
+    ...(options.priority === null ? {} : { priority: options.priority }),
+    ...(options.priorityReason === null ? {} : { priorityReason: options.priorityReason }),
+  });
 }

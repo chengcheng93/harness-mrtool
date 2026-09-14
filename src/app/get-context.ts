@@ -13,6 +13,7 @@ import type { CandidateContextStore } from "../context/store.ts";
 import type { GitLabClient } from "../gitlab/client.ts";
 import { normalizeGitLabOrigin } from "../gitlab/http.ts";
 import type { GitLabAppliedLabel, GitLabIssue, GitLabLabel, GitLabMergeRequest, GitLabUser } from "../gitlab/types.ts";
+import { DEFAULT_LABEL_POOL, defaultLabelNames } from "./label-defaults.ts";
 import {
   validateExternalContextSnapshot,
   type ExternalContextSnapshot,
@@ -58,6 +59,7 @@ export interface ContextLabelCandidate {
   readonly scopeKind: "project" | "group";
   readonly scopePath: string;
   readonly currentlyApplied: boolean;
+  readonly defaultSelected: boolean;
 }
 
 export interface ContextUserCandidate {
@@ -318,7 +320,13 @@ export async function getContext(options: GetContextOptions): Promise<Discovered
     ? { approvedUserIds: Object.freeze([]) as readonly string[], unresolvedDiscussions: 0 }
     : await options.gitlab.getReviewState(project.id, mr.iid, mr.sha);
   const policyView = policy(options.bundle);
+  // Read the exact validated historical policy, including its dynamic week and
+  // priority candidates. Only new-policy contexts restrict selectable labels;
+  // the mandatory write selector independently enforces today's three labels.
+  const historicalPolicy = policyView.categories.some(({ id }) => id === "week");
+  const fixedPool = new Set<string>(DEFAULT_LABEL_POOL);
   const categorized = inventory.effective.flatMap((label) => {
+    if (!historicalPolicy && !fixedPool.has(label.name)) return [];
     const category = categoryFor(label, policyView.categories);
     return category === null ? [] : [{ label, category }];
   });
@@ -421,6 +429,11 @@ export async function getContext(options: GetContextOptions): Promise<Discovered
   const mrReviewerIds = new Set(snapshot.mergeRequest.reviewerUserIds);
   const labelsOutput: ContextLabelCandidate[] = [];
   const usersOutput: ContextUserCandidate[] = [];
+  const defaultLabels = mr === null ? defaultLabelNames(
+    categorized
+      .filter((entry) => entry.category !== policyView.lifecycle.statusCategory)
+      .map((entry) => ({ ...entry.label, category: entry.category })),
+  ) : new Set<string>();
   for (const candidate of issued.candidates) {
     if (candidate.metadata.kind === "label") {
       labelsOutput.push({
@@ -431,6 +444,7 @@ export async function getContext(options: GetContextOptions): Promise<Discovered
         scopeKind: candidate.metadata.scopeKind,
         scopePath: candidate.metadata.scopePath,
         currentlyApplied: mrLabelIds.has(candidate.metadata.globalId),
+        defaultSelected: mr === null && defaultLabels.has(candidate.metadata.name),
       });
     } else {
       usersOutput.push({

@@ -1,3 +1,4 @@
+import { bugLabelDiff } from "../helpers/label-diff.ts";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -107,6 +108,7 @@ async function fixture(): Promise<Fixture> {
   rawRequest.review.reviewerCandidateTokens = [REVIEWER];
   rawSnapshot.labelCandidates = [
     { id: "gid://gitlab/ProjectLabel/10", name: "type::bug" },
+    { id: "gid://gitlab/ProjectLabel/30", name: "priority::p2" },
     { id: "gid://gitlab/ProjectLabel/40", name: "status::doing" },
     { id: "gid://gitlab/ProjectLabel/50", name: "status::review" },
   ];
@@ -289,7 +291,7 @@ function durableVerificationFixture(base: Fixture): {
     labelCandidates: [
       { id: "gid://gitlab/ProjectLabel/10", name: "week::2026-w32-0803-0809" },
       { id: "gid://gitlab/ProjectLabel/20", name: "type::bug" },
-      { id: "gid://gitlab/ProjectLabel/30", name: "priority::p1" },
+      { id: "gid://gitlab/ProjectLabel/30", name: "priority::p2" },
       { id: "gid://gitlab/ProjectLabel/40", name: "status::doing" },
       { id: "gid://gitlab/ProjectLabel/50", name: "status::review" },
     ],
@@ -312,13 +314,13 @@ function durableVerificationFixture(base: Fixture): {
       ...labelCandidate(),
       restId: 30,
       globalId: "gid://gitlab/ProjectLabel/30",
-      name: "priority::p1",
+      name: "priority::p2",
       policyCategory: "priority",
     },
     candidates[1]!,
     candidates[2]!,
   ];
-  const writePlan = buildWritePlan({ request, snapshot, resolvedCandidates: resolved, bundle: base.bundle });
+  const writePlan = buildWritePlan({ request, snapshot, resolvedCandidates: resolved, bundle: base.bundle, labelDiff: bugLabelDiff(snapshot) });
   const readySnapshot = validateExternalContextSnapshot({
     ...structuredClone(snapshot),
     metadataRead: { status: "available", evidence: "MR metadata read." },
@@ -661,6 +663,7 @@ function candidateStore(
 
 function preparedCreate(base: Fixture, remote: MergeRequestRemote): PreparedCreateMergeRequestCommand {
   return {
+    labelDiff: bugLabelDiff(base.snapshot),
     request: base.request,
     binding: base.binding,
     initialSnapshot: base.snapshot,
@@ -675,6 +678,7 @@ function preparedCreate(base: Fixture, remote: MergeRequestRemote): PreparedCrea
 function preparedUpdate(base: Fixture, remote: MergeRequestRemote): PreparedUpdateMergeRequestCommand {
   const initial = remoteValue(existingSnapshot(base.snapshot));
   return {
+    labelDiff: bugLabelDiff(base.snapshot),
     request: base.request,
     binding: { ...base.binding, operation: "update", mrIid: initial.iid },
     initial,
@@ -836,7 +840,7 @@ test("trusted binding drift after preflight is rejected before consume and mutat
 
   await assert.rejects(
     adapter.create({ upsert: false, prepare: async () => preparedCreate(base, remote) }),
-    (error: unknown) => error instanceof ToolError && error.code === "INTERNAL_ERROR",
+    (error: unknown) => error instanceof RemoteMutationError && error.outcome === "rejected" && error.reason === "conflict",
   );
   assert.equal(bindingReads, 2);
   assert.equal(operations.includes("candidate:true"), false);
@@ -1270,6 +1274,11 @@ test("create runs every read precondition before live revalidation, consumption,
   assert.equal(execution.context?.remoteWrite?.state, "written");
   assert.equal(execution.output?.data?.command, "create");
   assert.equal(execution.output?.data?.lifecycle, "ready");
+  const mandatory = execution.output?.data?.mandatoryLabels as { names: string[]; ids: string[]; diffDigest: string; source: string };
+  assert.deepEqual(mandatory.names, ["type::bug", "priority::p2", "status::review"]);
+  assert.equal(mandatory.source, "diff");
+  assert.match(mandatory.diffDigest, /^[a-f0-9]{64}$/u);
+  assert.equal(mandatory.ids.length, 3);
   const projectedCandidates = execution.output?.data?.selectedCandidates as readonly Record<string, unknown>[];
   assert.deepEqual(Object.keys(projectedCandidates[0] ?? {}).sort(), [
     "globalId", "kind", "name", "policyCategory", "restId", "scopeId", "scopeKind", "scopePath",
