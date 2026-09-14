@@ -1,0 +1,118 @@
+{
+  "schemaVersion": 1,
+  "contextId": "context:REPLACE_FROM_CONTEXT_OUTPUT",
+  "intent": "draft",
+  "profileIds": [
+    "code"
+  ],
+  "targetBranch": "develop",
+  "title": {
+    "type": "fix",
+    "module": "example",
+    "titleSummary": "替换为本次变更标题"
+  },
+  "changes": {
+    "summary": [
+      "替换为实际变更摘要"
+    ],
+    "technicalChanges": [
+      "替换为实际实现说明"
+    ],
+    "outOfScope": [
+      "列出本次不包含的内容"
+    ]
+  },
+  "motivation": {
+    "background": [
+      "描述真实问题背景"
+    ],
+    "whyNeeded": [
+      "描述本次变更原因"
+    ]
+  },
+  "workItem": {
+    "relation": "none",
+    "noIssueReason": "替换为未关联 Issue 的真实理由，或改用 related/closing 与实际 iid"
+  },
+  "impact": {
+    "areaIds": [
+      "app"
+    ],
+    "nature": "non-functional",
+    "details": [
+      "替换为实际影响范围"
+    ]
+  },
+  "verification": {
+    "items": [
+      {
+        "id": "local-build",
+        "state": "pending",
+        "evidenceKind": "pending-reason",
+        "command": null,
+        "result": null,
+        "evidence": "尚未验证；提交前根据真实情况填写，不得冒称通过。"
+      },
+      {
+        "id": "unit-tests",
+        "state": "pending",
+        "evidenceKind": "pending-reason",
+        "command": null,
+        "result": null,
+        "evidence": "尚未验证；提交前根据真实情况填写，不得冒称通过。"
+      },
+      {
+        "id": "integration-tests",
+        "state": "pending",
+        "evidenceKind": "pending-reason",
+        "command": null,
+        "result": null,
+        "evidence": "尚未验证；提交前根据真实情况填写，不得冒称通过。"
+      },
+      {
+        "id": "core-behavior",
+        "state": "pending",
+        "evidenceKind": "pending-reason",
+        "command": null,
+        "result": null,
+        "evidence": "尚未验证；提交前根据真实情况填写，不得冒称通过。"
+      }
+    ],
+    "acceptanceEvidence": [],
+    "knownGaps": [
+      "示例未执行任何验证；请填写实际证据和待办项。"
+    ]
+  },
+  "documentation": {
+    "itemIds": [],
+    "details": [
+      "按真实情况填写文档变更或无需变更的原因"
+    ]
+  },
+  "risk": {
+    "level": "medium",
+    "items": [
+      "替换为实际风险"
+    ],
+    "compatibilityImpact": [
+      "替换为实际兼容性影响"
+    ],
+    "rollbackPlan": [
+      "替换为可执行的回滚方案"
+    ]
+  },
+  "profileFields": {},
+  "review": {
+    "reviewerCandidateTokens": [],
+    "reviewerFocus": [
+      "替换为期望审核人重点检查的内容"
+    ],
+    "additionalNotes": []
+  },
+  "mergeRequest": {
+    "assigneeCandidateToken": null,
+    "labelCandidateTokens": [],
+    "removeSourceBranch": true,
+    "squash": true
+  }
+}

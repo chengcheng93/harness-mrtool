@@ -7,23 +7,28 @@ MR descriptions. This path generates a local handoff and does not require a
 GitLab API token.
 
 GitLab API authentication is host-scoped and resolved by the credential adapter
-only when the caller explicitly selects `--auth api`.
+for API operations. Explicit `--auth api` is recommended; direct API commands
+also retain legacy API behavior under `--auth auto`.
+The default provider accepts `HARNESS_MRTOOL_GITLAB_HOST` and
+`HARNESS_MRTOOL_GITLAB_TOKEN` from the local process environment and binds the
+token to the selected host. Never place token literals in argv, repository files,
+remote URLs or chat; see the README for hidden-input examples.
 The adapter rejects local paths and unsupported endpoint forms before reading a
 credential. Credentials are treated as secrets even when a remote response
 tries to reflect them; successful projections run the session exposure guard.
 
-SSH Push Options are an explicit, restricted extension of the SSH path. The
-tool allows only `merge_request.create`, `merge_request.target`,
-`merge_request.title`, `merge_request.description`, and optional
-`merge_request.draft`. Labels, assignees, reviewers, target projects, and
-auto-merge remain web/API-only. A Push Options request is never reported as
-verified until GitLab is opened and checked.
+The mandatory-label CLI rejects `manual --ssh-mr` with `LABEL_ERROR` before
+push planning or execution. Ordinary SSH branch push remains available, but it
+cannot prove MR labels or metadata. Use the API transaction path for creation,
+updates, inventory checks and verified readback. Raw Git push options outside
+this tool are not subject to its guarantees.
 
 Update trust is build-time data. The repository, Pages channel, Ed25519 roots,
-and bootstrap metadata are immutable inputs to a production build. The checked
-in source configuration intentionally contains no production roots, so a
-source invocation fails closed. Test-only loopback trust is branded and cannot
-be relabeled as production trust.
+and bootstrap metadata are immutable inputs to a production build. The checked-in
+source configuration pins the reviewed `release-key-1` public root and its
+fingerprint. Missing/substituted roots and invalid signed evidence
+fail closed; the private signing key is not stored in this repository. Test-only
+loopback trust is branded and cannot be relabeled as production trust.
 
 The bundled Skill bootstrap accepts only the fixed GitHub repository and the
 exact `skill-v<version>` release path. It follows a bounded set of HTTPS GitHub
