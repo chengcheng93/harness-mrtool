@@ -213,6 +213,11 @@ function decodeCanonicalPayload(payload: Uint8Array): JsonValue {
   return parsed;
 }
 
+/** Structural receipt parsing only; callers must authenticate payload bytes first. */
+export function parseCanonicalBundleReceiptPayload(payload: Uint8Array): BundleReceipt {
+  return parseReceipt(decodeCanonicalPayload(payload));
+}
+
 function sameRepository(left: ReleaseRepository, right: ReleaseRepository): boolean {
   return left.owner === right.owner && left.name === right.name;
 }
@@ -322,7 +327,8 @@ function manifestRecord(value: unknown): TemplateBundleManifest {
   };
 }
 
-function verifyBundleReceiptFiles(
+/** File-integrity helper only; does not grant runtime/channel authorization. */
+export function verifyBundleReceiptFiles(
   receipt: BundleReceipt,
   actualFiles: ReadonlyMap<string, Uint8Array>,
 ): ReadonlyMap<string, Uint8Array> {

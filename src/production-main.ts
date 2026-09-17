@@ -47,6 +47,7 @@ import {
   type PublicInvocationPreflight,
 } from "./update/preflight.ts";
 import { createUpdaterCommandServices } from "./cli/commands/updater.ts";
+import { createProductionChannelCheckHandler, type ProductionChannelCommandDefaults } from "./cli/commands/production-channel.ts";
 import { createSkillCommandServices, type SkillCommandService } from "./cli/commands/skill.ts";
 import type { UpdateService } from "./update/service.ts";
 
@@ -72,6 +73,7 @@ export interface ProductionMainDependencies {
   readonly targetProjectResolver?: TargetProjectResolver;
   readonly updatePreflight?: PublicInvocationPreflight;
   readonly updateService?: UpdateService;
+  readonly updateChannelDefaults?: ProductionChannelCommandDefaults;
   readonly skillService?: SkillCommandService;
 }
 
@@ -98,9 +100,12 @@ async function embeddedBundleSelection(): Promise<TrustedBundleSelection> {
   };
 }
 
-function lazyDefaultUpdaterCommandServices(): Pick<ProductionCommandServices, "selfUpdateStatus"> {
+function lazyDefaultUpdaterCommandServices(
+  channelDefaults: ProductionChannelCommandDefaults = {},
+): Pick<ProductionCommandServices, "selfUpdateCheck" | "selfUpdateStatus"> {
   let resolved: Pick<ProductionCommandServices, "selfUpdateStatus"> | undefined;
   return Object.freeze({
+    selfUpdateCheck: createProductionChannelCheckHandler(cliVersion, channelDefaults),
     selfUpdateStatus: async (invocation) => {
       resolved ??= createDefaultUpdaterCommandServices();
       const handler = resolved.selfUpdateStatus;
@@ -151,7 +156,7 @@ async function publicCommandHandlers(
     writeDefaults: { cliVersion, cwd, currentBundle, contextIssueIid, ...dependencies.readOnlyDefaults },
     services: {
       ...(dependencies.updateService === undefined
-        ? lazyDefaultUpdaterCommandServices()
+        ? lazyDefaultUpdaterCommandServices(dependencies.updateChannelDefaults)
         : injectedUpdaterCommandServices(dependencies.updateService)),
       ...(dependencies.skillService === undefined
         ? {}

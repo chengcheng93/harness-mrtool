@@ -3,6 +3,7 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  realpath,
   readFile,
   rm,
   symlink,
@@ -16,7 +17,7 @@ import { isToolError } from "../../src/contracts/errors.ts";
 import { writeProjectTemplate } from "../../src/cli/projection-writer.ts";
 
 async function fixture(context: test.TestContext): Promise<string> {
-  const root = await mkdtemp(resolve(tmpdir(), "harness-mrtool-projection-"));
+  const root = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-projection-"));
   context.after(() => rm(root, { recursive: true, force: true }));
   return root;
 }

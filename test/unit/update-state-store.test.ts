@@ -5,6 +5,7 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  realpath,
   open,
   readFile,
   readdir,
@@ -180,7 +181,7 @@ function acceptState(
 }
 
 async function stateFixture(t: { after(callback: () => void | Promise<void>): void }) {
-  const stateDirectory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-update-state-"));
+  const stateDirectory = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-update-state-"));
   t.after(async () => rm(stateDirectory, { recursive: true, force: true }));
   const signing = createSigningFixture("release-key-1");
   const keys = bootstrapKeys(signing);
@@ -199,7 +200,7 @@ async function stateFixture(t: { after(callback: () => void | Promise<void>): vo
 }
 
 test("returns null for a missing update state and prepares a private directory", async (t) => {
-  const stateDirectory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-update-state-"));
+  const stateDirectory = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-update-state-"));
   await rm(stateDirectory, { recursive: true, force: true });
   t.after(async () => rm(stateDirectory, { recursive: true, force: true }));
   const store = new UpdateStateStore({
@@ -295,7 +296,7 @@ test("preserves sequence monotonicity and rejects same-sequence equivocation", a
 });
 
 test("independent writers serialize validation and atomic publication through the shared lock", async (t) => {
-  const stateDirectory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-update-state-lock-"));
+  const stateDirectory = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-update-state-lock-"));
   t.after(async () => rm(stateDirectory, { recursive: true, force: true }));
   const signing = createSigningFixture("release-key-1");
   const keys = bootstrapKeys(signing);
@@ -741,8 +742,8 @@ test("rejects a hard-linked stale temp without changing its external target", as
 });
 
 test("rejects a junction state root before acquiring the process lock", async (t) => {
-  const container = await mkdtemp(resolve(tmpdir(), "harness-mrtool-state-link-"));
-  const target = await mkdtemp(resolve(tmpdir(), "harness-mrtool-state-target-"));
+  const container = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-state-link-"));
+  const target = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-state-target-"));
   t.after(async () => Promise.all([
     rm(container, { recursive: true, force: true }),
     rm(target, { recursive: true, force: true }),
@@ -782,7 +783,7 @@ test("requires the Windows private-state ACL verifier and redacts verifier failu
     t.skip("Windows ACL contract");
     return;
   }
-  const stateDirectory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-state-acl-"));
+  const stateDirectory = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-state-acl-"));
   t.after(async () => rm(stateDirectory, { recursive: true, force: true }));
   let verifications = 0;
   const store = new UpdateStateStore({

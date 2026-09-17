@@ -36,6 +36,9 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$RELEASE_TAG" =~ ^templates-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]
+      - name: Verify release version coherence
+        shell: bash
+        run: node scripts/verify-release-version.mjs --component templates --tag "$RELEASE_TAG"
       - run: npm run typecheck
       - run: npm test -- test/unit/bundle.test.ts test/unit/update-manifest.test.ts
       - name: Create immutable template receipt
@@ -58,6 +61,9 @@ jobs:
           test -s "$TEMPLATE_DIST/bundle-receipt.envelope.json"
         env:
           BUNDLE_RECEIPT_B64: ${{ secrets.TEMPLATE_BUNDLE_RECEIPT_B64 || secrets.BUNDLE_RECEIPT_B64 }}
+      - name: Verify signed template publication
+        shell: bash
+        run: node scripts/verify-template-publication.mjs --directory template-bundle --archive "$TEMPLATE_DIST/harness-mr-templates.zip" --receipt "$TEMPLATE_DIST/bundle-receipt.envelope.json" --tag "$RELEASE_TAG"
       - name: Attest the verified template archive
         uses: actions/attest@v4
         with:

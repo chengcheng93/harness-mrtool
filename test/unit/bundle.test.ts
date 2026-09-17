@@ -4,6 +4,7 @@ import {
   cp,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   unlink,
   writeFile,
@@ -142,7 +143,7 @@ const REQUIRED_BASE_FIELDS = [
 ] as const;
 
 async function createValidBundleFixture(context: test.TestContext): Promise<string> {
-  const fixtureRoot = await mkdtemp(resolve(tmpdir(), "harness-bundle-"));
+  const fixtureRoot = await mkdtemp(resolve(await realpath(tmpdir()), "harness-bundle-"));
   context.after(() => rm(fixtureRoot, { recursive: true, force: true }));
   const bundlePath = resolve(fixtureRoot, "bundle");
   await cp(templateBundlePath, bundlePath, { recursive: true });

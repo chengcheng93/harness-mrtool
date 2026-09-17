@@ -18,14 +18,27 @@ import { canonicalize } from "json-canonicalize";
 const MAX_INPUT_BYTES = 256 * 1024 * 1024;
 const MAX_ARCHIVE_BYTES = 256 * 1024 * 1024;
 const SHA256 = /^[a-f0-9]{64}$/u;
-const EXPECTED_NAMES = Object.freeze([
-  "SHA256SUMS",
-  "THIRD_PARTY_NOTICES.md",
-  "bundle-receipt.envelope.json",
-  "harness-mrtool.exe",
-  "licenses/Node.txt",
-]);
-const CHECKSUM_NAMES = Object.freeze(EXPECTED_NAMES.filter((name) => name !== "SHA256SUMS"));
+export function releasePlatform(platform = "windows-x64") {
+  if (platform !== "windows-x64" && platform !== "darwin-arm64") {
+    fail("unsupported platform target.");
+  }
+  const executableName = platform === "darwin-arm64" ? "harness-mrtool" : "harness-mrtool.exe";
+  const expectedNames = Object.freeze(["SHA256SUMS", "THIRD_PARTY_NOTICES.md",
+    "bundle-receipt.envelope.json", executableName, "licenses/Node.txt"]);
+  return Object.freeze({ platform, executableName, archiveName: `harness-mrtool-${platform}.zip`,
+    expectedNames, checksumNames: Object.freeze(expectedNames.filter((name) => name !== "SHA256SUMS")) });
+}
+
+function assertNativeExecutable(bytes, target) {
+  // Format/architecture validation, not authenticity. Signed channel/receipt and
+  // native execution gates remain required before publishing/installing.
+  if (target.platform !== "darwin-arm64") return;
+  const b = Buffer.from(bytes);
+  if (b.length < 32 || b.readUInt32LE(0) !== 0xfeedfacf ||
+      b.readUInt32LE(4) !== 0x0100000c || b.readUInt32LE(12) !== 2) {
+    fail("Darwin ARM64 requires a thin Mach-O 64-bit ARM64 executable.");
+  }
+}
 
 function fail(message, cause) {
   throw new Error(`Portable release packaging failed: ${message}`, cause === undefined ? undefined : { cause });
@@ -154,7 +167,8 @@ function checksumText(entries) {
     .join("\n")}\n`;
 }
 
-function assertByteMap(entries) {
+function assertByteMap(entries, target) {
+  const EXPECTED_NAMES = target.expectedNames;
   if (entries === null || typeof entries !== "object" || Array.isArray(entries)) {
     fail("archive entries are not an object.");
   }
@@ -172,8 +186,10 @@ function assertByteMap(entries) {
   }
 }
 
-export function validateReleaseArchive(entries) {
-  assertByteMap(entries);
+export function validateReleaseArchive(entries, options = {}) {
+  const target = releasePlatform(options.platform);
+  const CHECKSUM_NAMES = target.checksumNames;
+  assertByteMap(entries, target);
   const sums = Buffer.from(entries["SHA256SUMS"]).toString("utf8");
   if (!sums.endsWith("\n") || sums.includes("\r")) fail("SHA256SUMS must use LF line endings.");
   const lines = sums.slice(0, -1).split("\n");
@@ -193,11 +209,12 @@ export function validateReleaseArchive(entries) {
   }
   if (seen.size !== CHECKSUM_NAMES.length) fail("SHA256SUMS is incomplete.");
   assertCanonicalReceipt(entries["bundle-receipt.envelope.json"]);
+  assertNativeExecutable(entries[target.executableName], target);
   return true;
 }
 
-export function validateReleaseArchiveAndReceipt(entries, receiptBytes) {
-  validateReleaseArchive(entries);
+export function validateReleaseArchiveAndReceipt(entries, receiptBytes, options = {}) {
+  validateReleaseArchive(entries, options);
   if (!(receiptBytes instanceof Uint8Array) || !Buffer.from(entries["bundle-receipt.envelope.json"]).equals(Buffer.from(receiptBytes))) {
     fail("standalone bundle receipt does not match the packaged receipt.");
   }
@@ -220,10 +237,12 @@ export async function packagePortableRelease({
   noticesPath,
   nodeLicensePath,
   outputPath,
+  platform = "windows-x64",
 }) {
+  const target = releasePlatform(platform);
   const output = assertStringPath(outputPath, "outputPath");
   const sources = [
-    ["harness-mrtool.exe", executablePath],
+    [target.executableName, executablePath],
     ["bundle-receipt.envelope.json", receiptPath],
     ["THIRD_PARTY_NOTICES.md", noticesPath],
     ["licenses/Node.txt", nodeLicensePath],
@@ -237,8 +256,13 @@ export async function packagePortableRelease({
   for (const [name, path] of resolvedSources) entries[name] = await readRegularFile(path, name);
   assertCanonicalReceipt(entries["bundle-receipt.envelope.json"]);
   entries["SHA256SUMS"] = Buffer.from(checksumText(Object.entries(entries)), "utf8");
-  validateReleaseArchive(entries);
-  const archive = zipSync(entries, {
+  validateReleaseArchive(entries, { platform });
+  // Store Unix executable mode only for the native archive; Windows defaults
+  // retain their existing tree and packaging behavior.
+  const archiveEntries = platform === "darwin-arm64"
+    ? { ...entries, [target.executableName]: [entries[target.executableName], { os: 3, attrs: (0o100755 << 16) >>> 0 }] }
+    : entries;
+  const archive = zipSync(archiveEntries, {
     level: 0,
     mtime: new Date("1980-01-01T00:00:00.000Z"),
   });
@@ -275,6 +299,7 @@ function commandArguments(argv) {
     ["--notices", "noticesPath"],
     ["--node-license", "nodeLicensePath"],
     ["--output", "outputPath"],
+    ["--platform", "platform"],
   ]);
   const result = {};
   for (let index = 0; index < argv.length; index += 2) {
@@ -285,7 +310,7 @@ function commandArguments(argv) {
     }
     result[key] = value;
   }
-  if (Object.keys(result).length !== allowed.size) fail("all packaging paths are required.");
+  if (["executablePath", "receiptPath", "noticesPath", "nodeLicensePath", "outputPath"].some((key) => result[key] === undefined)) fail("all packaging paths are required.");
   return result;
 }
 

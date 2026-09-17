@@ -37,6 +37,9 @@ jobs:
         shell: pwsh
         run: |
           if ($env:RELEASE_TAG -notmatch '^cli-v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$') { throw 'Release tag is invalid' }
+      - name: Verify release version coherence
+        shell: pwsh
+        run: node scripts/verify-release-version.mjs --component cli --tag "$env:RELEASE_TAG"
       - run: npm run typecheck
       - run: npm test -- test/contract/release-assets.test.ts
       - run: npm run build:sea
@@ -49,6 +52,11 @@ jobs:
           try { $bytes = [Convert]::FromBase64String($env:BUNDLE_RECEIPT_B64) } catch { throw 'BUNDLE_RECEIPT_B64 is not valid base64' }
           if ($bytes.Length -eq 0 -or $bytes.Length -gt 2097152) { throw 'Bundle receipt is outside the bounded size limit' }
           [IO.File]::WriteAllBytes('dist/bundle-receipt.envelope.json', $bytes)
+      - name: Verify the signed embedded template receipt
+        shell: pwsh
+        run: |
+          $templateVersion = (Get-Content template-bundle/bundle-manifest.json -Raw | ConvertFrom-Json).version
+          node scripts/verify-template-publication.mjs --directory template-bundle --receipt dist/bundle-receipt.envelope.json --tag "templates-v$templateVersion"
       - name: Package the final SEA bytes
         shell: pwsh
         run: |
@@ -103,6 +111,12 @@ jobs:
           unzip -p dist/harness-mrtool-windows-x64.zip SHA256SUMS > dist/SHA256SUMS
           test -s dist/SHA256SUMS
           node --input-type=module -e "import {readFile} from 'node:fs/promises'; import {unzipSync} from 'fflate'; import {validateReleaseArchiveAndReceipt} from './scripts/package-portable.mjs'; validateReleaseArchiveAndReceipt(unzipSync(await readFile('dist/harness-mrtool-windows-x64.zip')), await readFile('dist/bundle-receipt.envelope.json'));"
+      - name: Authenticate the downloaded template receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          TEMPLATE_VERSION="$(node -p "require('./template-bundle/bundle-manifest.json').version")"
+          node scripts/verify-template-publication.mjs --directory template-bundle --receipt dist/bundle-receipt.envelope.json --tag "templates-v$TEMPLATE_VERSION"
       - name: Preserve the verified bytes for publication
         uses: actions/upload-artifact@v4
         with:
@@ -140,6 +154,12 @@ jobs:
           unzip -p dist/harness-mrtool-windows-x64.zip SHA256SUMS > dist/SHA256SUMS
           test -s dist/SHA256SUMS
           node --input-type=module -e "import {readFile} from 'node:fs/promises'; import {unzipSync} from 'fflate'; import {validateReleaseArchiveAndReceipt} from './scripts/package-portable.mjs'; validateReleaseArchiveAndReceipt(unzipSync(await readFile('dist/harness-mrtool-windows-x64.zip')), await readFile('dist/bundle-receipt.envelope.json'));"
+      - name: Authenticate publishing-job template receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          TEMPLATE_VERSION="$(node -p "require('./template-bundle/bundle-manifest.json').version")"
+          node scripts/verify-template-publication.mjs --directory template-bundle --receipt dist/bundle-receipt.envelope.json --tag "templates-v$TEMPLATE_VERSION"
       - name: Create a draft release with the verified assets
         env:
           GH_TOKEN: ${{ github.token }}

@@ -6,7 +6,13 @@ profiles, rendering, labels, writes, and verification.
 
 ## Prerequisites
 
-Install the matching CLI Release first:
+CLI/Plugin 0.1.6 is a release candidate, not yet published. Build the CLI from
+current `main` source using the pinned-runtime instructions in the repository's
+root README; the plugin does not include a CLI binary. New release download links
+will be added only after publication.
+
+CLI 0.1.5 is historical and is not the matching CLI for this candidate; it does
+not include the mandatory-label changes:
 
 <https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.5>
 
@@ -24,7 +30,7 @@ The repository includes a Codex marketplace entry. With Codex CLI installed,
 run:
 
 ```text
-codex plugin marketplace add chengcheng93/harness-mrtool --ref release-candidate-0.1.0
+codex plugin marketplace add chengcheng93/harness-mrtool --ref main
 codex plugin add harness-mrtool@harness-mrtool
 ```
 
@@ -45,9 +51,10 @@ context --auth api -> structured Request -> preview -> user confirmation -> crea
 ```
 
 The manual path does not claim a remote MR was created and does not choose live
-labels, assignee, or reviewers. `manual --auth ssh --ssh-mr --push` is an
-explicit opt-in basic Push Options request and is reported as unverified until
-the user checks GitLab.
+labels, assignee, or reviewers. `manual --auth ssh --ssh-mr --push` is rejected
+with `LABEL_ERROR` before push planning or execution. Use the API flow for
+mandatory-label-verified MR creation. An ordinary branch push followed by a
+user-created web MR remains outside the tool's label-verification guarantees.
 
 The Skill sends the exact normalized Request over JSON stdin and reports the
 CLI's `ok`, `code`, transaction audit, and partial-state fields without

@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import test from "node:test";
+import packageMetadata from "../../package.json" with { type: "json" };
 import { getContext } from "../../src/app/get-context.ts";
 import { DEFAULT_LABEL_POOL } from "../../src/app/label-defaults.ts";
 import { loadTemplateBundle } from "../../src/bundle/load.ts";
@@ -93,10 +94,10 @@ async function setup(t: test.TestContext) {
   const overrides = { stateDirectory, contextStore, repository, stdinIsTerminal: () => false,
     inputIo: { statFile: async () => ({ size: Buffer.byteLength(JSON.stringify(raw)) }), readFile: async () => Buffer.from(JSON.stringify(raw)), stdin: { async *[Symbol.asyncIterator]() {} } },
     targetSessionResolver: { resolve: async () => ({ origin: client.origin, gitlab: client, project, identity: { host: "gitlab.example.test", path: project.fullPath }, targetRemote: "origin", assertNoCredentialExposure: () => {} }) } };
-  const defaults = createProductionReadOnlyDefaults({ ...overrides, cliVersion: "0.1.5", cwd: root, currentBundle, contextIssueIid: null });
+  const defaults = createProductionReadOnlyDefaults({ ...overrides, cliVersion: packageMetadata.version, cwd: root, currentBundle, contextIssueIid: null });
   async function issue(iid: number | null = null, migrate = false) {
     const invocation = parseCliInvocation(["context", ...(iid === null ? [] : ["--mr", String(iid)]), ...(migrate ? ["--migrate-template"] : []), "--output", "json"]);
-    const planned = await defaults.planner.prepare({ cliVersion: "0.1.5", command: "context", currentBundle, cwd: root, invocation, request: null, contextIssueIid: null });
+    const planned = await defaults.planner.prepare({ cliVersion: packageMetadata.version, command: "context", currentBundle, cwd: root, invocation, request: null, contextIssueIid: null });
     const context = await getContext({ ...planned.options, store: contextStore });
     raw.contextId = context.contextId;
     // Tokens come from the real private context store, not synthetic placeholders.

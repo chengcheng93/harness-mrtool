@@ -71,7 +71,7 @@ async function asset(
 }
 
 /** Inspect central-directory types before in-memory decompression; never extract to disk. */
-function archiveEntries(bytes: Uint8Array): readonly ArchiveEntry[] {
+function archiveEntries(bytes: Uint8Array, strictPublicationNames = false): readonly ArchiveEntry[] {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   let end = bytes.length - 22;
   for (; end >= Math.max(0, bytes.length - 65_557); end--) {
@@ -82,13 +82,25 @@ function archiveEntries(bytes: Uint8Array): readonly ArchiveEntry[] {
   const length = view.getUint32(end + 12, true);
   let cursor = view.getUint32(end + 16, true);
   if (count === 0 || count === 65_535 || count !== view.getUint16(end + 8, true) || cursor + length !== end) fail();
+  const centralStart = cursor;
   const entries: ArchiveEntry[] = [];
   for (let i = 0; i < count; i++) {
     if (cursor + 46 > end || view.getUint32(cursor, true) !== 0x02014b50) fail();
     const nameLength = view.getUint16(cursor + 28, true);
     const next = cursor + 46 + nameLength + view.getUint16(cursor + 30, true) + view.getUint16(cursor + 32, true);
     if (next > end || view.getUint16(cursor + 34, true) !== 0 || (view.getUint16(cursor + 8, true) & 1) !== 0) fail();
-    const name = new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(cursor + 46, cursor + 46 + nameLength));
+    const rawName = bytes.subarray(cursor + 46, cursor + 46 + nameLength);
+    const name = new TextDecoder("utf-8", { fatal: true, ignoreBOM: strictPublicationNames }).decode(rawName);
+    if (strictPublicationNames) {
+      // Publication must preserve raw names, not TextDecoder/fflate's BOM
+      // normalization. Compare both headers before using the shared inflater.
+      if (rawName[0] === 0xef && rawName[1] === 0xbb && rawName[2] === 0xbf) fail();
+      const local = view.getUint32(cursor + 42, true);
+      if (local + 30 > centralStart || view.getUint32(local, true) !== 0x04034b50) fail();
+      const localLength = view.getUint16(local + 26, true);
+      if (local + 30 + localLength > centralStart || localLength !== nameLength ||
+          !Buffer.from(rawName).equals(bytes.subarray(local + 30, local + 30 + localLength))) fail();
+    }
     const unixType = (view.getUint32(cursor + 38, true) >>> 16) & 0xf000;
     if (unixType !== 0 && unixType !== 0x8000 && unixType !== 0x4000) fail();
     const directory = name.endsWith("/");
@@ -100,8 +112,12 @@ function archiveEntries(bytes: Uint8Array): readonly ArchiveEntry[] {
   return validateArchiveEntries(entries);
 }
 
-function unpack(bytes: Uint8Array, request: HistoricalBundleReleaseAssetRequest): ReadonlyMap<string, Uint8Array> {
-  const entries = archiveEntries(bytes);
+function unpack(
+  bytes: Uint8Array,
+  request: Pick<HistoricalBundleReleaseAssetRequest, "filePaths" | "limits">,
+  strictPublicationNames = false,
+): ReadonlyMap<string, Uint8Array> {
+  const entries = archiveEntries(bytes, strictPublicationNames);
   const wanted = new Set(request.filePaths);
   const directories = new Set(request.filePaths.flatMap((path) => {
     const segments = path.split("/");
@@ -151,6 +167,20 @@ function unpack(bytes: Uint8Array, request: HistoricalBundleReleaseAssetRequest)
   if (seen.size !== entries.length || completed.size !== entries.length || files.size !== wanted.size ||
       [...wanted].some((path) => !files.has(path))) fail();
   return files;
+}
+
+/** Bounded publication decoding only, not receipt or runtime authorization. */
+export function unpackTemplatePublicationArchive(
+  bytes: Uint8Array,
+  request: Pick<HistoricalBundleReleaseAssetRequest, "filePaths" | "limits">,
+): ReadonlyMap<string, Uint8Array> {
+  try {
+    if (!(bytes instanceof Uint8Array) || bytes.length < 22 ||
+        bytes.length > request.limits.manifestBytes + request.limits.totalPayloadBytes + 1024 * 1024) fail();
+    return unpack(bytes, request, true);
+  } catch {
+    return fail();
+  }
 }
 
 /** URLs derive solely from the pinned repository, canonical tag and fixed release asset names. */

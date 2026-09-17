@@ -4,12 +4,12 @@
 AI/人负责填写变更说明，工具负责输入校验、自动标签、写前复核、写后回读和审计；
 不是 GitLab 服务端合并门禁，也不能限制绕过工具的网页或原始 Git/API 操作。
 
-> **版本状态**：本分支已实现强制标签策略（Template Bundle **1.1.0**），但尚未发布包含
-> 这些变更的新安装包。`package.json` 的 CLI 版本仍为 **0.1.5**，因此不能仅凭版本号
-> 判断是否包含新功能；应核对源码分支/提交及 `schema show` 返回的模板版本。
+> **版本状态**：当前 main 已实现强制标签策略（Template Bundle **1.1.0**）。
+> CLI/Plugin **0.1.6** 是待验收发布候选，不代表已有可安装的新 Release。
 > 既有 [CLI 0.1.5](https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.5)
 > 和 [Plugin 0.1.5](https://github.com/chengcheng93/harness-mrtool/releases/tag/plugin-v0.1.5)
-> 是旧发布资产，不包含本次强制标签改造。体验本分支请使用下面的源码运行方式。
+> 不包含本次强制标签改造。新版尚未发布，完成发布后才更新正式下载链接。
+> 当前体验方式为源码构建；请同时核对源码提交和 `schema show` 返回的模板版本。
 
 ## 1. 先选使用方式
 
@@ -292,6 +292,23 @@ hmr manual --auth ssh --input /absolute/private/mr-input/request.json --push --o
 `doctor` 的命令成功不代表所有诊断项通过，必须看 `data.checks`。
 `--offline` 不支持 live create/update/verify；`--no-update` 不代表跳过业务/签名/标签校验。
 
+## 自更新与发布候选的当前边界
+
+当前候选的 `self-update check` 已接入固定更新源、签名验证和持久化信任状态：
+
+```sh
+hmr self-update check --output json
+hmr self-update check --force --output json
+```
+
+该命令只报告经过认证的候选元数据，**不会安装**。缓存回退会明确标记未确认最新版本；
+`--offline` / `--no-update` 与显式网络检查冲突时拒绝请求。固定源不可用或验签失败，
+不能改用任意 URL 或跳过签名。`apply`、`rollback`、正式平台安装和宿主激活仍在收尾，
+在完整验收完成前不要将候选文档视为“自动更新已可用”的承诺。
+
+发布工作流已增加版本一致性、Template/Skill 实际签名与归档内容校验；Mac ARM64
+原生打包和 CI 已纳入候选代码，但尚无对应正式安装包的发布/安装成功声明。
+
 ## 10. 开发验证与更多文档
 
 在工具源码目录执行：
@@ -306,7 +323,7 @@ npm test -- --test-concurrency=1
 
 默认生产入口是 `src/production-main.ts`，源码和构建产物使用同一组服务。
 生产信任根由源码固定；历史模板需要正确签名链，不能通过参数或 JSON 更换信任根。
-本次本地验收（含 README 命令/样例校验）为 **1145 项 / 1137 通过 / 0 失败 / 8 个 Windows 专属跳过**。
+本次本地验收（含 README 命令/样例校验）为 **1399 项 / 1391 通过 / 0 失败 / 8 个 Windows 专属跳过**。
 Windows CI、正式签名发布、真实 GitLab 与真实插件宿主验收属于独立外部步骤。
 
 - [完整命令说明](docs/commands/reference.md)

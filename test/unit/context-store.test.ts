@@ -8,6 +8,7 @@ import {
   appendFile,
   readFile,
   readdir,
+  realpath,
   rename,
   rm,
   symlink,
@@ -179,7 +180,7 @@ const issueInput: IssueContextInput = {
 
 async function fixture(context: test.TestContext) {
   const directory = await context.mock.method(
-    { create: async () => import("node:fs/promises").then(({ mkdtemp }) => mkdtemp(resolve(tmpdir(), "hmr-context-"))) },
+    { create: async () => { const { mkdtemp } = await import("node:fs/promises"); return mkdtemp(resolve(await realpath(tmpdir()), "hmr-context-")); } },
     "create",
   )();
   context.after(async () => {

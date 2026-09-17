@@ -36,6 +36,9 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$RELEASE_TAG" =~ ^plugin-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]
+      - name: Verify release version coherence
+        shell: bash
+        run: node scripts/verify-release-version.mjs --component plugin --tag "$RELEASE_TAG"
       - run: npm run typecheck
       - name: Package and verify the Codex plugin
         shell: bash

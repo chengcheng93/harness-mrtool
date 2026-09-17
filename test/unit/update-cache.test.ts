@@ -4,6 +4,7 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  realpath,
   readFile,
   readdir,
   rename,
@@ -125,7 +126,7 @@ async function fixture(t: { after(callback: () => void | Promise<void>): void })
   readonly directory: string;
   readonly cache: UpdateCache;
 }> {
-  const directory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-update-cache-"));
+  const directory = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-update-cache-"));
   t.after(async () => {
     await removeFixtureDirectory(directory);
   });
@@ -330,7 +331,7 @@ test("returns null only for a genuinely empty bootstrap cache", async (t) => {
 
 
 test("never presents a self-consistent but unverified release as LKG", async (t) => {
-  const directory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-cache-unverified-"));
+  const directory = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-cache-unverified-"));
   t.after(async () => removeFixtureDirectory(directory));
   const writer = new UpdateCache({
     stateDirectory: directory,
@@ -398,7 +399,7 @@ test("rejects traversal, duplicate transaction publication, and noncanonical rec
 
 
 test("independent cache writers serialize through the shared update lock", async (t) => {
-  const directory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-cache-lock-"));
+  const directory = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-cache-lock-"));
   t.after(async () => removeFixtureDirectory(directory));
 
 
@@ -623,7 +624,7 @@ test("rejects a release directory replaced with a symbolic link without touching
 test("fails closed when the initialized release root is replaced before a write", async (t) => {
   const { cache } = await fixture(t);
   await cache.storeVerifiedReleaseSet(snapshot());
-  const outside = await mkdtemp(resolve(tmpdir(), "harness-mrtool-outside-root-"));
+  const outside = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-outside-root-"));
   t.after(async () => {
     await import("node:fs/promises").then(({ rm }) => rm(outside, { recursive: true, force: true }));
   });

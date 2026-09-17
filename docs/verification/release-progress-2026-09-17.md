@@ -1,0 +1,130 @@
+# Mandatory labels — 0.1.6 release progress (2026-09-17)
+
+**Status: not published; full release/install goal remains incomplete.**
+This is new-version evidence, not a rewrite of the older 0.1.5 release history.
+
+## Candidate and protected baseline
+
+- Starting main: `2eea0bab09db5bb4ab4d2abfa2fd9c2b9001856f`.
+- CLI and Plugin candidate version: 0.1.6; planned standalone Skill: 0.1.6.
+- Template Bundle: 1.1.0 (independently versioned).
+- Inherited 12-file dirty tree was backed up before any resumed edits.
+- Target host confirmed Darwin ARM64. `harness-mrtool` absent from PATH;
+  the Codex plugin inventory has no harness-mrtool installation and neither
+  checked standalone harness-mr Skill directory exists.
+
+## Baseline recovery, not a security downgrade
+
+The previous run's 57 failures included at least three independent causes:
+noncanonical `/var/tmp` fixture roots, current context fixtures hardcoded to
+0.1.5 after package version moved to 0.1.6, and a stale SEA build receipt after
+package/lock edits. These were not all application failures or one path problem.
+
+- Retained the scoped physical-temp fixture corrections. Deliberate symlink,
+  hardlink and path-replacement security tests remain unchanged.
+- Current production context fixtures now use package metadata. Real historical
+  0.1.5 receipt fixtures retain their original versions.
+- Rebuilt SEA using exact Node **24.16.0** before the no-exclusion full suite.
+- Restored old release evidence and download links; candidate 0.1.6 is not
+  represented as an already published release.
+- Plugin archive README also marks the unpublished candidate, uses current main
+  for source marketplace installation, and documents pre-push SSH MR refusal.
+
+Baseline evidence: **1145 tests, 1137 pass, 0 fail, 8 native-Windows skips**;
+typecheck and SEA build exit 0, build receipt matches source/executable, strict
+Darwin codesign check passes, and the pinned Node executable hash is unchanged.
+That baseline precedes the new production-channel implementation below; it must
+not be reused as its final validation.
+
+## Critical-path discoveries
+
+1. Default production had only `self-update status`; check/apply/rollback were
+   unavailable. Private apply-update, active release tuple loading and default
+   Skill service composition also require completion.
+2. Portable archive validation checks signature-envelope structure and byte
+   integrity, not cryptographic authenticity. Zero-filled signature bytes can
+   pass that structural layer. The runtime cryptographic verifier correctly
+   rejects them. Publication needs a real signed release verifier, not a renamed
+   checksum check.
+3. The fixed stable channel endpoint returned HTTP 404. The workflow currently
+   publishes a stable-* Release attachment; this is not a Pages deployment.
+4. POSIX installer currently targets a Windows ZIP. Native Mac packaging,
+   platform-specific install/upgrade/rollback and authenticated executable
+   materialization remain necessary.
+
+## In-progress implementation boundaries
+
+- **Production channel check:** reuse bounded channel HTTP, source-pinned trust,
+  monotonic real state persistence and signature verification. A check must not
+  claim installation. This is the first updater slice, not full apply/rollback.
+- **Release version gates:** require tags to match package/lock/plugin/template
+  metadata before workflows build/package. This gate is not signature validation.
+
+Remaining work: cryptographic release validation/generation, authenticated
+release-set downloading and executable/template activation, native handoff and
+rollback, Mac package/install support, production Skill composition, verified
+component promotion and Pages deployment, actual install/update/host/GitLab tests.
+
+## External prerequisites, verified early
+
+- `gh auth status`: no authenticated GitHub host; no GH_TOKEN/GITHUB_TOKEN present.
+  Git SSH works but does not authorize Secrets/Pages/Release API operations.
+- The proposed 0.1.6/1.1.0 tags were not returned by exact `git ls-remote` queries.
+- Public API main CI run `34856741541` for 2eea0ba was cancelled, not successful.
+- Source-pinned Ed25519 signing key's authorized custody/service is not yet
+  identified. No private keys or credential stores were searched or printed.
+- GitLab host/token environment absent; authorized isolated API target pending.
+
+User action requested: normal GitHub CLI login. Signing should be provided via
+an authorized signer or an explicitly supplied restricted key path, never secret
+contents in chat. Actual GitLab tests wait for a specific isolated target and
+secure API authentication. These requirements do not prevent safe local work,
+but no new signed release, supported installer or live-service success is claimed.
+
+## Bounded implementation checkpoint (not release completion)
+
+Implemented after the initial candidate baseline:
+- Actual default channel-check dispatch, signed metadata persistence, 304/replay
+  and cached fallback handling. It does not apply/install releases.
+- Real source-entry disabled-check tests (not only imported entrypoint tests).
+- Four component tag/metadata equality gates, before release build/package.
+- Publication-only Template and Skill cryptographic verifiers, production-root
+  CLIs, and workflow gates before attestation/upload/create. Historical runtime
+  receipt loading still requires its signed-channel anchors.
+- Template gate verifies actual final ZIP against signed file hashes and source
+  bytes, with bounded parsing and no filesystem extraction. FIFO replacement
+  cannot block its input open. Canonical-byte checks reject BOM envelopes,
+  payloads, manifests and relevant archive names.
+- Deterministic Skill archive generation, with timezone-independent DOS fields,
+  sorted entries, fixed file modes and final16MiB cap. Signing externally supplied
+  final archive bytes is reproducible; this is not itself receipt generation.
+- Optional `darwin-arm64` structural portable packaging, native filename/mode,
+  Mach-O ARM64 executable format checks and native macOS CI gate. Windows
+  packager defaults remain unchanged; platform installation is not yet wired.
+
+Independent review closed wrong-object Template ZIP verification and Skill BOM
+normalization findings with real signed counterexamples; metadata-only/structural
+checks are no longer misrepresented as cryptographic publication verification.
+No private production key was accessed, and no new tag/release was published.
+
+Next critical path remains signed snapshot download/provenance + actual
+apply/rollback/handoff and active tuple selection, native installers, production
+Skill activation, component signing/promotion, Pages deployment and real
+installation/GitLab acceptance. Authentication and signing custody remain external
+prerequisites, not reasons to pretend the remaining code is complete.
+
+## Verified source checkpoint — September 17
+
+- Exact Node24.16.0 typecheck: exit0.
+- Rebuilt current SEA; full suite after review fixes: **1399 tests / 1391 pass /
+  0 fail / 8 native-Windows skips**, 210 seconds, no SEA exclusion.
+- Source/artifact receipt, strict codesign and unchanged original Node hash: pass.
+- Independent closure: Template archive/FIFO and Skill canonical-BOM findings
+  closed; deterministic packaging independently verified with one generated-key
+  receipt across UTC/Shanghai/Los Angeles. Near-cap ZIP overhead rejected.
+- Real Darwin candidate structurally packaged, extracted and self-tested as
+  `harness-mrtool` with version0.1.6. The fixture used an explicitly untrusted
+  receipt and was deleted: this is **not a trusted release or installation**.
+- Commit/push of this checkpoint does not authorize new tags or imply passing
+  hosted CI, signature production-key availability, installed updater/Skill,
+  real GitLab acceptance or goal completion.

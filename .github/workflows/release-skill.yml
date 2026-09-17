@@ -36,6 +36,9 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$RELEASE_TAG" =~ ^skill-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]
+      - name: Verify release version coherence
+        shell: bash
+        run: node scripts/verify-release-version.mjs --component skill --tag "$RELEASE_TAG"
       - run: npm run typecheck
       - run: npm test -- test/contract/skill.test.ts
       - name: Verify skill tree has no links
@@ -56,14 +59,16 @@ jobs:
           CLI_VERSION="$(node -p "JSON.parse(require('fs').readFileSync('package.json', 'utf8')).version")"
           CLI_MAJOR="${CLI_VERSION%%.*}"
           NEXT_MAJOR="$((CLI_MAJOR + 1))"
-          node scripts/package-skill.mjs --input skill/harness-mr --output "$SKILL_DIST/skill-tree" --version "$SKILL_VERSION" --cli-version-range ">=$CLI_VERSION <$NEXT_MAJOR.0.0"
-          (cd "$SKILL_DIST/skill-tree" && zip -X -q -r ../skill-bundle/harness-mr-skill.zip .)
+          node scripts/package-skill-archive.mjs --input skill/harness-mr --output "$SKILL_DIST/skill-bundle/harness-mr-skill.zip" --version "$SKILL_VERSION" --cli-version-range ">=$CLI_VERSION <$NEXT_MAJOR.0.0"
           printf '%s' "$BUNDLE_RECEIPT_B64" | base64 --decode > "$SKILL_DIST/skill-bundle/bundle-receipt.envelope.json"
           (cd "$SKILL_DIST/skill-bundle" && sha256sum harness-mr-skill.zip bundle-receipt.envelope.json > SHA256SUMS)
           test -s "$SKILL_DIST/skill-bundle/harness-mr-skill.zip"
           test -s "$SKILL_DIST/skill-bundle/bundle-receipt.envelope.json"
         env:
           BUNDLE_RECEIPT_B64: ${{ secrets.SKILL_BUNDLE_RECEIPT_B64 }}
+      - name: Verify signed skill publication
+        shell: bash
+        run: node scripts/verify-skill-publication.mjs --archive "$SKILL_DIST/skill-bundle/harness-mr-skill.zip" --receipt "$SKILL_DIST/skill-bundle/bundle-receipt.envelope.json" --tag "$RELEASE_TAG"
       - name: Attest the verified skill archive
         uses: actions/attest@v4
         with:
