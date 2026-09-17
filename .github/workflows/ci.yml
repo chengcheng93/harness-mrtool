@@ -112,7 +112,19 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build:sea
-      - run: npm test -- --test-concurrency=1
+      - name: Run the full suite with bounded failure diagnostics
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          log="$(mktemp "$RUNNER_TEMP/test-spec.XXXXXX")"
+          trap 'rm -f "$log"' EXIT
+          status=0
+          npm test -- --test-concurrency=1 --test-reporter=spec >"$log" 2>&1 || status=$?
+          if (( status != 0 )); then
+            node scripts/report-test-failures.mjs "$log" "$status" 2>/dev/null || printf '%s\n' '::error::Test command failed; failure reporter unavailable.'
+          fi
+          exit "$status"
       - name: Verify and name the native development executable
         shell: bash
         run: |
