@@ -34,7 +34,7 @@ const MAX_IDENTITY = (1n << 64n) - 1n;
 const HELPER_TIMEOUT_MS = 60_000;
 const STAGE_DIRECTORY = /^\.harness-mrtool-stage-[0-9a-f-]{36}$/u;
 const POSIX_HELPER = String.raw`
-use strict; use warnings; use Config; use Fcntl qw(O_RDONLY O_NOFOLLOW); use IO::Handle;
+use strict; use warnings; use Config; use Fcntl qw(O_RDONLY O_NOFOLLOW O_DIRECTORY); use IO::Handle;
 $Config{d_fchdir} eq 'define' or die 'unsupported';
 my ($root_dev,$root_ino,$source_dir,$source_dir_dev,$source_dir_ino,$source_name,$sdev,$sino,$ssize,$smode,$suid,$destination_name,$destination_kind,@destination)=@ARGV;
 for my $value ($root_dev,$root_ino,$source_dir_dev,$source_dir_ino,$sdev,$sino,$ssize,$smode,$suid) { defined($value) && $value =~ /\A[0-9]+\z/ or die 'identity'; }
@@ -52,6 +52,12 @@ my @source_dir_stat = lstat($source_dir);
 @source_dir_stat && -d _ && $source_dir_stat[4] == $suid && ($source_dir_stat[2] & 07777) == 0700 or die 'source directory';
 if ($source_dir eq '.') { @source_dir_stat = @root_stat; }
 else { $source_dir_stat[0] == $source_dir_dev && $source_dir_stat[1] == $source_dir_ino && $source_dir_stat[0] == $root_stat[0] or die 'source directory'; }
+my $source_parent;
+if ($source_dir ne '.') {
+  sysopen($source_parent,$source_dir,O_RDONLY|O_DIRECTORY|O_NOFOLLOW) or die 'source directory open';
+  my @parent_stat=stat($source_parent);
+  @parent_stat && $parent_stat[0] == $source_dir_dev && $parent_stat[1] == $source_dir_ino && $parent_stat[4] == $suid && ($parent_stat[2] & 07777) == 0700 or die 'source directory identity';
+}
 my $source = $source_dir eq '.' ? $source_name : "$source_dir/$source_name";
 sysopen(my $source_handle,$source,O_RDONLY|O_NOFOLLOW) or die 'source open';
 my @source_stat=stat($source_handle);
@@ -66,7 +72,7 @@ rename($source,$destination_name) or die 'rename';
 my @finished=lstat($destination_name);
 @finished && -f _ && $finished[3] == 1 && $finished[0] == $sdev && $finished[1] == $sino && $finished[7] == $ssize && ($finished[2] & 07777) == $smode && $finished[4] == $suid or die 'destination result';
 my @remaining=lstat($source); @remaining && die 'source remains';
-$root->sync or die 'directory sync';
+$source_parent->sync if defined($source_parent); $root->sync or die 'directory sync';
 print STDOUT "OK\n" or die 'status';
 `;
 
