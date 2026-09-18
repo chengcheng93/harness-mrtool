@@ -64,7 +64,8 @@ jobs:
       - run: npm run build:sea
       - name: Run Windows durability smoke tests
         run: npm test -- --test-concurrency=1 --test-name-pattern="Windows publisher flushes once|default Windows ACL adapter secures" test/integration/windows-write-through-move.test.ts test/unit/context-store.test.ts
-      - run: npm test -- --test-concurrency=1
+      - name: Run the complete serial Windows suite with safe live progress
+        run: npm test -- --test-concurrency=1 --test-reporter=./scripts/ci-test-progress-reporter.mjs
       - name: Check PowerShell installer syntax
         shell: pwsh
         run: |
