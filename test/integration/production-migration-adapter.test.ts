@@ -31,6 +31,7 @@ import { bugLabelDiff } from "../helpers/label-diff.ts";
 
 const root = resolve(import.meta.dirname, "../..");
 const origin = "https://gitlab.example.test";
+const allowTestAcl = Object.freeze({ verify: async (_path: string): Promise<void> => undefined });
 const hash = (bundle: Awaited<ReturnType<typeof loadTemplateBundle>>) => sha256Utf8(`${canonicalizeJson(bundle.manifest)}\n`);
 
 /** Only the external MR transport is simulated; adapter, tokens, ownership and receipts are real. */
@@ -112,7 +113,7 @@ async function fixture(t: test.TestContext, productionIds = false) {
     sourceBranch, targetProjectId: oldSnapshot.targetProject.id, targetBranch: oldRequest.targetBranch,
     sourceHeadSha: oldSnapshot.sourceHeadSha, snapshot: oldSnapshot,
   };
-  const receipts = new VerificationReceiptStore({ stateDirectory });
+  const receipts = new VerificationReceiptStore({ stateDirectory, windowsAclVerifier: allowTestAcl });
   const oldReceipt = buildVerificationReceipt({ gitlabOrigin: origin, current: oldCurrent, bundle: previousBundle,
     expected: { request: oldRequest, snapshot: oldSnapshot, writePlan, releaseTag: previousReleaseTag, cliVersion, description, sourceBranch } });
   await receipts.stageAuthenticated(oldReceipt);
@@ -138,7 +139,7 @@ async function fixture(t: test.TestContext, productionIds = false) {
     kind: user.id === id("user:10") ? "assignee" : "reviewer", userId: user.id, globalId: null,
     username: user.username, displayName: user.displayName,
   }));
-  const store = new CandidateContextStore({ stateDirectory });
+  const store = new CandidateContextStore({ stateDirectory, windowsAclVerifier: allowTestAcl });
   const issued = await store.issue({ binding, snapshot: snapshot as unknown as JsonValue, candidates });
   rawRequest.contextId = issued.contextId;
   rawRequest.mergeRequest.labelCandidateTokens = [];
@@ -335,7 +336,7 @@ test("production route authenticates signed 1.0.0 history before migrating week 
     worktree: { clean: true, staged: false, unstaged: false, untracked: false },
   } as unknown as import("../../src/git/repository.ts").RepositorySnapshot;
   const raw = structuredClone(f.prepared.request);
-  const overrides = { stateDirectory: f.stateDirectory, contextStore: f.store, historicalBundleDefaults,
+  const overrides = { stateDirectory: f.stateDirectory, windowsAclVerifier: allowTestAcl, contextStore: f.store, historicalBundleDefaults,
     repository: { discover: async () => repo, readChangeSet: async () => f.prepared.labelDiff,
       planPush: async () => ({ kind: "up-to-date" as const, remote: "origin", ref: repo.sourceRemoteRef, sourceHeadSha: sourceSha, remoteSha: sourceSha, command: null }) },
     stdinIsTerminal: () => false,
@@ -359,7 +360,7 @@ test("production route authenticates signed 1.0.0 history before migrating week 
   assert.equal(unanchored.json.code, "UPDATE_SECURITY_ERROR");
   assert.deepEqual(f.remote.writes, []);
   assert.ok(historyRequests.some((url) => url.endsWith("stable.envelope.json")), `must enter the real historical trust path: ${unanchored.stdout} ${unanchored.stderr}`);
-  const currentOnlyState = await new UpdateStateStore({ stateDirectory: f.stateDirectory,
+  const currentOnlyState = await new UpdateStateStore({ stateDirectory: f.stateDirectory, windowsAclVerifier: allowTestAcl,
     trustConfigSha256: updateTrustConfigSha256(signed.trustConfig), bootstrapKeys: signed.bootstrapKeys }).load();
   assert.deepEqual(currentOnlyState?.trustState.bundleReceiptAnchors.map((anchor) => anchor.releaseTag), ["templates-v1.1.0"]);
   assert.ok(historyRequests.some((url) => url.endsWith("/templates-v1.0.0/bundle-receipt.envelope.json")),
@@ -397,7 +398,7 @@ test("production route authenticates signed 1.0.0 history before migrating week 
   for (const asset of ["harness-mr-templates.zip", "bundle-receipt.envelope.json"]) {
     assert.ok(historyRequests.some((url) => url.endsWith(`/templates-v1.0.0/${asset}`)), `historical ${asset} must actually be retrieved`);
   }
-  const persisted = await new UpdateStateStore({ stateDirectory: f.stateDirectory,
+  const persisted = await new UpdateStateStore({ stateDirectory: f.stateDirectory, windowsAclVerifier: allowTestAcl,
     trustConfigSha256: updateTrustConfigSha256(signed.trustConfig), bootstrapKeys: signed.bootstrapKeys }).load();
   assert.ok(persisted, "authenticated historical trust transition must be persisted");
   assert.ok(JSON.stringify(persisted.trustState).includes(signed.reference.bundleManifestHash));
