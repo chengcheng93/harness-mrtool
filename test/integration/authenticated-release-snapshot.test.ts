@@ -13,6 +13,7 @@ import {nativeReleaseFixture as fixture} from '../helpers/native-release-fixture
 import {canonicalPayload,signedEnvelope} from '../helpers/signing.ts';
 const hash=(b:Uint8Array)=>createHash('sha256').update(b).digest('hex');
 const platform='darwin-arm64' as const;
+const allowTestAcl={verify:async()=>{}};
 
 
 test('signed release archives become deterministic, restart-verifiable cache snapshots',async()=>{
@@ -102,7 +103,7 @@ test('production preparation downloads signed assets, rechecks channel and leave
  const {createProductionReleasePreparer}=await import('../../src/update/production-release-preparation.ts');
  const f=await fixture();const root=await mkdtemp(resolve(await realpath(tmpdir()),'release-preparation-'));
  t.after(()=>rm(root,{recursive:true,force:true}));const requests:string[]=[];let channelChecks=0;
- const candidate=createProductionReleasePreparer({stateDirectory:root,platform,trustConfig:f.signed.trustConfig,
+ const candidate=createProductionReleasePreparer({stateDirectory:root,platform,trustConfig:f.signed.trustConfig,windowsAclVerifier:allowTestAcl,
   channelUrl:'https://fixture.example.test/stable.envelope.json',
   transport:{async request(){channelChecks++;return{status:200,headers:{},body:Buffer.from(signedEnvelope(canonicalPayload(f.payload),[f.signed.signingKey]))};}},
   fetch:async(url)=>{requests.push(String(url));return new Response(Buffer.from(String(url).endsWith('harness-mrtool-darwin-arm64.zip')?f.options.cliArchive:String(url).endsWith('harness-mr-templates.zip')?f.options.templateArchive:f.options.templateReceipt));},
@@ -117,7 +118,7 @@ test('production preparation rejects channel advancement after asset download be
  const {createProductionReleasePreparer}=await import('../../src/update/production-release-preparation.ts');
  const f=await fixture();const root=await mkdtemp(resolve(await realpath(tmpdir()),'release-drift-'));
  t.after(()=>rm(root,{recursive:true,force:true}));let channelChecks=0;
- const candidate=createProductionReleasePreparer({stateDirectory:root,platform,trustConfig:f.signed.trustConfig,
+ const candidate=createProductionReleasePreparer({stateDirectory:root,platform,trustConfig:f.signed.trustConfig,windowsAclVerifier:allowTestAcl,
   channelUrl:'https://fixture.example.test/stable.envelope.json',
   transport:{async request(){channelChecks++;const payload=channelChecks===1?f.payload:{...f.payload,sequence:43};return{status:200,headers:{},body:Buffer.from(signedEnvelope(canonicalPayload(payload),[f.signed.signingKey]))};}},
   fetch:async(url)=>new Response(Buffer.from(String(url).endsWith('harness-mrtool-darwin-arm64.zip')?f.options.cliArchive:String(url).endsWith('harness-mr-templates.zip')?f.options.templateArchive:f.options.templateReceipt)),
