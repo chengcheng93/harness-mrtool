@@ -78,9 +78,9 @@ async function directoryIdentity(path: string, expected?: FileIdentity): Promise
     const physical = await realpath(path);
     const after = await lstat(path, { bigint: true }) as BigIntStats;
     if (!before.isDirectory() || before.isSymbolicLink() || !after.isDirectory() || after.isSymbolicLink() ||
-        !samePath(physical, path) || before.dev !== after.dev || before.ino !== after.ino) throw failure();
+        !samePath(physical, path) || before.dev !== after.dev || before.ino !== after.ino) throw failure("managed-installation:directory");
     const result = copyIdentity(before);
-    if (expected !== undefined && (result.dev !== expected.dev || result.ino !== expected.ino)) throw failure();
+    if (expected !== undefined && (result.dev !== expected.dev || result.ino !== expected.ino)) throw failure("managed-installation:directory");
     return result;
   } catch (error) {
     throw error instanceof ToolError ? error : failure("managed-installation:directory");
@@ -93,9 +93,9 @@ async function fileIdentity(path: string, expected?: FileIdentity): Promise<File
     const physical = await realpath(path);
     const after = await lstat(path, { bigint: true }) as BigIntStats;
     if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n || !samePath(physical, path) ||
-        before.dev !== after.dev || before.ino !== after.ino) throw failure();
+        before.dev !== after.dev || before.ino !== after.ino) throw failure("managed-installation:file");
     const result = copyIdentity(before);
-    if (expected !== undefined && !sameIdentity(result, expected)) throw failure();
+    if (expected !== undefined && !sameIdentity(result, expected)) throw failure("managed-installation:file");
     return result;
   } catch (error) {
     throw error instanceof ToolError ? error : failure("managed-installation:file");
@@ -103,26 +103,26 @@ async function fileIdentity(path: string, expected?: FileIdentity): Promise<File
 }
 
 async function readDigest(path: string, expected: FileIdentity, maximum: number): Promise<string> {
-  if (expected.size < 1n || expected.size > BigInt(maximum)) throw failure();
+  if (expected.size < 1n || expected.size > BigInt(maximum)) throw failure("managed-installation:digest");
   const handle = await open(path, READ_FLAGS);
   try {
     const opened = await handle.stat({ bigint: true }) as BigIntStats;
     if (!opened.isFile() || opened.isSymbolicLink() || opened.nlink !== 1n || !sameIdentity(copyIdentity(opened), expected)) {
-      throw failure();
+      throw failure("managed-installation:digest");
     }
     const hash = createHash("sha256");
     const buffer = Buffer.alloc(Math.min(64 * 1024, Number(expected.size)));
     let offset = 0;
     while (offset < Number(expected.size)) {
       const result = await handle.read(buffer, 0, Math.min(buffer.length, Number(expected.size) - offset), offset);
-      if (result.bytesRead <= 0) throw failure();
+      if (result.bytesRead <= 0) throw failure("managed-installation:digest");
       hash.update(buffer.subarray(0, result.bytesRead));
       offset += result.bytesRead;
     }
-    if ((await handle.read(Buffer.alloc(1), 0, 1, Number(expected.size))).bytesRead !== 0) throw failure();
+    if ((await handle.read(Buffer.alloc(1), 0, 1, Number(expected.size))).bytesRead !== 0) throw failure("managed-installation:digest");
     const after = await handle.stat({ bigint: true }) as BigIntStats;
     const named = await lstat(path, { bigint: true }) as BigIntStats;
-    if (!sameIdentity(copyIdentity(after), expected) || !sameIdentity(copyIdentity(named), expected)) throw failure();
+    if (!sameIdentity(copyIdentity(after), expected) || !sameIdentity(copyIdentity(named), expected)) throw failure("managed-installation:digest");
     return hash.digest("hex");
   } finally {
     await handle.close().catch(() => undefined);
@@ -235,7 +235,7 @@ export async function stageAuthenticatedManagedWindowsCandidate(
     stageStates.set(publicValue, Object.freeze({ publicValue, rootIdentity, stagedExecutableIdentity, stagedMarkerIdentity }));
     return publicValue;
   } catch (error) {
-    throw error instanceof ToolError ? error : failure();
+    throw error instanceof ToolError ? error : failure("managed-installation:stage");
   }
 }
 
@@ -254,7 +254,7 @@ export async function verifyManagedWindowsStage(stage: ManagedWindowsStage): Pro
       markerIdentity: { dev: String(marker.dev), ino: String(marker.ino), size: String(marker.size) },
     });
   } catch (error) {
-    throw error instanceof ToolError ? error : failure();
+    throw error instanceof ToolError ? error : failure("managed-installation:verify");
   }
 }
 

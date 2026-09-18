@@ -29,11 +29,11 @@ type JournalStat = Awaited<ReturnType<typeof lstat>> & {
   readonly nlink: bigint;
 };
 
-function failure(): ToolError<"UPDATE_SECURITY_ERROR"> {
+function failure(actual = "installation-journal:unsafe"): ToolError<"UPDATE_SECURITY_ERROR"> {
   return new ToolError("UPDATE_SECURITY_ERROR", "installation journal store is unsafe", {
     field: "installationJournalStore",
     expected: "a private bounded canonical journal under the fixed state root",
-    actual: "installation-journal:unsafe",
+    actual,
     safeNextStep: "Preserve installation evidence and run self-update repair.",
   });
 }
@@ -262,7 +262,7 @@ export function createInstallationJournalStore(
         currentBytes === null || !sameIdentity(existingBytes.stat, currentBytes.stat) ||
         !sameBytes(existingBytes.bytes, currentBytes.bytes)) throw failure();
 
-    await writeBoundedCanonicalFile(path, bytes, MAX_INSTALLATION_JOURNAL_BYTES, failure);
+    await writeBoundedCanonicalFile(path, bytes, MAX_INSTALLATION_JOURNAL_BYTES, () => failure("installation-journal:bounded-write"));
     const loaded = await read();
     if (loaded === null || loaded.revision !== journal.revision || loaded.transactionId !== journal.transactionId) throw failure();
     return loaded;
