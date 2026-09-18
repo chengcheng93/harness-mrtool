@@ -8,7 +8,7 @@
 export type InstallationPhase =
   | "preparing" | "prepared" | "execution-pending" | "publish-intent"
   | "canonical-published" | "marker-published" | "commit-intent"
-  | "committed" | "cleanup" | "compensating" | "aborted" | "blocked";
+  | "committed" | "cleanup" | "compensating" | "aborted" | "retention-transfer" | "blocked";
 
 /** A closed projection of a future validated full journal, never the journal itself. */
 export interface InstallationRecoveryState {
@@ -42,7 +42,7 @@ export type RecoveryDecision =
 
 const phases: readonly InstallationPhase[] = [
   "preparing", "prepared", "execution-pending", "publish-intent", "canonical-published",
-  "marker-published", "commit-intent", "committed", "cleanup", "compensating", "aborted", "blocked",
+  "marker-published", "commit-intent", "committed", "cleanup", "compensating", "aborted", "retention-transfer", "blocked",
 ];
 const fileMatches: readonly FileMatch[] = ["previous", "next", "both", "absent", "invalid"];
 const factEnums = {
@@ -90,6 +90,7 @@ function readState(input: unknown): InstallationRecoveryState | null {
   const { phase, outcome } = copy;
   if (phase === "committed" ? outcome !== "next" :
       phase === "compensating" || phase === "aborted" ? outcome !== "previous" :
+      phase === "retention-transfer" ? outcome !== "next" && outcome !== "previous" :
       phase === "cleanup" ? outcome !== "next" && outcome !== "previous" : outcome !== null) return null;
   if (phase === "execution-pending" && copy.platform !== "windows-x64") return null;
   return copy as unknown as InstallationRecoveryState;
@@ -122,7 +123,7 @@ function decide(state: InstallationRecoveryState | null, facts: RecoveryFacts): 
   // Ownership can transfer only from a frozen terminal journal. A catalog
   // receipt claiming otherwise contradicts this projected transaction.
   if ((facts.retention === "transferred" || facts.retention === "transfer-pending") &&
-      !["committed", "aborted", "cleanup"].includes(state.phase)) return "block";
+      !["committed", "aborted", "cleanup", "retention-transfer"].includes(state.phase)) return "block";
   if (["pre-admission", "admitted-live", "unsettled"].includes(facts.launch)) return "wait-owner";
   if (facts.canonical === "absent" && (state.platform !== "windows-x64" || facts.innerBinding !== "matching")) return "block";
 
@@ -140,7 +141,7 @@ function decide(state: InstallationRecoveryState | null, facts: RecoveryFacts): 
   if (facts.active === "next") {
     if (["preparing", "prepared", "execution-pending"].includes(state.phase) || !nextAllowed) return "block";
     return nextFiles && facts.retention === "transferred" &&
-      (state.phase === "committed" || state.phase === "cleanup") ? "finish-cleanup" : "finish-next";
+      (state.phase === "committed" || state.phase === "cleanup" || state.phase === "retention-transfer") ? "finish-cleanup" : "finish-next";
   }
   if (state.phase === "preparing" || state.phase === "prepared") {
     return previousFiles && previousAllowed ? "abort-preparation" : "block";

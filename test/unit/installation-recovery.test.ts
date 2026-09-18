@@ -87,6 +87,19 @@ test("explicit compensation never opportunistically flips back to candidate prom
   assert.equal(decideInstallationRecovery(state("cleanup", "previous"), facts({ retention: "transferred" })), "finish-cleanup");
 });
 
+test("retention-transfer keeps the journal owner until catalog handoff is durable", () => {
+  const next = state("retention-transfer", "next");
+  const nextFacts = facts({ canonical: "next", marker: "next", active: "next" });
+  assert.equal(decideInstallationRecovery(next, nextFacts), "finish-next");
+  assert.equal(decideInstallationRecovery(next, { ...nextFacts, retention: "transfer-pending" }), "finish-next");
+  assert.equal(decideInstallationRecovery(next, { ...nextFacts, retention: "transferred" }), "finish-cleanup");
+
+  const previous = state("retention-transfer", "previous");
+  const previousFacts = facts({ canonical: "previous", marker: "previous", active: "previous" });
+  assert.equal(decideInstallationRecovery(previous, previousFacts), "finish-previous");
+  assert.equal(decideInstallationRecovery(previous, { ...previousFacts, retention: "transferred" }), "finish-cleanup");
+});
+
 test("Windows pending can settle without ever returning a business replay action", () => {
   const pending = state("execution-pending", null, "windows-x64");
   for (const launch of ["none", "settled-completed", "settled-outcome-unknown"] as const) {
