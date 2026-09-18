@@ -232,6 +232,14 @@ export async function activateReleaseSet(options: ActivateReleaseSetOptions): Pr
     if (sameRecord(current?.record ?? null, options.next.record)) {
       return current as StoredReleaseSet;
     }
+    // Different valid acquisition histories can prove the exact same signed
+    // release. Only the cryptographic verifier may establish this equivalence;
+    // keep the installed proof/record intact and never accept sequence drift.
+    if (current !== null && options.next.record.manifestSequence === current.record.manifestSequence &&
+        await options.verifySnapshot.isSameAuthenticatedRelease?.(current, options.next) === true) {
+      lease.assertHeld();
+      return current;
+    }
     if (current !== null && options.next.record.manifestSequence <= current.record.manifestSequence) {
       throw securityFailure();
     }

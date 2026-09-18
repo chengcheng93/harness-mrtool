@@ -231,7 +231,14 @@ test("each release workflow gates version coherence before build or packaging", 
       const boundaryIndex = steps.findIndex((step) => step.run?.includes(boundary));
       assert.ok(boundaryIndex > gateIndex, "version gate must precede artifact creation");
       if (component === "cli") {
-        assert.equal(workflow.jobs["verify-draft-assets"].needs, "build");
+        assert.deepEqual(workflow.jobs["verify-draft-assets"].needs, ["build", "verify-draft-assets-macos-arm64"]);
+        assert.equal(workflow.jobs["verify-draft-assets-macos-arm64"].needs, "build-macos-arm64");
+        const macSteps = workflow.jobs["build-macos-arm64"].steps as { run?: string; if?: string; "continue-on-error"?: boolean }[];
+        const macGate = macSteps.findIndex((step) => step.run?.includes("node scripts/verify-release-version.mjs"));
+        const macBuild = macSteps.findIndex((step) => step.run === "npm run build:sea");
+        assert.ok(macGate >= 0 && macBuild > macGate, "native build also requires the unconditional version gate");
+        assert.equal(macSteps[macGate]!.if, undefined);
+        assert.notEqual(macSteps[macGate]!["continue-on-error"], true);
         assert.equal(workflow.jobs.publish.needs, "verify-draft-assets");
       } else {
         assert.ok(steps.findIndex((step) => step.run?.includes("gh release create")) > gateIndex);

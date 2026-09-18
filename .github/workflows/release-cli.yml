@@ -77,14 +77,114 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: release-cli-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
           path: |
             dist/harness-mrtool.exe
             dist/harness-mrtool-windows-x64.zip
             dist/bundle-receipt.envelope.json
             dist/sea-build-receipt.json
 
+  build-macos-arm64:
+    runs-on: macos-15
+    timeout-minutes: 35
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      TMPDIR: /private/var/tmp
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.16.0
+          architecture: arm64
+          cache: npm
+      - name: Require the exact native Darwin ARM64 runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          node -e 'if (process.platform !== "darwin" || process.arch !== "arm64" || process.versions.node !== "24.16.0") process.exit(1)'
+      - name: Clean build output
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf dist
+      - run: npm ci
+      - name: Verify release version coherence
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/verify-release-version.mjs --component cli --tag "$RELEASE_TAG"
+      - run: npm run typecheck
+      - run: npm test -- test/contract/release-assets.test.ts test/contract/native-release-platform.test.ts test/contract/native-cli-release-workflow.test.ts
+      - run: npm run build:sea
+      - name: Verify and name the native release executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The shared SEA builder uses .exe even on Darwin. Do not substitute a Windows build.
+          /usr/bin/codesign --verify --strict --verbose=2 dist/harness-mrtool.exe
+          cp -p dist/harness-mrtool.exe dist/harness-mrtool
+          cmp dist/harness-mrtool.exe dist/harness-mrtool
+          ./dist/harness-mrtool self-test --output json
+          # Keep the Windows receipt name stable and avoid collisions in the joint release.
+          mv dist/sea-build-receipt.json dist/sea-build-receipt-darwin-arm64.json
+      - name: Materialize the approved signed Bundle receipt
+        shell: bash
+        env:
+          BUNDLE_RECEIPT_B64: ${{ secrets.BUNDLE_RECEIPT_B64 }}
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import { writeFile } from 'node:fs/promises';
+          const encoded = process.env.BUNDLE_RECEIPT_B64;
+          if (!encoded || encoded.length > 4 * Math.ceil(2097152 / 3)) {
+            throw new Error('BUNDLE_RECEIPT_B64 is required and must be bounded');
+          }
+          const bytes = Buffer.from(encoded, 'base64');
+          if (bytes.length === 0 || bytes.length > 2097152 || bytes.toString('base64') !== encoded) {
+            throw new Error('BUNDLE_RECEIPT_B64 must be canonical base64 within the receipt size bound');
+          }
+          await writeFile('dist/bundle-receipt.envelope.json', bytes, { flag: 'wx', mode: 0o600 });
+          NODE
+      - name: Verify the signed embedded template receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          TEMPLATE_VERSION="$(node -p "require('./template-bundle/bundle-manifest.json').version")"
+          node scripts/verify-template-publication.mjs --directory template-bundle --receipt dist/bundle-receipt.envelope.json --tag "templates-v$TEMPLATE_VERSION"
+      - name: Package the final native SEA bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/package-portable.mjs \
+            --platform darwin-arm64 \
+            --executable dist/harness-mrtool \
+            --receipt dist/bundle-receipt.envelope.json \
+            --notices THIRD_PARTY_NOTICES.md \
+            --node-license licenses/Node.txt \
+            --output dist/harness-mrtool-darwin-arm64.zip
+      - name: Attest the final portable archive
+        # Match the existing Windows private-repository attestation limitation.
+        if: ${{ github.event.repository.visibility != 'private' }}
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/harness-mrtool-darwin-arm64.zip
+      - name: Upload immutable draft inputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-cli-darwin-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          path: |
+            dist/harness-mrtool
+            dist/harness-mrtool-darwin-arm64.zip
+            dist/bundle-receipt.envelope.json
+            dist/sea-build-receipt-darwin-arm64.json
+
   verify-draft-assets:
-    needs: build
+    # Preserve the established publication boundary: this Windows verifier is
+    # also the join gate, and cannot run unless Darwin verification succeeds.
+    needs: [build, verify-draft-assets-macos-arm64]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -117,15 +217,75 @@ jobs:
           set -euo pipefail
           TEMPLATE_VERSION="$(node -p "require('./template-bundle/bundle-manifest.json').version")"
           node scripts/verify-template-publication.mjs --directory template-bundle --receipt dist/bundle-receipt.envelope.json --tag "templates-v$TEMPLATE_VERSION"
+      - name: Record platform release checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd dist && sha256sum harness-mrtool.exe harness-mrtool-windows-x64.zip bundle-receipt.envelope.json sea-build-receipt.json > SHA256SUMS-windows-x64)
       - name: Preserve the verified bytes for publication
         uses: actions/upload-artifact@v4
         with:
           name: verified-release-cli-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          path: |
+            dist/harness-mrtool.exe
+            dist/harness-mrtool-windows-x64.zip
+            dist/bundle-receipt.envelope.json
+            dist/sea-build-receipt.json
+            dist/SHA256SUMS-windows-x64
+
+  verify-draft-assets-macos-arm64:
+    needs: build-macos-arm64
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.16.0
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-cli-darwin-arm64-${{ github.run_id }}-${{ github.run_attempt }}
           path: dist
+      - name: Verify downloaded final bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s dist/harness-mrtool
+          test -s dist/harness-mrtool-darwin-arm64.zip
+          test -s dist/sea-build-receipt-darwin-arm64.json
+          unzip -p dist/harness-mrtool-darwin-arm64.zip harness-mrtool > dist/portable-harness-mrtool
+          cmp --silent dist/harness-mrtool dist/portable-harness-mrtool
+          node --input-type=module -e "import {readFile} from 'node:fs/promises'; import {unzipSync} from 'fflate'; import {validateReleaseArchiveAndReceipt} from './scripts/package-portable.mjs'; validateReleaseArchiveAndReceipt(unzipSync(await readFile('dist/harness-mrtool-darwin-arm64.zip')), await readFile('dist/bundle-receipt.envelope.json'), { platform: 'darwin-arm64' });"
+      - name: Authenticate the downloaded template receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          TEMPLATE_VERSION="$(node -p "require('./template-bundle/bundle-manifest.json').version")"
+          node scripts/verify-template-publication.mjs --directory template-bundle --receipt dist/bundle-receipt.envelope.json --tag "templates-v$TEMPLATE_VERSION"
+      - name: Record platform release checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd dist && sha256sum harness-mrtool harness-mrtool-darwin-arm64.zip bundle-receipt.envelope.json sea-build-receipt-darwin-arm64.json > SHA256SUMS-darwin-arm64)
+      - name: Preserve the verified bytes for publication
+        uses: actions/upload-artifact@v4
+        with:
+          name: verified-release-cli-darwin-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          path: |
+            dist/harness-mrtool
+            dist/harness-mrtool-darwin-arm64.zip
+            dist/bundle-receipt.envelope.json
+            dist/sea-build-receipt-darwin-arm64.json
+            dist/SHA256SUMS-darwin-arm64
 
   publish:
     needs: verify-draft-assets
-    if: ${{ startsWith(inputs.tag || github.ref_name, 'cli-v') }}
+    if: ${{ success() && startsWith(inputs.tag || github.ref_name, 'cli-v') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -142,6 +302,21 @@ jobs:
         with:
           name: verified-release-cli-${{ github.run_id }}-${{ github.run_attempt }}
           path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: verified-release-cli-darwin-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dist/darwin-arm64
+      - name: Combine the verified platform assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Both platforms must carry the same approved production receipt; never merge blindly.
+          cmp --silent dist/bundle-receipt.envelope.json dist/darwin-arm64/bundle-receipt.envelope.json
+          for asset in harness-mrtool harness-mrtool-darwin-arm64.zip sea-build-receipt-darwin-arm64.json SHA256SUMS-darwin-arm64; do
+            test -s "dist/darwin-arm64/$asset"
+            test ! -e "dist/$asset"
+            mv "dist/darwin-arm64/$asset" "dist/$asset"
+          done
       - name: Re-verify the bytes in the publishing job
         shell: bash
         run: |
@@ -154,6 +329,12 @@ jobs:
           unzip -p dist/harness-mrtool-windows-x64.zip SHA256SUMS > dist/SHA256SUMS
           test -s dist/SHA256SUMS
           node --input-type=module -e "import {readFile} from 'node:fs/promises'; import {unzipSync} from 'fflate'; import {validateReleaseArchiveAndReceipt} from './scripts/package-portable.mjs'; validateReleaseArchiveAndReceipt(unzipSync(await readFile('dist/harness-mrtool-windows-x64.zip')), await readFile('dist/bundle-receipt.envelope.json'));"
+          test -s dist/harness-mrtool
+          test -s dist/harness-mrtool-darwin-arm64.zip
+          unzip -p dist/harness-mrtool-darwin-arm64.zip harness-mrtool > dist/portable-harness-mrtool
+          cmp --silent dist/harness-mrtool dist/portable-harness-mrtool
+          node --input-type=module -e "import {readFile} from 'node:fs/promises'; import {unzipSync} from 'fflate'; import {validateReleaseArchiveAndReceipt} from './scripts/package-portable.mjs'; validateReleaseArchiveAndReceipt(unzipSync(await readFile('dist/harness-mrtool-darwin-arm64.zip')), await readFile('dist/bundle-receipt.envelope.json'), { platform: 'darwin-arm64' });"
+          (cd dist && sha256sum --check SHA256SUMS-windows-x64 && sha256sum --check SHA256SUMS-darwin-arm64)
       - name: Authenticate publishing-job template receipt
         shell: bash
         run: |
@@ -163,7 +344,7 @@ jobs:
       - name: Create a draft release with the verified assets
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${RELEASE_TAG}" --draft --verify-tag --title "${RELEASE_TAG}" --generate-notes dist/harness-mrtool.exe dist/harness-mrtool-windows-x64.zip dist/bundle-receipt.envelope.json dist/sea-build-receipt.json
+        run: gh release create "${RELEASE_TAG}" --draft --verify-tag --title "${RELEASE_TAG}" --generate-notes dist/harness-mrtool.exe dist/harness-mrtool-windows-x64.zip dist/harness-mrtool dist/harness-mrtool-darwin-arm64.zip dist/bundle-receipt.envelope.json dist/sea-build-receipt.json dist/sea-build-receipt-darwin-arm64.json dist/SHA256SUMS-windows-x64 dist/SHA256SUMS-darwin-arm64
       - name: Download the draft assets and verify the published bytes
         env:
           GH_TOKEN: ${{ github.token }}
@@ -171,7 +352,7 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf draft-download
-          gh release download "${RELEASE_TAG}" --dir draft-download --pattern 'harness-mrtool.exe' --pattern 'harness-mrtool-windows-x64.zip' --pattern 'bundle-receipt.envelope.json' --pattern 'sea-build-receipt.json'
+          gh release download "${RELEASE_TAG}" --dir draft-download --pattern 'harness-mrtool.exe' --pattern 'harness-mrtool-windows-x64.zip' --pattern 'bundle-receipt.envelope.json' --pattern 'sea-build-receipt.json' --pattern 'harness-mrtool' --pattern 'harness-mrtool-darwin-arm64.zip' --pattern 'sea-build-receipt-darwin-arm64.json' --pattern 'SHA256SUMS-windows-x64' --pattern 'SHA256SUMS-darwin-arm64'
           cmp --silent dist/harness-mrtool.exe draft-download/harness-mrtool.exe
           cmp --silent dist/harness-mrtool-windows-x64.zip draft-download/harness-mrtool-windows-x64.zip
           cmp --silent dist/bundle-receipt.envelope.json draft-download/bundle-receipt.envelope.json
@@ -179,6 +360,17 @@ jobs:
           unzip -p draft-download/harness-mrtool-windows-x64.zip harness-mrtool.exe > draft-download/portable-harness-mrtool.exe
           cmp --silent draft-download/harness-mrtool.exe draft-download/portable-harness-mrtool.exe
           node --input-type=module -e "import {readFile} from 'node:fs/promises'; import {unzipSync} from 'fflate'; import {validateReleaseArchiveAndReceipt} from './scripts/package-portable.mjs'; validateReleaseArchiveAndReceipt(unzipSync(await readFile('draft-download/harness-mrtool-windows-x64.zip')), await readFile('draft-download/bundle-receipt.envelope.json'));"
+          cmp --silent dist/harness-mrtool draft-download/harness-mrtool
+          cmp --silent dist/harness-mrtool-darwin-arm64.zip draft-download/harness-mrtool-darwin-arm64.zip
+          cmp --silent dist/sea-build-receipt-darwin-arm64.json draft-download/sea-build-receipt-darwin-arm64.json
+          cmp --silent dist/SHA256SUMS-windows-x64 draft-download/SHA256SUMS-windows-x64
+          cmp --silent dist/SHA256SUMS-darwin-arm64 draft-download/SHA256SUMS-darwin-arm64
+          unzip -p draft-download/harness-mrtool-darwin-arm64.zip harness-mrtool > draft-download/portable-harness-mrtool
+          cmp --silent draft-download/harness-mrtool draft-download/portable-harness-mrtool
+          node --input-type=module -e "import {readFile} from 'node:fs/promises'; import {unzipSync} from 'fflate'; import {validateReleaseArchiveAndReceipt} from './scripts/package-portable.mjs'; validateReleaseArchiveAndReceipt(unzipSync(await readFile('draft-download/harness-mrtool-darwin-arm64.zip')), await readFile('draft-download/bundle-receipt.envelope.json'), { platform: 'darwin-arm64' });"
+          (cd draft-download && sha256sum --check SHA256SUMS-windows-x64 && sha256sum --check SHA256SUMS-darwin-arm64)
+          TEMPLATE_VERSION="$(node -p "require('./template-bundle/bundle-manifest.json').version")"
+          node scripts/verify-template-publication.mjs --directory template-bundle --receipt draft-download/bundle-receipt.envelope.json --tag "templates-v$TEMPLATE_VERSION"
       - name: Publish the verified draft
         env:
           GH_TOKEN: ${{ github.token }}

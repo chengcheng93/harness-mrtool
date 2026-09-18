@@ -979,6 +979,7 @@ test("ordinary channel check is one conditional request with fixed two-second bu
       lastModified: "Wed, 12 Aug 2026 08:00:00 GMT",
     },
     force: false,
+    clock: { now: () => 1_000 },
   });
   assert.deepEqual(result, {
     kind: "not-modified",
@@ -1142,4 +1143,18 @@ test("channel client rejects caller credentials, fragments, non-HTTPS and noncan
       (error: unknown) => isToolError(error, "UPDATE_SECURITY_ERROR"),
     );
   }
+});
+
+
+test("ordinary channel budget subtracts time elapsed before issuing the request", async () => {
+  const transport = new FakeChannelTransport([channelResponse(304)]);
+  const observed = [1_000, 1_007];
+  await checkStableChannel({
+    url: "https://example-owner.github.io/harness-mrtool/stable.envelope.json",
+    transport, validators: {etag: null, lastModified: null}, force: false,
+    clock: {now: () => observed.shift() ?? 1_007},
+  });
+  assert.equal(transport.requests.length, 1);
+  assert.equal(transport.requests[0]!.totalTimeoutMs, 1_993);
+  assert.equal(transport.requests[0]!.connectTimeoutMs, 1_000);
 });

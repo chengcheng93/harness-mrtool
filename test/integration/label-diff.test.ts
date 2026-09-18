@@ -104,3 +104,50 @@ test("rejects oversized content before classifying or allocating an unbounded di
     await assert.rejects(changes.readCanonicalLabelDiff(repository), { code: "REPOSITORY_ERROR" });
   } finally { await fixture.dispose(); }
 });
+
+test("committed nested attributes remain authoritative for label evidence over staged and local overrides", async () => {
+  const fixture = await GitFixture.create();
+  try {
+    await fixture.commitFile("docs/.gitattributes", "*.md diff\n", "target attributes");
+    await fixture.git(["update-ref", "refs/remotes/origin/main", await fixture.head()]);
+    await fixture.write("docs/.gitattributes", "*.md binary\n");
+    await fixture.write("docs/opaque.md", "looks like readable documentation\n");
+    await fixture.commitAll("source attributes");
+    const repository = await discoverRepository({ cwd: fixture.worktreePath, targetBranch: "main" });
+    await fixture.write("docs/.gitattributes", "*.md diff\n");
+    await fixture.git(["add", "docs/.gitattributes"]);
+    await fixture.write(".git/info/attributes", "*.md diff\n");
+
+    const diff = await changes.readCanonicalLabelDiff(repository);
+    const opaque = diff.items.find((item) => "newPath" in item && item.newPath === "docs/opaque.md");
+    assert.ok(opaque);
+    assert.equal(opaque.binary, true);
+    assert.equal(opaque.after, undefined);
+    assert.equal(typeLabelFromDiff([opaque]), null);
+  } finally { await fixture.dispose(); }
+});
+
+test("ambient GIT_ATTR_SOURCE cannot override source-committed binary attributes", async () => {
+  const fixture = await GitFixture.create();
+  const previous = process.env.GIT_ATTR_SOURCE;
+  try {
+    await fixture.commitFile("docs/.gitattributes", "*.md diff\n", "target attributes");
+    const target = await fixture.head();
+    await fixture.git(["update-ref", "refs/remotes/origin/main", target]);
+    await fixture.write("docs/.gitattributes", "*.md binary\n");
+    await fixture.write("docs/opaque.md", "looks like ordinary documentation\n");
+    await fixture.commitAll("source binary attributes");
+    const repository = await discoverRepository({ cwd: fixture.worktreePath, targetBranch: "main" });
+    process.env.GIT_ATTR_SOURCE = target;
+    const diff = await changes.readCanonicalLabelDiff(repository);
+    const opaque = diff.items.find(item => "newPath" in item && item.newPath === "docs/opaque.md");
+    assert.ok(opaque);
+    assert.equal(opaque.binary, true);
+    assert.equal(opaque.after, undefined);
+    assert.equal(typeLabelFromDiff([opaque]), null);
+  } finally {
+    if (previous === undefined) delete process.env.GIT_ATTR_SOURCE;
+    else process.env.GIT_ATTR_SOURCE = previous;
+    await fixture.dispose();
+  }
+});

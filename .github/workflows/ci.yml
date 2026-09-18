@@ -46,7 +46,9 @@ jobs:
   windows-sea:
     name: Windows SEA gate
     runs-on: windows-latest
-    timeout-minutes: 30
+    # The serial native/ACL suite hit the 30-minute job budget in run35189643169.
+    # Keep every test and the serial isolation; cancellation is never a pass.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

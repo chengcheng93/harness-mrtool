@@ -217,6 +217,7 @@ test("GitRunner scrubs executable ambient Git transport and prompt hooks", async
     "GIT_SSH_COMMAND",
     "GIT_PROXY_COMMAND",
     "GIT_ASKPASS",
+    "GIT_ATTR_SOURCE",
     "SSH_ASKPASS",
     "GIT_CONFIG_PARAMETERS",
     "GIT_CONFIG_COUNT",
@@ -1621,4 +1622,43 @@ test("push execution preserves unknown and concurrent remote outcomes", async (t
       (error: unknown) => isToolError(error, "CONCURRENT_UPDATE", /SHA|changed|match/i),
     );
   });
+});
+
+test("canonical ChangeSet pins committed attributes in a private index without Git 2.41 attr-source", async (t) => {
+  const fixture = await fixtureFor(t);
+  await fixture.commitFile(".gitattributes", "*.ts diff\n", "target attributes");
+  await fixture.git(["update-ref", "refs/remotes/origin/main", await fixture.head()]);
+  await fixture.write(".gitattributes", "*.ts binary\n");
+  await fixture.write("src/attribute-source.ts", "export const source = true;\n");
+  const sourceSha = await fixture.commitAll("source attributes");
+  const processRunner = new RecordingProcessRunner();
+  const repository = await discoverRepository({ cwd: fixture.worktreePath, targetBranch: "main", processRunner });
+  // Neither the current index nor worktree/info attributes may replace the pinned tree.
+  await fixture.write(".gitattributes", "*.ts diff\n");
+  await fixture.git(["add", ".gitattributes"]);
+  await fixture.write(".git/info/attributes", "*.ts diff\n");
+  const sourceIndex = await readFile(resolve(fixture.worktreePath, ".git", "index"));
+
+  const diff = await readCanonicalChangeSet(repository);
+
+  assert.deepEqual(diff.items.find((item) => "newPath" in item && item.newPath === "src/attribute-source.ts"), {
+    status: "added", newPath: "src/attribute-source.ts", binary: true, submodule: false,
+  });
+  assert.deepEqual(await readFile(resolve(fixture.worktreePath, ".git", "index")), sourceIndex);
+  assert.equal(processRunner.requests.some((request) => request.arguments.some((arg) => arg.startsWith("--attr-source="))), false);
+  const readTree = processRunner.requests.find((request) => request.arguments[0] === "read-tree");
+  assert.ok(readTree, "the isolated index must be populated without checking out files");
+  assert.deepEqual(readTree.arguments, ["read-tree", sourceSha]);
+  assert.equal(readTree.environment.GIT_INDEX_FILE, resolve(readTree.environment.GIT_DIR!, "index"));
+  assert.ok(Object.hasOwn(readTree.environment, "GIT_ATTR_SOURCE"));
+  assert.equal(readTree.environment.GIT_ATTR_SOURCE, undefined);
+  assert.notEqual(readTree.environment.GIT_WORK_TREE, fixture.worktreePath);
+  assert.ok(readTree.environment.GIT_WORK_TREE);
+  const diffs = processRunner.requests.filter((request) => request.arguments.includes("diff"));
+  for (const request of diffs) {
+    assert.equal(request.environment.GIT_INDEX_FILE, readTree.environment.GIT_INDEX_FILE);
+    assert.equal(request.environment.GIT_WORK_TREE, readTree.environment.GIT_WORK_TREE);
+    assert.ok(request.arguments.includes("--no-ext-diff"));
+    assert.ok(request.arguments.includes("--no-textconv"));
+  }
 });

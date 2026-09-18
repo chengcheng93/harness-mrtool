@@ -362,6 +362,11 @@ function memoryBundleIo(files: ReadonlyMap<string, Uint8Array>): TemplateBundleI
   });
 }
 
+/** Semantic loading of already acquired bytes only; this does not authenticate their origin. */
+export async function loadTemplateBundleSnapshot(files: ReadonlyMap<string, Uint8Array>): Promise<LoadedTemplateBundle> {
+  return loadTemplateBundle(MEMORY_ROOT, memoryBundleIo(files));
+}
+
 function exactRequest(
   expectedRepository: ReleaseRepository,
   reference: VerificationBundleReference,
@@ -467,7 +472,7 @@ export function createHistoricalBundleLoader(
       }
       let bundle: LoadedTemplateBundle;
       try {
-        bundle = await loadTemplateBundle(MEMORY_ROOT, memoryBundleIo(verifiedFiles));
+        bundle = await loadTemplateBundleSnapshot(verifiedFiles);
         assertExactLoadedBundle(bundle, reference, verifiedReceipt.receipt);
       } catch {
         return fail();

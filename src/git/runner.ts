@@ -11,6 +11,7 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 const BLOCKED_GIT_ENVIRONMENT_KEYS = Object.freeze([
   "GIT_ASKPASS",
+  "GIT_ATTR_SOURCE",
   "GIT_CEILING_DIRECTORIES",
   "GIT_DISCOVERY_ACROSS_FILESYSTEM",
   "GIT_EXEC_PATH",
@@ -393,6 +394,9 @@ export class GitRunner {
       environment: {
         ...environment,
         GIT_ATTR_NOSYSTEM: "1",
+        // Attribute policy is pinned by the trusted caller's private index,
+        // never an inherited tree override (including case variants on Windows).
+        GIT_ATTR_SOURCE: undefined,
         GIT_CONFIG_NOSYSTEM: "1",
         GIT_NO_REPLACE_OBJECTS: "1",
         GIT_OPTIONAL_LOCKS: "0",

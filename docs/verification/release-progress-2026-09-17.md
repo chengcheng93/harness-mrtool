@@ -128,3 +128,62 @@ prerequisites, not reasons to pretend the remaining code is complete.
 - Commit/push of this checkpoint does not authorize new tags or imply passing
   hosted CI, signature production-key availability, installed updater/Skill,
   real GitLab acceptance or goal completion.
+
+## September 18 continuation — source work, not a released installation
+
+- Authenticated release snapshots retain re-verifiable signed channel/rotation
+  provenance and the anchored Template receipt. Identical signed payloads acquired
+  through different valid histories can be retried without replacing the installed
+  proof; same-sequence different signed payloads remain rejected.
+- Bounded release downloads and preparation recheck the signed channel after all
+  assets arrive. This prepares bytes only; it does not install or activate them.
+- Native materialization writes into a separate private, sealed directory rather
+  than executing ZIP cache files. POSIX writes are relative to an inherited pinned
+  directory descriptor; the Windows helper pins non-reparse ancestors without
+  delete sharing. Current-owner file identity, exact mode, bounded content and
+  post-read checks are enforced. Independent review found and drove closure of
+  both the opened-mode and parent-redirection regressions. Native Windows remains
+  a required live CI gate, not proven by Windows archive fixtures on macOS.
+- CLI release workflow now requires verified Windows and Darwin ARM64 artifacts
+  before one draft can publish; both platform archives, executables, receipts and
+  checksum files are downloaded and compared before publication. This workflow
+  has not been used to publish the candidate.
+- Git compatibility uses a private source index instead of the newer attr-source
+  option; inherited GIT_ATTR_SOURCE is scrubbed at the trusted process boundary.
+  Actual host CI must confirm the remaining portability result.
+- Windows CI previously ended cancelled after about30minutes. The serial full
+  test command is unchanged and the job budget is60minutes; cancellation is still
+  failure, never successful verification.
+
+The old pinned runtime path disappeared during continuation. Recent PATH-based
+24.18 runs were explicitly invalidated as24.16 evidence. A fresh official archive
+was SHA-256 checked and exact Node24.16 execution was asserted before replacement
+checks. Typecheck and183 targeted tests passed under the restored runtime.
+
+The next full run found one stale single-platform workflow dependency assertion
+(reported as child+parent failures). The corrected contract now requires both
+platform gates;100 targeted release/version tests passed. A fresh rebuild/full
+suite is required after the subsequent Git ambient-attribute fix; no all-green
+claim is made here until that completes.
+
+The unchanged final acceptance scope still includes production apply/rollback,
+active executable/template selection, native installer/repair, Skill composition
+and host activation, legitimate signing, real channel hosting, actual downloaded
+installation/upgrade/rollback and isolated GitLab API acceptance. No source-only
+checkpoint can replace those gates. No new release/tag or local installation has
+been performed by this continuation.
+
+### September 18 verified checkpoint result
+
+After the ambient Git attribute fix and dependency-contract update, a fresh exact
+Node24.16.0 typecheck, SEA rebuild and **unfiltered serial full suite** completed:
+**1585 tests /1573 passed /0 failed /12 platform-specific skips**, about260seconds.
+Current-source SEA receipt and strict codesign verified; the restored Node binary
+SHA-256 remained unchanged. This supersedes the intermediate failing run above.
+
+Independent review closed the snapshot-idempotency, native opened-mode,
+parent-anchored-writer, workflow-gating and Git ambient-attribute findings. The Git
+closure separately exercised2.39.5, Apple2.50.1 and2.55.0. Hosted native CI is the
+next gate; skipped Windows cases remain unproven on this Mac. Publishing, default
+apply/rollback, actual installation/activation and live GitLab acceptance are still
+incomplete and are not implied by this source checkpoint.

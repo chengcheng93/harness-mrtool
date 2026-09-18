@@ -131,6 +131,13 @@ export interface UpdateCacheOptions {
 
 export interface ReleaseSetSnapshotVerifier {
   verify(snapshot: ReleaseSetSnapshot): void | Promise<void>;
+  /**
+   * Optional cryptographic equivalence check for differently acquired provenance.
+   * Must authenticate both snapshots and require the exact same signed channel
+   * payload and artifacts. Never compare versions or self-reported hashes alone.
+   * Activation retains the existing snapshot; it does not replace either proof.
+   */
+  isSameAuthenticatedRelease?(left: ReleaseSetSnapshot, right: ReleaseSetSnapshot): Promise<boolean>;
 }
 
 
@@ -322,6 +329,9 @@ function validateSnapshot(value: unknown): ReleaseSetSnapshot {
   return Object.freeze({ record, cliBytes, templateBytes, receiptBytes });
 }
 
+
+/** Structural/hash validation only. Production authenticity requires a snapshot verifier. */
+export { validateSnapshot as validateReleaseSetSnapshot };
 
 function canonicalRecord(record: ReleaseSetRecord): string {
   try {

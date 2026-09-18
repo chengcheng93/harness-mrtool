@@ -102,10 +102,12 @@ async function createIsolatedGitView(
   const temporaryRoot = await mkdtemp(join(tmpdir(), "harness-mrtool-change-set-"));
   const gitDirectory = join(temporaryRoot, "git");
   const templateDirectory = join(temporaryRoot, "template");
+  const worktreeDirectory = join(temporaryRoot, "worktree");
   const baseEnvironment = isolatedConfigEnvironment(temporaryRoot);
   try {
     await Promise.all([
       mkdir(templateDirectory),
+      mkdir(worktreeDirectory),
       mkdir(join(temporaryRoot, "xdg")),
     ]);
     await runGitChecked(
@@ -147,6 +149,8 @@ async function createIsolatedGitView(
       ...baseEnvironment,
       GIT_DIR: gitDirectory,
       GIT_OBJECT_DIRECTORY: objectDirectory,
+      GIT_INDEX_FILE: join(gitDirectory, "index"),
+      GIT_WORK_TREE: worktreeDirectory,
     }),
   });
 }
@@ -421,13 +425,29 @@ export async function readCanonicalChangeSet(
       throw changeSetError("repository history does not have one unique merge base");
     }
     const mergeBaseSha = assertObjectId(mergeBases[0], "merge base");
+    // Git 2.39 (including older Apple Git) has no --attr-source. An empty
+    // private worktree makes attribute lookup fall back to this private index,
+    // populated from the pinned source tree. Never checkout untrusted files or
+    // consult the caller's index/worktree/info attributes. This also retains
+    // nested .gitattributes without requiring Git 2.41 or weakening isolation.
+    // --cached loads that index for attribute lookup as well as the source diff.
+    await runGitChecked(
+      repository.runner,
+      ["read-tree", repository.sourceHeadSha],
+      "isolated ChangeSet attribute index",
+      isolated.environment,
+    );
     const commonArguments = [
-      `--attr-source=${repository.sourceHeadSha}`,
+      "-C",
+      isolated.environment.GIT_WORK_TREE!,
+      "-c",
+      "core.bare=false",
       "-c",
       "diff.renames=true",
       "-c",
       "diff.renameLimit=0",
       "diff",
+      "--cached",
       "--no-ext-diff",
       "--no-textconv",
       "--find-renames=50%",
@@ -436,13 +456,13 @@ export async function readCanonicalChangeSet(
     const [raw, numstat] = await Promise.all([
       runGitChecked(
         repository.runner,
-        [...commonArguments, "--raw", "-z", "--no-abbrev", mergeBaseSha, repository.sourceHeadSha, "--"],
+        [...commonArguments, "--raw", "-z", "--no-abbrev", mergeBaseSha, "--"],
         "raw committed diff",
         isolated.environment,
       ),
       runGitChecked(
         repository.runner,
-        [...commonArguments, "--numstat", "-z", mergeBaseSha, repository.sourceHeadSha, "--"],
+        [...commonArguments, "--numstat", "-z", mergeBaseSha, "--"],
         "numstat committed diff",
         isolated.environment,
       ),

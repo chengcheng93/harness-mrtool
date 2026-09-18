@@ -196,3 +196,11 @@ test(${JSON.stringify(knownName)}, () => assert.equal("SECRET_ACTUAL", "SECRET_E
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("Windows native CI retains the full serial suite with enough time after the observed 30-minute cancellation", () => {
+  const workflow = parse(readFileSync(resolve(root, ".github/workflows/ci.yml"), "utf8"));
+  const job = workflow.jobs["windows-sea"];
+  assert.equal(job["timeout-minutes"], 60);
+  assert.equal(job["continue-on-error"], undefined);
+  assert.ok(job.steps.some((entry: {run?: string}) => entry.run === "npm test -- --test-concurrency=1"));
+});
