@@ -2,6 +2,8 @@ import { constants } from "node:fs";
 import { lstat, open, realpath, rm } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 
+import { samePhysicalPath } from "../platform/windows-path.ts";
+
 import { ToolError } from "../contracts/errors.ts";
 import { ensurePrivateStateDirectory, type WindowsAclVerifier } from "../platform/state-path.ts";
 import { assertUpdateLockLease } from "../platform/lock.ts";
@@ -45,8 +47,7 @@ function validAbsoluteRoot(value: unknown): string {
 }
 
 function samePath(left: string, right: string): boolean {
-  if (process.platform === "win32") return resolve(left).toLowerCase() === resolve(right).toLowerCase();
-  return resolve(left) === resolve(right);
+  return samePhysicalPath(left, right);
 }
 
 function sameIdentity(left: JournalStat, right: JournalStat): boolean {

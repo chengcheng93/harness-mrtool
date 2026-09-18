@@ -2,6 +2,7 @@ import {createHash} from 'node:crypto';
 import {constants, type BigIntStats} from 'node:fs';
 import {lstat,open,realpath} from 'node:fs/promises';
 import {dirname,isAbsolute,resolve} from 'node:path';
+import {samePhysicalPath} from '../platform/windows-path.ts';
 import {ToolError} from '../contracts/errors.ts';
 import {parseStrictJson} from '../input/strict-json.ts';
 import {assertUpdateLockLease,withUpdateLock} from '../platform/lock.ts';
@@ -29,7 +30,7 @@ const MARKER='.harness-mrtool-install.json';
 function fail():never {throw new ToolError('UPDATE_SECURITY_ERROR','Installed release verification failed',{
  field:'update.installation',expected:'a plain managed executable matching the authenticated release archive',
  actual:'installation evidence rejected',safeNextStep:'Keep the last-known-good release and repair the managed installation before updating.'});}
-function samePath(a:string,b:string){return process.platform==='win32'?a.toLowerCase()===b.toLowerCase():a===b;}
+function samePath(a:string,b:string){return samePhysicalPath(a,b);}
 function same(a:BigIntStats,b:BigIntStats){return a.dev===b.dev&&a.ino===b.ino&&a.size===b.size&&a.mode===b.mode&&a.uid===b.uid&&a.gid===b.gid&&a.nlink===b.nlink&&a.mtimeNs===b.mtimeNs&&a.ctimeNs===b.ctimeNs;}
 function privateOwner(s:BigIntStats){return process.platform==='win32'||(s.uid===BigInt(process.getuid!())&&(Number(s.mode)&0o7022)===0);}
 function plain(s:BigIntStats,directory:boolean){return !s.isSymbolicLink()&&(directory?s.isDirectory():s.isFile()&&s.nlink===1n)&&privateOwner(s);}

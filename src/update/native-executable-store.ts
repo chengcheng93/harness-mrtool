@@ -2,6 +2,7 @@ import {createHash} from 'node:crypto';
 import {constants,type BigIntStats} from 'node:fs';
 import {lstat,mkdir,open,opendir,realpath} from 'node:fs/promises';
 import {isAbsolute,resolve} from 'node:path';
+import {samePhysicalPath} from '../platform/windows-path.ts';
 import {ToolError} from '../contracts/errors.ts';
 import {assertUpdateLockLease,withUpdateLock} from '../platform/lock.ts';
 import {writeAnchoredFile} from '../platform/anchored-file-writer.ts';
@@ -26,7 +27,7 @@ function fail(actual='native-store:operation'):never{throw new ToolError('UPDATE
  field:'update.executable',expected:'a private, sealed executable matching authenticated release bytes',actual,
  safeNextStep:'Keep the installed release; inspect the private native staging directory before retrying.'});}
 function same(a:BigIntStats,b:BigIntStats){return a.dev===b.dev&&a.ino===b.ino;}
-function pathEqual(a:string,b:string){return process.platform==='win32'?a.toLowerCase()===b.toLowerCase():a===b;}
+function pathEqual(a:string,b:string){return samePhysicalPath(a,b);}
 function sealedFile(stat:BigIntStats,size:number){return stat.isFile()&&!stat.isSymbolicLink()&&stat.nlink===1n&&owned(stat)&&stat.size===BigInt(size)&&(process.platform==='win32'||(Number(stat.mode)&0o7777)===0o500);}
 function owned(stat:BigIntStats){return process.platform==='win32'||stat.uid===BigInt(process.getuid!());}
 async function directory(path:string,mode:number):Promise<BigIntStats>{

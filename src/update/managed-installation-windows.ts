@@ -3,6 +3,8 @@ import { constants, type BigIntStats } from "node:fs";
 import { lstat, open, realpath, rm } from "node:fs/promises";
 import { dirname, isAbsolute, resolve } from "node:path";
 
+import { samePhysicalPath } from "../platform/windows-path.ts";
+
 import { canonicalizeJson } from "../contracts/jcs.ts";
 import { ToolError } from "../contracts/errors.ts";
 import { writeAnchoredFile } from "../platform/anchored-file-writer.ts";
@@ -60,7 +62,7 @@ function absoluteRoot(value: unknown): string {
 }
 
 function samePath(left: string, right: string): boolean {
-  return process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right;
+  return samePhysicalPath(left, right);
 }
 
 function copyIdentity(info: BigIntStats): FileIdentity {
