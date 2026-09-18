@@ -41,7 +41,10 @@ async function owner(t: TestContext, path: string, waiting = false): Promise<Chi
     if (${waiting}) process.send("WAITING");
     const lease = await systemProcessLockProvider.acquire(process.argv[1], 4000);
     process.send("LOCKED");
-    process.on("message", () => process.exit(0));
+    process.on("message", async () => {
+      await lease.release();
+      process.exit(0);
+    });
   `, path], { stdio: ["ignore", "pipe", "pipe", "ipc"] });
   let stderr = "";
   child.stderr!.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
