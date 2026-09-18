@@ -205,6 +205,29 @@ if (process.platform === "darwin") {
     lease.assertHeld();
   });
 
+  test("macOS keeps a stable parent-directory fence across marker unlink and recreation", async (t) => {
+    const path = await fixture(t);
+    const lease = await locks.acquire(path, 3000);
+    t.after(() => lease.release());
+    const replacement = `${path}.old`;
+    await rename(path, replacement);
+    await writeFile(path, "replacement");
+
+    let acquired = false;
+    const waiting = locks.acquire(path, 4000).then((next) => {
+      acquired = true;
+      return next;
+    });
+    await delay(150);
+    assert.equal(acquired, false);
+
+    await lease.release();
+    const next = await waiting;
+    t.after(() => next.release());
+    next.assertHeld();
+    assert.equal(acquired, true);
+  });
+
   test("macOS refuses a pathname replaced while waiting rather than returning a split lock", async (t) => {
     const path = await fixture(t);
     const child = await owner(t, path);
