@@ -4,6 +4,8 @@ import { isAbsolute, resolve } from "node:path";
 
 import { ToolError } from "../contracts/errors.ts";
 import { ensurePrivateStateDirectory } from "../platform/state-path.ts";
+import { assertUpdateLockLease } from "../platform/lock.ts";
+import type { ProcessLockLease } from "../platform/process-lock.ts";
 import {
   encodeInstallationJournal,
   MAX_INSTALLATION_JOURNAL_BYTES,
@@ -164,6 +166,10 @@ function sameRootEvidence(journal: InstallationJournal, root: JournalStat): void
 }
 
 
+export interface InstallationJournalStoreOptions {
+  readonly lease?: ProcessLockLease;
+}
+
 export interface InstallationJournalStore {
   readonly path: string;
   encode(value: unknown): Uint8Array;
@@ -177,11 +183,20 @@ export interface InstallationJournalStore {
  * from the fixed state root at construction; journal data never supplies a
  * target path or mutation authority.
  */
-export function createInstallationJournalStore(stateDirectory: string): InstallationJournalStore {
+export function createInstallationJournalStore(
+  stateDirectory: string,
+  options: InstallationJournalStoreOptions = {},
+): InstallationJournalStore {
   const stateRoot = validAbsoluteRoot(stateDirectory);
+  const boundLease = options.lease;
+
+  function assertBoundLease(): void {
+    if (boundLease !== undefined) assertUpdateLockLease(boundLease, stateRoot);
+  }
   const path = resolve(stateRoot, INSTALLATION_JOURNAL_FILE_NAME);
 
   async function read(): Promise<InstallationJournal | null> {
+    assertBoundLease();
     const root = await rootStat(stateRoot, false);
     if (root === null) return null;
     const file = await readBounded(path);
@@ -192,6 +207,7 @@ export function createInstallationJournalStore(stateDirectory: string): Installa
   }
 
   async function write(value: unknown): Promise<InstallationJournal> {
+    assertBoundLease();
     const journal = parseInstallationJournal(encodeInstallationJournal(value));
     const root = await rootStat(stateRoot, true);
     if (root === null) throw failure();
@@ -221,6 +237,7 @@ export function createInstallationJournalStore(stateDirectory: string): Installa
   }
 
   async function remove(): Promise<void> {
+    assertBoundLease();
     const root = await rootStat(stateRoot, false);
     if (root === null) return;
     const currentBytes = await readBounded(path);

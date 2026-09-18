@@ -6,6 +6,8 @@ import test from "node:test";
 
 import { ToolError } from "../../src/contracts/errors.ts";
 import { createInstallationJournalStore } from "../../src/update/installation-journal-store.ts";
+import { withUpdateLock } from "../../src/platform/lock.ts";
+import { ProcessLockError, type ProcessLockLease } from "../../src/platform/process-lock.ts";
 import { journalFixture, type JournalFixture } from "../helpers/installation-journal-fixture.ts";
 
 async function withStateRoot<T>(callback: (stateRoot: string) => Promise<T>): Promise<T> {
@@ -83,6 +85,32 @@ test("rejects a journal with an external hard-link witness", async () => {
 test("rejects a relative or NUL-containing state root before any I/O", () => {
   assert.throws(() => createInstallationJournalStore("relative/state"), assertSecurity);
   assert.throws(() => createInstallationJournalStore("/tmp/unsafe\0state"), assertSecurity);
+});
+
+
+test("can bind persistence to the shared branded update lease", async () => {
+  await withStateRoot(async (stateRoot) => {
+    const journal = await fixtureForRoot(stateRoot);
+    await withUpdateLock(stateRoot, async (lease) => {
+      const store = createInstallationJournalStore(stateRoot, { lease });
+      await store.write(journal);
+      assert.ok(await store.read());
+      await store.remove();
+      lease.assertHeld();
+    });
+  });
+});
+
+test("a bound store rejects a forged lease before touching the journal root", async () => {
+  await withStateRoot(async (stateRoot) => {
+    const forged: ProcessLockLease = { assertHeld() {}, async release() {} };
+    const store = createInstallationJournalStore(stateRoot, { lease: forged });
+    await assert.rejects(() => store.read(), (error: unknown) => {
+      assert.ok(error instanceof ProcessLockError);
+      assert.equal(error.reason, "unsafe");
+      return true;
+    });
+  });
 });
 
 test("removes only the owned canonical journal and treats absence as idempotent", async () => {
