@@ -95,6 +95,11 @@ async function assertLockIdentity(path: string, expected: LockFileIdentity): Pro
 }
 
 
+const HELPER_REAP_TIMEOUT_MS = 1_000;
+const RELEASE_CLOSE_TIMEOUT_MS = 2_000;
+const RELEASE_KILL_DELAY_MS = 1_000;
+
+
 function waitForHelper(
   child: ChildProcessWithoutNullStreams,
   timeoutMs: number,
@@ -103,77 +108,109 @@ function waitForHelper(
     let output = "";
     let settled = false;
     let helperExited = false;
+    let helperClosed = false;
     let releasing: Promise<void> | undefined;
-    const timeout = setTimeout(() => {
+    let timeout: NodeJS.Timeout | undefined;
+    let resolveClose!: () => void;
+    const closePromise = new Promise<void>((resolveClosePromise) => {
+      resolveClose = resolveClosePromise;
+    });
+
+    const waitForClose = (waitMs: number): Promise<boolean> => {
+      if (helperClosed) return Promise.resolve(true);
+      return new Promise((resolveCloseWait) => {
+        const closeTimeout = setTimeout(() => resolveCloseWait(false), waitMs);
+        void closePromise.then(() => {
+          clearTimeout(closeTimeout);
+          resolveCloseWait(true);
+        });
+      });
+    };
+
+    const terminateHelper = (): void => {
+      if (helperClosed) return;
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        try { child.kill(); } catch { /* The close timeout reports unreaped helpers. */ }
+      }
+    };
+
+    const fail = (reason: ProcessLockError["reason"], terminate = true): void => {
       if (settled) return;
       settled = true;
-      child.kill();
-      rejectPromise(new ProcessLockError("timeout"));
-    }, timeoutMs);
+      if (timeout !== undefined) clearTimeout(timeout);
+      if (terminate) terminateHelper();
+      void waitForClose(HELPER_REAP_TIMEOUT_MS).then((closed) => {
+        rejectPromise(new ProcessLockError(closed ? reason : "unavailable"));
+      });
+    };
+
+    timeout = setTimeout(() => fail("timeout"), timeoutMs);
+    child.once("close", () => {
+      helperClosed = true;
+      helperExited = true;
+      resolveClose();
+      if (!settled) fail("unavailable", false);
+    });
     // The helper can exit between the liveness check and a release write.
     // A closed pipe must not become an unhandled EPIPE in the owner process.
-    child.stdin.on("error", () => child.kill());
+    child.stdin.on("error", () => {
+      if (!settled) fail("unavailable");
+      else if (!helperClosed) terminateHelper();
+    });
     child.stdout.setEncoding("utf8");
     child.stderr.resume();
     child.stdout.on("data", (chunk: string) => {
       if (settled) return;
       output += chunk;
       if (output.length > 128) {
-        settled = true;
-        clearTimeout(timeout);
-        child.kill();
-        rejectPromise(new ProcessLockError("unavailable"));
+        fail("unavailable");
         return;
       }
       if (!output.includes("\n")) return;
       if (output.trim() !== "LOCKED") {
-        settled = true;
-        clearTimeout(timeout);
-        child.kill();
-        rejectPromise(new ProcessLockError("unavailable"));
+        fail("unavailable");
         return;
       }
       settled = true;
-      clearTimeout(timeout);
+      if (timeout !== undefined) clearTimeout(timeout);
       resolvePromise(Object.freeze({
         assertHeld() {
-          if (releasing !== undefined || helperExited || child.exitCode !== null || child.signalCode !== null) {
+          if (releasing !== undefined || helperExited || helperClosed || child.exitCode !== null || child.signalCode !== null) {
             throw new ProcessLockError("unavailable");
           }
         },
         async release() {
           if (releasing !== undefined) return releasing;
-          if (helperExited || child.exitCode !== null || child.signalCode !== null) return;
-          releasing = new Promise<void>((resolveExit, rejectExit) => {
-            const releaseTimeout = setTimeout(() => {
-              child.kill("SIGKILL");
-            }, 1_000);
-            const exitTimeout = setTimeout(() => {
-              rejectExit(new ProcessLockError("unavailable"));
-            }, 2_000);
-            child.once("exit", () => {
-              clearTimeout(releaseTimeout);
-              clearTimeout(exitTimeout);
-              resolveExit();
-            });
-            child.stdin.end("release\n");
-          });
+          releasing = (async () => {
+            if (helperClosed) return;
+            const active = !helperExited && child.exitCode === null && child.signalCode === null;
+            const releaseKillTimeout = active
+              ? setTimeout(terminateHelper, RELEASE_KILL_DELAY_MS)
+              : undefined;
+            if (active) {
+              try {
+                child.stdin.end("release\n");
+              } catch {
+                terminateHelper();
+              }
+            }
+            const closed = await waitForClose(RELEASE_CLOSE_TIMEOUT_MS);
+            if (releaseKillTimeout !== undefined) clearTimeout(releaseKillTimeout);
+            if (!closed) {
+              terminateHelper();
+              throw new ProcessLockError("unavailable");
+            }
+          })();
           return releasing;
         },
       }));
     });
-    child.once("error", () => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      rejectPromise(new ProcessLockError("unavailable"));
-    });
+    child.once("error", () => fail("unavailable"));
     child.once("exit", (code) => {
       helperExited = true;
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      rejectPromise(new ProcessLockError(code === 24 ? "timeout" : "unavailable"));
+      if (!settled) fail(code === 24 ? "timeout" : "unavailable");
     });
   });
 }
@@ -269,6 +306,8 @@ async function acquireDarwin(
       // No PERL5OPT/PERL5LIB, dynamic-loader injection, or PATH-selected runtime.
       env: { PATH: "/usr/bin:/bin" },
     }) as ChildProcessWithoutNullStreams;
+    let childClosed = false;
+    child.once("close", () => { childClosed = true; });
     const pending = waitForHelper(child, timeoutMs);
     // Close OUR duplicate immediately: retaining it would keep a flock alive
     // even after the helper exits. The helper now owns the only description.
@@ -277,7 +316,9 @@ async function acquireDarwin(
     try {
       [lease] = await Promise.all([pending, closing]);
     } catch (error) {
-      child.kill("SIGKILL");
+      // waitForHelper rejects only after a bounded close wait; preserve cleanup for
+      // handle-close failures or unreaped helpers without killing after close.
+      if (!childClosed) child.kill("SIGKILL");
       throw error;
     }
   } catch (error) {

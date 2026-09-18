@@ -89,7 +89,7 @@ test("system lock excludes another process, bounds contention timeout, and leave
 });
 
 for (const signal of [null, "SIGKILL"] as const) {
-  test(`system lock releases on owner ${signal ?? "normal exit"} without deleting the file`, async (t) => {
+  test(`system lock releases on owner ${signal ?? "normal exit"} after exit without awaiting owner close`, async (t) => {
     const path = await fixture(t);
     const child = await owner(t, path);
     const before = await lstat(path, { bigint: true });
