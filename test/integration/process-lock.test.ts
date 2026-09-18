@@ -20,6 +20,21 @@ function reason(expected: ProcessLockError["reason"]): (error: unknown) => boole
   return (error) => error instanceof ProcessLockError && error.reason === expected;
 }
 
+async function terminateTree(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const closed = once(child, "close");
+  if (process.platform === "win32" && child.pid !== undefined) {
+    const killer = spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true });
+    await new Promise<void>((resolve) => {
+      killer.once("close", () => resolve());
+      killer.once("error", () => resolve());
+    });
+  } else {
+    child.kill("SIGKILL");
+  }
+  await Promise.race([closed, delay(2_000)]);
+}
+
 async function owner(t: TestContext, path: string, waiting = false): Promise<ChildProcess> {
   const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
     import { systemProcessLockProvider } from ${JSON.stringify(new URL("../../src/platform/process-lock.ts", import.meta.url).href)};
@@ -31,13 +46,7 @@ async function owner(t: TestContext, path: string, waiting = false): Promise<Chi
   let stderr = "";
   child.stderr!.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
   child.stdout!.resume();
-  t.after(async () => {
-    if (child.exitCode === null && child.signalCode === null) {
-      const exited = once(child, "exit");
-      child.kill("SIGKILL");
-      await exited;
-    }
-  });
+  t.after(() => terminateTree(child));
   await new Promise<void>((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error("lock owner did not start")), 6000);
     child.once("message", (message) => {
