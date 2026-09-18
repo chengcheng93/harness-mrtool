@@ -22,7 +22,7 @@ const stableFacts: RecoveryFacts = Object.freeze({
 });
 
 async function withStateRoot<T>(callback: (stateRoot: string) => Promise<T>): Promise<T> {
-  const root = await mkdtemp(join("/private/var/tmp", "harness-mrtool-recovery-coordinator-"));
+  const root = await mkdtemp(join(tmpdir(), "harness-mrtool-recovery-coordinator-"));
   try {
     return await callback(root);
   } finally {

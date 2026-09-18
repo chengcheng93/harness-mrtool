@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { chmod, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import test from "node:test";
 
 import { stageManagedPosixCandidate, removeManagedPosixStage, verifyManagedPosixStage } from "../../src/update/managed-installation-posix.ts";
@@ -13,7 +14,7 @@ function sha(bytes: Uint8Array): string {
 }
 
 async function installationRoot<T>(callback: (root: string) => Promise<T>): Promise<T> {
-  const root = await mkdtemp(join("/private/var/tmp", "harness-mrtool-managed-posix-"));
+  const root = await mkdtemp(join(tmpdir(), "harness-mrtool-managed-posix-"));
   try {
     return await callback(root);
   } finally {
