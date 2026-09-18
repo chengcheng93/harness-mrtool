@@ -135,7 +135,7 @@ function waitForHelper(
       }
       settled = true;
       clearTimeout(timeout);
-      resolvePromise({
+      resolvePromise(Object.freeze({
         assertHeld() {
           if (releasing !== undefined || helperExited || child.exitCode !== null || child.signalCode !== null) {
             throw new ProcessLockError("unavailable");
@@ -160,7 +160,7 @@ function waitForHelper(
           });
           return releasing;
         },
-      });
+      }));
     });
     child.once("error", () => {
       if (settled) return;
@@ -286,7 +286,7 @@ async function acquireDarwin(
   } finally {
     await handle?.close().catch(() => undefined);
   }
-  return {
+  return Object.freeze({
     assertHeld() {
       lease.assertHeld();
       try {
@@ -301,7 +301,7 @@ async function acquireDarwin(
       }
     },
     release: () => lease.release(),
-  };
+  });
 }
 
 

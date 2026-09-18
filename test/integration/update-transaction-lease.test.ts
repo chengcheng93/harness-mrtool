@@ -230,3 +230,12 @@ for (const operation of ["activate", "recover"] as const) {
     assert.equal(acquisitions(), 1);
   });
 }
+
+test('process lock leases are immutable capabilities and cannot be replaced by callers', async () => {
+ const root=await mkdtemp(resolve(await realpath(tmpdir()),'lease-immutable-'));
+ try { await withUpdateLock(root,async lease=>{
+  assert.equal(Object.isFrozen(lease),true);
+  assert.throws(()=>{(lease as unknown as {assertHeld:()=>void}).assertHeld=()=>{};},TypeError);
+  assertUpdateLockLease(lease,root);
+ }); } finally { await rm(root,{recursive:true,force:true}); }
+});
