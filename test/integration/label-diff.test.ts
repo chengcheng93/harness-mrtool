@@ -66,6 +66,7 @@ test("committed symlinks named as Markdown remain ambiguous without host symlink
     assert.match(await fixture.git(["ls-tree", "HEAD", "--", "link.md"]), /^120000 blob /u);
     const repository = await discoverRepository({ cwd: fixture.worktreePath, targetBranch: "main" });
     const diff = await changes.readCanonicalLabelDiff(repository);
+    assert.deepEqual(diff.items.map(item => "newPath" in item ? item.newPath : undefined), ["link.md"]);
     assert.equal(typeLabelFromDiff(diff.items), null);
     assert.equal(diff.items[0]?.after, undefined);
   } finally { await fixture.dispose(); }
