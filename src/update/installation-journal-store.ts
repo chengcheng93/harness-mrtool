@@ -144,6 +144,10 @@ async function readBounded(path: string): Promise<{ readonly bytes: Uint8Array; 
 }
 
 async function syncDirectory(path: string): Promise<void> {
+  // Windows does not expose a portable fsync-able directory handle through
+  // Node. File handles are flushed before publication; reopening a directory
+  // with `fs.open` would turn durable writes into a platform-specific failure.
+  if (process.platform === "win32") return;
   let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
     handle = await open(path, constants.O_RDONLY | (constants.O_DIRECTORY ?? 0) | NOFOLLOW);
