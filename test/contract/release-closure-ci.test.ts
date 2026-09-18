@@ -12,6 +12,7 @@ test("release closure branch can reach native CI without modifying main or relea
   assert.deepEqual(workflow.permissions, {contents: "read"});
   const windows = workflow.jobs["windows-sea"];
   assert.equal(windows["continue-on-error"], undefined);
+  assert.deepEqual(windows.strategy.matrix.group, [0, 1, 2, 3]);
   assert.ok(windows.steps.some((step: {run?: string}) => step.run ===
-    "npm test -- --test-concurrency=1 --test-reporter=./scripts/ci-test-progress-reporter.mjs"));
+    "node scripts/windows-suite-group.mjs --group ${{ matrix.group }} --groups 4"));
 });

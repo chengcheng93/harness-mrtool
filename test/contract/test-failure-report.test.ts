@@ -161,7 +161,7 @@ test("macOS diagnostics capture spec privately and preserve npm exit independent
   assert.match(step.run!, /exit "\$status"/);
   assert.match(step.run!, /report-test-failures\.mjs "\$log" "\$status" 2>\/dev\/null/);
   assert.doesNotMatch(step.run!, /tee|cat |upload|continue-on-error|retry|skip/);
-  assert.ok(workflow.jobs["windows-sea"].steps.some((entry: { run?: string }) => entry.run === "npm test -- --test-concurrency=1 --test-reporter=./scripts/ci-test-progress-reporter.mjs"));
+  assert.ok(workflow.jobs["windows-sea"].steps.some((entry: { run?: string }) => entry.run?.includes("windows-suite-group.mjs")));
 });
 
 test("failure reporter keeps 100%0A::error:: text on one annotation line", () => {
@@ -197,10 +197,11 @@ test(${JSON.stringify(knownName)}, () => assert.equal("SECRET_ACTUAL", "SECRET_E
   }
 });
 
-test("Windows native CI retains the full serial suite with enough time after the observed 30-minute cancellation", () => {
+test("Windows native CI retains the complete serial suite in bounded parallel groups", () => {
   const workflow = parse(readFileSync(resolve(root, ".github/workflows/ci.yml"), "utf8"));
   const job = workflow.jobs["windows-sea"];
-  assert.equal(job["timeout-minutes"], 90);
+  assert.equal(job["timeout-minutes"], 45);
   assert.equal(job["continue-on-error"], undefined);
-  assert.ok(job.steps.some((entry: {run?: string}) => entry.run === "npm test -- --test-concurrency=1 --test-reporter=./scripts/ci-test-progress-reporter.mjs"));
+  assert.deepEqual(job.strategy.matrix.group, [0, 1, 2, 3]);
+  assert.ok(job.steps.some((entry: {run?: string}) => entry.run?.includes("windows-suite-group.mjs")));
 });

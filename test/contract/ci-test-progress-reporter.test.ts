@@ -57,12 +57,12 @@ test('actual Node reporter with URL-significant filename preserves failing child
  assert.match(run.stdout,/::error::Native suite FAIL test\/assertion-failure\.test\.ts line=1 failureType=testCodeFailure code=ERR_ASSERTION\n/);
  assert.doesNotMatch(run.stdout+run.stderr,/SECRET-|fixture.test|ci-reporter-contract/);
 });
-test('Windows CI keeps the unfiltered serial test command and adds safe live progress',async()=>{
+test('Windows CI keeps complete serial groups and adds safe live progress',async()=>{
  const workflow=parse(await readFile(resolve(root,'.github/workflows/ci.yml'),'utf8'));
  const steps=workflow.jobs['windows-sea'].steps as {run?:string}[];
- const full=steps.filter(s=>s.run?.includes('--test-reporter=./scripts/ci-test-progress-reporter.mjs'));
+ const full=steps.filter(s=>s.run?.includes('windows-suite-group.mjs'));
  assert.equal(full.length,1);
- assert.equal(full[0]!.run,'npm test -- --test-concurrency=1 --test-reporter=./scripts/ci-test-progress-reporter.mjs');
+ assert.equal(full[0]!.run,'node scripts/windows-suite-group.mjs --group ${{ matrix.group }} --groups 4');
  assert.equal(workflow.jobs['windows-sea']['continue-on-error'],undefined);
 });
 
