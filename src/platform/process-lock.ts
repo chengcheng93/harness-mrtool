@@ -260,9 +260,10 @@ $ErrorActionPreference='Stop'
 try {
 Add-Type -TypeDefinition @'
 using System;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Threading;
 using Microsoft.Win32.SafeHandles;
-public sealed class UnsafeProcessLock : Exception { public UnsafeProcessLock() : base("unsafe lock identity") {} }
 public static class ProcessLockNative {
  [StructLayout(LayoutKind.Sequential)] struct Info {
   public uint Attributes, CreationLow, CreationHigh, AccessLow, AccessHigh, WriteLow, WriteHigh;
@@ -272,37 +273,33 @@ public static class ProcessLockNative {
  static extern SafeFileHandle CreateFileW(string path,uint access,uint share,IntPtr security,uint disposition,uint flags,IntPtr template);
  [DllImport("kernel32.dll", SetLastError=true)]
  static extern bool GetFileInformationByHandle(SafeFileHandle handle,out Info info);
- static Info Inspect(SafeFileHandle handle) {
-  Info info; if(handle.IsInvalid || !GetFileInformationByHandle(handle,out info)) throw new Exception(); return info;
- }
  static SafeFileHandle held;
- public static void Acquire(string path,ulong expectedIno) {
-  held=CreateFileW(path,0xC0000000,0,IntPtr.Zero,4,0x00200000,IntPtr.Zero);
-  try {
-   Info info=Inspect(held);
-   ulong index=((ulong)info.IndexHigh<<32)|info.IndexLow;
-   if((info.Attributes&(0x10|0x400))!=0 || info.Links!=1 || index!=expectedIno) throw new UnsafeProcessLock();
-  } catch {
-   held?.Dispose(); held=null; throw;
+ public static int Acquire(string path,ulong expectedIno,long timeoutMs) {
+  var watch=Stopwatch.StartNew();
+  while (watch.ElapsedMilliseconds < timeoutMs) {
+   var candidate=CreateFileW(path,0xC0000000,0,IntPtr.Zero,4,0x00200000,IntPtr.Zero);
+   if (candidate.IsInvalid) { candidate.Dispose(); Thread.Sleep(5); continue; }
+   try {
+    Info info; if(!GetFileInformationByHandle(candidate,out info)) { candidate.Dispose(); return 1; }
+    ulong index=((ulong)info.IndexHigh<<32)|info.IndexLow;
+    if((info.Attributes&(0x10|0x400))!=0 || info.Links!=1 || index!=expectedIno) { candidate.Dispose(); return 25; }
+    held=candidate; return 0;
+   } catch { candidate.Dispose(); return 1; }
   }
+  return 24;
  }
  public static void Release() { held?.Dispose(); held=null; }
 }
 '@ | Out-Null
-$timeoutMs=[int64]$env:HMRTOOL_PROCESS_LOCK_TIMEOUT
-$watch=[System.Diagnostics.Stopwatch]::StartNew()
-while ($true) {
- try { [ProcessLockNative]::Acquire($env:HMRTOOL_PROCESS_LOCK_PATH,[ulong]$env:HMRTOOL_PROCESS_LOCK_INO); break }
- catch [UnsafeProcessLock] { exit 25 }
- catch { if ($watch.ElapsedMilliseconds -ge $timeoutMs) { exit 24 }; Start-Sleep -Milliseconds 5 }
-}
+$code=[ProcessLockNative]::Acquire($env:HMRTOOL_PROCESS_LOCK_PATH,[ulong]$env:HMRTOOL_PROCESS_LOCK_INO,[int64]$env:HMRTOOL_PROCESS_LOCK_TIMEOUT)
+if($code -ne 0) { exit $code }
 [Console]::Out.WriteLine('LOCKED')
 [Console]::Out.Flush()
 [Console]::In.ReadLine() | Out-Null
 [ProcessLockNative]::Release()
 exit 0
-} catch [UnsafeProcessLock] { exit 25 } catch { exit 1 }
-`;
+} catch { exit 1 }
+`
 
 async function acquireWindows(path: string, timeoutMs: number, expected: LockFileIdentity): Promise<ProcessLockLease> {
   const child = spawn(
