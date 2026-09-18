@@ -4,6 +4,7 @@ import { lstat, mkdir, open, realpath, rm, rmdir } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 
 import { ToolError } from "../contracts/errors.ts";
+import { moveAnchoredFile, type AnchoredMoveFileIdentity } from "../platform/anchored-file-mover.ts";
 import { writeAnchoredFile } from "../platform/anchored-file-writer.ts";
 import { openNativeMutationExecutor } from "../platform/native-mutation-executor.ts";
 
@@ -31,8 +32,6 @@ interface StageState {
   readonly markerIdentity: FileIdentity;
   readonly executableSha256: string;
   readonly markerSha256: string;
-  readonly executableSize: number;
-  readonly markerSize: number;
 }
 
 const stageStates = new WeakMap<object, StageState>();
@@ -48,7 +47,7 @@ function failure(): ToolError<"UPDATE_SECURITY_ERROR"> {
 
 function absoluteRoot(value: unknown): string {
   if (typeof value !== "string" || value.length === 0 || value.includes("\0") ||
-      !isAbsolute(value) || resolve(value) !== value || resolve(value) === resolve(value, "/..")) {
+      !isAbsolute(value) || resolve(value) !== value || resolve(value) === "/") {
     throw failure();
   }
   return value;
@@ -223,6 +222,39 @@ export interface ManagedPosixStage {
   readonly markerSha256: string;
 }
 
+export interface ManagedPosixPreviousEvidence {
+  readonly executable: AnchoredMoveFileIdentity;
+  readonly marker: AnchoredMoveFileIdentity;
+}
+
+export interface ManagedPosixPublicationInput {
+  readonly stage: ManagedPosixStage;
+  readonly attemptId: string;
+  readonly previous: { readonly executable: AnchoredMoveFileIdentity | null; readonly marker: AnchoredMoveFileIdentity | null };
+}
+
+export interface ManagedPosixPublication {
+  readonly attemptId: string;
+  readonly canonicalExecutableIdentity: AnchoredMoveFileIdentity;
+  readonly canonicalMarkerIdentity: AnchoredMoveFileIdentity;
+  readonly previous: ManagedPosixPreviousEvidence | null;
+  readonly stagedDirectory: string;
+}
+
+export interface ManagedPosixRollbackInput {
+  readonly installationDirectory: string;
+  readonly publishedAttemptId: string;
+  readonly rollbackAttemptId: string;
+  readonly current: ManagedPosixPreviousEvidence;
+  readonly previous: ManagedPosixPreviousEvidence;
+}
+
+export interface ManagedPosixRollback {
+  readonly rollbackAttemptId: string;
+  readonly retainedCurrent: ManagedPosixPreviousEvidence;
+  readonly restoredPrevious: ManagedPosixPreviousEvidence;
+}
+
 export interface ManagedPosixStageObservation {
   readonly stageDirectory: string;
   readonly executablePath: string;
@@ -277,7 +309,7 @@ export async function stageManagedPosixCandidate(input: ManagedPosixStageInput):
       });
       const state: StageState = {
         publicValue, rootIdentity, stageIdentity, executableIdentity, markerIdentity,
-        executableSha256, markerSha256, executableSize: executableBytes.byteLength, markerSize: markerBytes.byteLength,
+        executableSha256, markerSha256,
       };
       stageStates.set(publicValue, state);
       await observeStage(state);
@@ -293,6 +325,213 @@ export async function stageManagedPosixCandidate(input: ManagedPosixStageInput):
           // Preserve uncertain or non-empty evidence for explicit repair.
         }
       }
+      operationError = error;
+    }
+  } finally {
+    try {
+      await executor.close();
+    } catch (error) {
+      if (operationError === undefined) operationError = error;
+    }
+  }
+  if (operationError !== undefined) throw operationError instanceof ToolError ? operationError : failure();
+  if (result === undefined) throw failure();
+  return result;
+}
+
+async function optionalFileIdentity(path: string, mode: bigint): Promise<FileIdentity | null> {
+  try {
+    await lstat(path, { bigint: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw failure();
+  }
+  return fileIdentity(path, undefined, mode);
+}
+
+function sameExpectedPair(
+  actual: { readonly executable: FileIdentity | null; readonly marker: FileIdentity | null },
+  expected: { readonly executable: AnchoredMoveFileIdentity | null; readonly marker: AnchoredMoveFileIdentity | null },
+): boolean {
+  if ((actual.executable === null) !== (expected.executable === null) ||
+      (actual.marker === null) !== (expected.marker === null)) return false;
+  if (actual.executable !== null && expected.executable !== null && !exactIdentity(actual.executable, expected.executable)) return false;
+  if (actual.marker !== null && expected.marker !== null && !exactIdentity(actual.marker, expected.marker)) return false;
+  return true;
+}
+
+function publicationNames(attemptId: string): { readonly executable: string; readonly marker: string } {
+  if (typeof attemptId !== "string" || !/^[a-f0-9]{32}$/u.test(attemptId)) throw failure();
+  return Object.freeze({
+    executable: `harness-mrtool.previous-${attemptId}`,
+    marker: `.harness-mrtool-install.previous-${attemptId}`,
+  });
+}
+
+/**
+ * Publishes only the canonical executable/marker pair. It has no active-pointer
+ * or cache authority. A failure deliberately leaves the exact stage/backup
+ * evidence for the outer journal and recovery coordinator.
+ */
+export async function publishManagedPosixCandidate(input: ManagedPosixPublicationInput): Promise<ManagedPosixPublication> {
+  if (process.platform !== "darwin") throw failure();
+  const state = assertStage(input.stage);
+  const names = publicationNames(input.attemptId);
+  const executor = await openNativeMutationExecutor(state.publicValue.installationDirectory);
+  let result: ManagedPosixPublication | undefined;
+  let operationError: unknown;
+  try {
+    try {
+      const root = await directoryIdentity(state.publicValue.installationDirectory, state.rootIdentity);
+      await observeStage(state);
+      const current = {
+        executable: await optionalFileIdentity(resolve(state.publicValue.installationDirectory, EXECUTABLE_NAME), 0o500n),
+        marker: await optionalFileIdentity(resolve(state.publicValue.installationDirectory, MARKER_NAME), 0o600n),
+      };
+      if (!sameExpectedPair(current, input.previous)) throw failure();
+      const previous = current.executable === null || current.marker === null ? null : Object.freeze({
+        executable: current.executable,
+        marker: current.marker,
+      });
+      if (previous !== null) {
+        await moveAnchoredFile({
+          rootDirectory: state.publicValue.installationDirectory,
+          rootIdentity: { dev: root.dev, ino: root.ino },
+          sourceDirectory: state.publicValue.installationDirectory,
+          sourceDirectoryIdentity: { dev: root.dev, ino: root.ino },
+          sourceName: EXECUTABLE_NAME,
+          sourceIdentity: current.executable!,
+          destinationName: names.executable,
+          destination: { kind: "absent" },
+        });
+        await moveAnchoredFile({
+          rootDirectory: state.publicValue.installationDirectory,
+          rootIdentity: { dev: root.dev, ino: root.ino },
+          sourceDirectory: state.publicValue.installationDirectory,
+          sourceDirectoryIdentity: { dev: root.dev, ino: root.ino },
+          sourceName: MARKER_NAME,
+          sourceIdentity: current.marker!,
+          destinationName: names.marker,
+          destination: { kind: "absent" },
+        });
+      }
+      await moveAnchoredFile({
+        rootDirectory: state.publicValue.installationDirectory,
+        rootIdentity: { dev: root.dev, ino: root.ino },
+        sourceDirectory: state.publicValue.stageDirectory,
+        sourceDirectoryIdentity: { dev: state.stageIdentity.dev, ino: state.stageIdentity.ino },
+        sourceName: EXECUTABLE_NAME,
+        sourceIdentity: state.executableIdentity,
+        destinationName: EXECUTABLE_NAME,
+        destination: { kind: "absent" },
+      });
+      await moveAnchoredFile({
+        rootDirectory: state.publicValue.installationDirectory,
+        rootIdentity: { dev: root.dev, ino: root.ino },
+        sourceDirectory: state.publicValue.stageDirectory,
+        sourceDirectoryIdentity: { dev: state.stageIdentity.dev, ino: state.stageIdentity.ino },
+        sourceName: MARKER_NAME,
+        sourceIdentity: state.markerIdentity,
+        destinationName: MARKER_NAME,
+        destination: { kind: "absent" },
+      });
+      const canonicalExecutable = await fileIdentity(resolve(state.publicValue.installationDirectory, EXECUTABLE_NAME), undefined, 0o500n);
+      const canonicalMarker = await fileIdentity(resolve(state.publicValue.installationDirectory, MARKER_NAME), undefined, 0o600n);
+      if (await readDigest(resolve(state.publicValue.installationDirectory, EXECUTABLE_NAME), canonicalExecutable, 0o500n, MAX_EXECUTABLE_BYTES) !== state.executableSha256 ||
+          await readDigest(resolve(state.publicValue.installationDirectory, MARKER_NAME), canonicalMarker, 0o600n, MAX_MARKER_BYTES) !== state.markerSha256 ||
+          !privateOwner(root)) throw failure();
+      result = Object.freeze({
+        attemptId: input.attemptId,
+        canonicalExecutableIdentity: canonicalExecutable,
+        canonicalMarkerIdentity: canonicalMarker,
+        previous,
+        stagedDirectory: state.publicValue.stageDirectory,
+      });
+    } catch (error) {
+      operationError = error;
+    }
+  } finally {
+    try {
+      await executor.close();
+    } catch (error) {
+      if (operationError === undefined) operationError = error;
+    }
+  }
+  if (operationError !== undefined) throw operationError instanceof ToolError ? operationError : failure();
+  if (result === undefined) throw failure();
+  return result;
+}
+
+/**
+ * Restores the identity-pinned previous backup pair. Authorization and active
+ * pointer publication remain outside this primitive; a failure preserves every
+ * surviving pair for Journal recovery.
+ */
+export async function restoreManagedPosixPrevious(input: ManagedPosixRollbackInput): Promise<ManagedPosixRollback> {
+  if (process.platform !== "darwin") throw failure();
+  const root = absoluteRoot(input.installationDirectory);
+  const publishedNames = publicationNames(input.publishedAttemptId);
+  const rollbackNames = publicationNames(input.rollbackAttemptId);
+  if (input.publishedAttemptId === input.rollbackAttemptId) throw failure();
+  const executor = await openNativeMutationExecutor(root);
+  let result: ManagedPosixRollback | undefined;
+  let operationError: unknown;
+  try {
+    try {
+      const rootIdentity = await directoryIdentity(root);
+      const currentExecutable = await fileIdentity(resolve(root, EXECUTABLE_NAME), input.current.executable, 0o500n);
+      const currentMarker = await fileIdentity(resolve(root, MARKER_NAME), input.current.marker, 0o600n);
+      const previousExecutable = await fileIdentity(resolve(root, publishedNames.executable), input.previous.executable, 0o500n);
+      const previousMarker = await fileIdentity(resolve(root, publishedNames.marker), input.previous.marker, 0o600n);
+      await moveAnchoredFile({
+        rootDirectory: root,
+        rootIdentity: { dev: rootIdentity.dev, ino: rootIdentity.ino },
+        sourceDirectory: root,
+        sourceDirectoryIdentity: { dev: rootIdentity.dev, ino: rootIdentity.ino },
+        sourceName: EXECUTABLE_NAME,
+        sourceIdentity: currentExecutable,
+        destinationName: rollbackNames.executable,
+        destination: { kind: "absent" },
+      });
+      await moveAnchoredFile({
+        rootDirectory: root,
+        rootIdentity: { dev: rootIdentity.dev, ino: rootIdentity.ino },
+        sourceDirectory: root,
+        sourceDirectoryIdentity: { dev: rootIdentity.dev, ino: rootIdentity.ino },
+        sourceName: MARKER_NAME,
+        sourceIdentity: currentMarker,
+        destinationName: rollbackNames.marker,
+        destination: { kind: "absent" },
+      });
+      await moveAnchoredFile({
+        rootDirectory: root,
+        rootIdentity: { dev: rootIdentity.dev, ino: rootIdentity.ino },
+        sourceDirectory: root,
+        sourceDirectoryIdentity: { dev: rootIdentity.dev, ino: rootIdentity.ino },
+        sourceName: publishedNames.executable,
+        sourceIdentity: previousExecutable,
+        destinationName: EXECUTABLE_NAME,
+        destination: { kind: "absent" },
+      });
+      await moveAnchoredFile({
+        rootDirectory: root,
+        rootIdentity: { dev: rootIdentity.dev, ino: rootIdentity.ino },
+        sourceDirectory: root,
+        sourceDirectoryIdentity: { dev: rootIdentity.dev, ino: rootIdentity.ino },
+        sourceName: publishedNames.marker,
+        sourceIdentity: previousMarker,
+        destinationName: MARKER_NAME,
+        destination: { kind: "absent" },
+      });
+      const restoredExecutable = await fileIdentity(resolve(root, EXECUTABLE_NAME), undefined, 0o500n);
+      const restoredMarker = await fileIdentity(resolve(root, MARKER_NAME), undefined, 0o600n);
+      if (!exactIdentity(restoredExecutable, previousExecutable) || !exactIdentity(restoredMarker, previousMarker)) throw failure();
+      result = Object.freeze({
+        rollbackAttemptId: input.rollbackAttemptId,
+        retainedCurrent: Object.freeze({ executable: currentExecutable, marker: currentMarker }),
+        restoredPrevious: Object.freeze({ executable: restoredExecutable, marker: restoredMarker }),
+      });
+    } catch (error) {
       operationError = error;
     }
   } finally {

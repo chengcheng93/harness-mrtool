@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmod, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import type { AnchoredMoveFileIdentity } from "../../src/platform/anchored-file-mover.ts";
 import test from "node:test";
 
-import { stageManagedPosixCandidate, removeManagedPosixStage, verifyManagedPosixStage } from "../../src/update/managed-installation-posix.ts";
+import { publishManagedPosixCandidate, restoreManagedPosixPrevious, stageManagedPosixCandidate, removeManagedPosixStage, verifyManagedPosixStage } from "../../src/update/managed-installation-posix.ts";
 
 const darwin = { skip: process.platform !== "darwin" };
 
@@ -32,6 +33,11 @@ async function stage(root: string, variant: number) {
     executableSha256: sha(executable),
     markerSha256: sha(marker),
   });
+}
+
+async function fileIdentity(path: string): Promise<AnchoredMoveFileIdentity> {
+  const info = await lstat(path, { bigint: true });
+  return { dev: info.dev, ino: info.ino, size: info.size, mode: info.mode, uid: info.uid };
 }
 
 test("stages two distinct candidates and verifies their actual bytes", darwin, async () => {
@@ -73,5 +79,86 @@ test("does not follow a replaced marker symlink during verification or cleanup",
     await assert.rejects(() => verifyManagedPosixStage(candidate), { code: "UPDATE_SECURITY_ERROR" });
     await assert.rejects(() => removeManagedPosixStage(candidate), { code: "UPDATE_SECURITY_ERROR" });
     assert.equal(await readFile(outside, "utf8"), "outside\n");
+  });
+});
+
+
+test("publishes distinct candidates and retains the expected previous pair", darwin, async () => {
+  await installationRoot(async (root) => {
+    const first = await stage(root, 5);
+    const firstPublication = await publishManagedPosixCandidate({
+      stage: first,
+      attemptId: "a".repeat(32),
+      previous: { executable: null, marker: null },
+    });
+    assert.equal(firstPublication.previous, null);
+    assert.deepEqual(await readFile(join(root, "harness-mrtool")), Buffer.from([0x7f, 0x53, 0x45, 0x41, 5]));
+
+    const previous = {
+      executable: await fileIdentity(join(root, "harness-mrtool")),
+      marker: await fileIdentity(join(root, ".harness-mrtool-install.json")),
+    };
+    const second = await stage(root, 6);
+    const secondPublication = await publishManagedPosixCandidate({
+      stage: second,
+      attemptId: "b".repeat(32),
+      previous,
+    });
+    assert.deepEqual(secondPublication.previous, previous);
+    assert.deepEqual(await readFile(join(root, "harness-mrtool")), Buffer.from([0x7f, 0x53, 0x45, 0x41, 6]));
+    assert.deepEqual(await readFile(join(root, "harness-mrtool.previous-" + "b".repeat(32))), Buffer.from([0x7f, 0x53, 0x45, 0x41, 5]));
+    assert.match(await readFile(join(root, ".harness-mrtool-install.previous-" + "b".repeat(32)), "utf8"), /variant":5/u);
+  });
+});
+
+test("does not publish over a substituted canonical file", darwin, async () => {
+  await installationRoot(async (root) => {
+    const first = await stage(root, 7);
+    await publishManagedPosixCandidate({ stage: first, attemptId: "c".repeat(32), previous: { executable: null, marker: null } });
+    const previous = {
+      executable: await fileIdentity(join(root, "harness-mrtool")),
+      marker: await fileIdentity(join(root, ".harness-mrtool-install.json")),
+    };
+    const second = await stage(root, 8);
+    await rm(join(root, "harness-mrtool"));
+    await writeFile(join(root, "harness-mrtool"), "sentinel", { mode: 0o500 });
+    await assert.rejects(
+      () => publishManagedPosixCandidate({ stage: second, attemptId: "d".repeat(32), previous }),
+      { code: "UPDATE_SECURITY_ERROR" },
+    );
+    assert.equal(await readFile(join(root, "harness-mrtool"), "utf8"), "sentinel");
+    assert.deepEqual(await readFile(second.executablePath), Buffer.from([0x7f, 0x53, 0x45, 0x41, 8]));
+  });
+});
+
+test("restores the authorized previous pair while retaining the current pair", darwin, async () => {
+  await installationRoot(async (root) => {
+    const first = await stage(root, 9);
+    await publishManagedPosixCandidate({ stage: first, attemptId: "e".repeat(32), previous: { executable: null, marker: null } });
+    const previousBackup = {
+      executable: await fileIdentity(join(root, "harness-mrtool")),
+      marker: await fileIdentity(join(root, ".harness-mrtool-install.json")),
+    };
+    const second = await stage(root, 10);
+    await publishManagedPosixCandidate({ stage: second, attemptId: "f".repeat(32), previous: previousBackup });
+    const current = {
+      executable: await fileIdentity(join(root, "harness-mrtool")),
+      marker: await fileIdentity(join(root, ".harness-mrtool-install.json")),
+    };
+    const previous = {
+      executable: await fileIdentity(join(root, "harness-mrtool.previous-" + "f".repeat(32))),
+      marker: await fileIdentity(join(root, ".harness-mrtool-install.previous-" + "f".repeat(32))),
+    };
+
+    const rollback = await restoreManagedPosixPrevious({
+      installationDirectory: root,
+      publishedAttemptId: "f".repeat(32),
+      rollbackAttemptId: "1".repeat(32),
+      current,
+      previous,
+    });
+    assert.deepEqual(rollback.retainedCurrent, current);
+    assert.deepEqual(await readFile(join(root, "harness-mrtool")), Buffer.from([0x7f, 0x53, 0x45, 0x41, 9]));
+    assert.deepEqual(await readFile(join(root, "harness-mrtool.previous-" + "1".repeat(32))), Buffer.from([0x7f, 0x53, 0x45, 0x41, 10]));
   });
 });
