@@ -221,3 +221,13 @@ test('Windows native gate: target and ancestor pins deny rename until streaming 
     await pending.catch(() => undefined);
   }
 });
+
+test('writes the fixed Windows transaction staging names in the pinned directory', async t => {
+  if (process.platform === 'win32') return t.skip('POSIX mode assertion is not portable; Windows gate covers native helper');
+  for (const name of ['harness-mrtool.exe.new', '.harness-mrtool-install.json.new'] as const) {
+    const f = await fixture(t);
+    await writeAnchoredFile({ ...f, name });
+    assert.deepEqual(await fs.readFile(resolve(f.directory, name)), Buffer.from(f.bytes));
+    assert.equal((await fs.lstat(resolve(f.directory, name))).mode & 0o7777, 0o600);
+  }
+});

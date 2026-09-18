@@ -87,6 +87,13 @@ export interface WindowsExecutableFaultInjector {
 
 export interface WindowsExecutableRotationOptions {
   readonly faultInjector?: WindowsExecutableFaultInjector;
+  /** POSIX mode for the canonical file; Windows ACLs are enforced separately. */
+  readonly canonicalMode?: 0o600 | 0o755;
+}
+
+export interface WindowsExecutableRecoveryOptions {
+  /** POSIX mode for the canonical file when recovery accepts the new image. */
+  readonly canonicalMode?: 0o600 | 0o755;
 }
 
 
@@ -495,8 +502,12 @@ function fileMatches(
 
 
 /** Repair a durable pending rotation without accepting an unjournaled executable. */
-export async function recoverWindowsExecutable(paths: WindowsExecutablePaths): Promise<"old" | "new" | null> {
+export async function recoverWindowsExecutable(
+  paths: WindowsExecutablePaths,
+  options: WindowsExecutableRecoveryOptions = {},
+): Promise<"old" | "new" | null> {
   validatePaths(paths);
+  const canonicalMode = options.canonicalMode ?? 0o755;
   await assertPlainDirectory(dirname(paths.canonical));
   const journal = await readJournal(paths);
   if (journal === null) return null;
@@ -509,7 +520,7 @@ export async function recoverWindowsExecutable(paths: WindowsExecutablePaths): P
 
   if (fileMatches(canonical, journal.stagedIdentity, journal.stagedSha256) && staged === null &&
       fileMatches(old, journal.canonicalIdentity, journal.canonicalSha256)) {
-    await chmod(paths.canonical, 0o755).catch(() => undefined);
+    await chmod(paths.canonical, canonicalMode).catch(() => undefined);
     await removeJournal(paths);
     return "new";
   }
@@ -539,9 +550,10 @@ export async function rotateWindowsExecutable(
   options: WindowsExecutableRotationOptions = {},
 ): Promise<void> {
   validatePaths(paths);
+  const canonicalMode = options.canonicalMode ?? 0o755;
   const parent = dirname(paths.canonical);
   await assertPlainDirectory(parent);
-  await recoverWindowsExecutable(paths);
+  await recoverWindowsExecutable(paths, { canonicalMode });
   const staged = await openVerifiedFile(paths.staged);
   let canonical: VerifiedFile | undefined;
   try {
@@ -580,7 +592,7 @@ export async function rotateWindowsExecutable(
     await syncDirectory(parent);
     await writeJournal(paths, { ...base, phase: "staged-installed" });
     await options.faultInjector?.hit("after-staged-installed");
-    await chmod(paths.canonical, 0o755).catch(() => undefined);
+    await chmod(paths.canonical, canonicalMode).catch(() => undefined);
     await removeJournal(paths);
   } finally {
     await canonical?.handle.close().catch(() => undefined);
