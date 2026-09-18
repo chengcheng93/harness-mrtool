@@ -5,9 +5,11 @@ import {
   access,
   chmod,
   mkdtemp,
+  open as openFile,
   readFile,
   readdir,
   realpath,
+  rename,
   rm,
   stat,
   symlink,
@@ -120,6 +122,31 @@ test("structural clones and receipts do not mint mutation authority", darwin, as
   await assert.rejects(executor.reserve(receiptLike as unknown as typeof mutation), { code: "UPDATE_SECURITY_ERROR" });
   assert.deepEqual((await readdir(root)).sort(), [".update.lock"]);
   await executor.close();
+});
+
+test("the pinned root inode fences native successors across lock-file replacement", darwin, async (t) => {
+  const root = await temporaryInstallation(t);
+  const first = await openNativeMutationExecutor(root);
+  t.after(() => first.close());
+
+  await rename(resolve(root, ".update.lock"), resolve(root, ".update.lock.old"));
+  const successorLock = resolve(root, ".update.lock");
+  const successorHandle = await openFile(successorLock, "wx", 0o600);
+  await successorHandle.close();
+
+  let successorResolved = false;
+  const successor = openNativeMutationExecutor(root).then((executor) => {
+    successorResolved = true;
+    return executor;
+  });
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+  assert.equal(successorResolved, false);
+
+  await first.close();
+  const second = await successor;
+  assert.equal(successorResolved, true);
+  await second.close();
+  await rm(resolve(root, ".update.lock.old"), { force: true });
 });
 
 test("the native child remains the lock owner until executor close", darwin, async (t) => {

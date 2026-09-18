@@ -216,6 +216,10 @@ $root_ino = 0 + $root_ino;
 open(my $root, '<&=3') or die 'root-fd';
 my @root_stat = stat($root);
 @root_stat && -d $root && $root_stat[0] == $root_dev && $root_stat[1] == $root_ino && $root_stat[4] == $< && ($root_stat[2] & 07777) == 0700 or die 'root-identity';
+# The pinned directory inode is the stable native fence.  The marker pathname
+# below may be unlinked and recreated by a successor, so the marker flock alone
+# cannot serialize native executors across that replacement.
+flock($root, LOCK_EX) or die 'root-flock';
 chdir($root) or die 'fchdir';
 my $lock;
 if (sysopen($lock, '.update.lock', O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, 0600)) {
