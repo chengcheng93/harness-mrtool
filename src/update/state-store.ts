@@ -116,7 +116,7 @@ function securityFailure(): ToolError<"UPDATE_SECURITY_ERROR"> {
     {
       field: "updateState",
       expected: "canonical state bound to the built-in update trust configuration",
-      actual: "invalid or unsafe local update state",
+      actual: "update-state:unsafe",
       safeNextStep: "Repair the private update state and retry.",
     },
   );

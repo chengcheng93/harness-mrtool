@@ -33,7 +33,7 @@ function failure(): ToolError<"UPDATE_SECURITY_ERROR"> {
   return new ToolError("UPDATE_SECURITY_ERROR", "installation journal store is unsafe", {
     field: "installationJournalStore",
     expected: "a private bounded canonical journal under the fixed state root",
-    actual: "unsafe",
+    actual: "installation-journal:unsafe",
     safeNextStep: "Preserve installation evidence and run self-update repair.",
   });
 }

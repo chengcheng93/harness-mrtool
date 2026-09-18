@@ -22,8 +22,8 @@ export interface MaterializedNativeExecutable {
  readonly releaseSetId:string;
 }
 const READ_FLAGS=constants.O_RDONLY|((constants as {O_NOFOLLOW?:number}).O_NOFOLLOW??0);
-function fail():never{throw new ToolError('UPDATE_SECURITY_ERROR','Native executable materialization is unsafe',{
- field:'update.executable',expected:'a private, sealed executable matching authenticated release bytes',actual:'native executable rejected',
+function fail(actual='native-store:operation'):never{throw new ToolError('UPDATE_SECURITY_ERROR','Native executable materialization is unsafe',{
+ field:'update.executable',expected:'a private, sealed executable matching authenticated release bytes',actual,
  safeNextStep:'Keep the installed release; inspect the private native staging directory before retrying.'});}
 function same(a:BigIntStats,b:BigIntStats){return a.dev===b.dev&&a.ino===b.ino;}
 function pathEqual(a:string,b:string){return process.platform==='win32'?a.toLowerCase()===b.toLowerCase():a===b;}
@@ -132,7 +132,7 @@ export function createNativeExecutableStore(input:NativeExecutableStoreOptions){
   });
  }
  async function safely(snapshot:ReleaseSetSnapshot,create:boolean,lease?:ProcessLockLease){
-  try{return await operation(snapshot,create,lease);}catch{return fail();}
+  try{return await operation(snapshot,create,lease);}catch(error){if(error instanceof ToolError)throw error;return fail();}
  }
  return Object.freeze({materialize:(snapshot:ReleaseSetSnapshot,lease?:ProcessLockLease)=>safely(snapshot,true,lease),
   verify:(snapshot:ReleaseSetSnapshot,lease?:ProcessLockLease)=>safely(snapshot,false,lease)});

@@ -44,11 +44,11 @@ interface WindowsStageState {
 
 const stageStates = new WeakMap<object, WindowsStageState>();
 
-function failure(): ToolError<"UPDATE_SECURITY_ERROR"> {
+function failure(actual = "managed-installation:stage"): ToolError<"UPDATE_SECURITY_ERROR"> {
   return new ToolError("UPDATE_SECURITY_ERROR", "managed Windows staging is unsafe", {
     field: "update.managedInstallation",
     expected: "a private, identity-pinned staged Windows executable and marker",
-    actual: "staged installation evidence rejected",
+    actual,
     safeNextStep: "Keep the current installation and run self-update repair.",
   });
 }
@@ -83,7 +83,7 @@ async function directoryIdentity(path: string, expected?: FileIdentity): Promise
     if (expected !== undefined && (result.dev !== expected.dev || result.ino !== expected.ino)) throw failure();
     return result;
   } catch (error) {
-    throw error instanceof ToolError ? error : failure();
+    throw error instanceof ToolError ? error : failure("managed-installation:directory");
   }
 }
 
@@ -98,7 +98,7 @@ async function fileIdentity(path: string, expected?: FileIdentity): Promise<File
     if (expected !== undefined && !sameIdentity(result, expected)) throw failure();
     return result;
   } catch (error) {
-    throw error instanceof ToolError ? error : failure();
+    throw error instanceof ToolError ? error : failure("managed-installation:file");
   }
 }
 

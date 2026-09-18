@@ -68,7 +68,7 @@ function failureDetails(data) {
     const actual = ownValue(ownValue(error, 'details'), 'actual');
     const reason = ownValue(error, 'reason');
     const helperDiagnostic = ownValue(error, 'diagnostic');
-    if (diagnostic === undefined && typeof actual === 'string' && /^windows-helper:[a-z-]{1,32}$/u.test(actual)) {
+    if (diagnostic === undefined && typeof actual === 'string' && /^(?:windows-helper|native-store|managed-installation|update-state|installation-journal):[a-z-]{1,32}$/u.test(actual)) {
       diagnostic = actual;
     }
     if (diagnostic === undefined && typeof helperDiagnostic === 'string' && /^windows-lock-helper:[a-z-]{1,32}$/u.test(helperDiagnostic)) {
