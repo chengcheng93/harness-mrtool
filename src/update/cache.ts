@@ -168,11 +168,19 @@ export type WriteBlockReason =
   | "active-release-set-revoked";
 
 
-export interface LoadedReleaseSet extends ReleaseSetSnapshot {
+export interface CachedReleaseSetFiles extends ReleaseSetSnapshot {
   readonly releaseDirectory: string;
   readonly cliPath: string;
   readonly templatePath: string;
   readonly receiptPath: string;
+}
+
+/** Verified immutable files only; no active-pointer or installation claim. */
+export interface StagedReleaseSet extends CachedReleaseSetFiles {
+  readonly kind: "staged-release-set";
+}
+
+export interface LoadedReleaseSet extends CachedReleaseSetFiles {
   readonly writesBlocked: boolean;
   readonly writeBlockReasons: readonly WriteBlockReason[];
 }
@@ -902,7 +910,10 @@ export class UpdateCache {
   }
 
 
-  private async storeVerifiedReleaseSetUnlocked(input: ReleaseSetSnapshot): Promise<StoredReleaseSet> {
+  private async persistVerifiedReleaseSetUnlocked(
+    input: ReleaseSetSnapshot,
+    commitActivePointer: boolean,
+  ): Promise<CachedReleaseSetFiles> {
     await this.ensureReady();
     const snapshot = validateSnapshot(input);
     if (this.verifySnapshot === undefined || typeof this.verifySnapshot.verify !== "function") return fail();
@@ -957,25 +968,21 @@ export class UpdateCache {
         await rename(stagingDirectory, releaseDirectory);
       }
       await syncDirectory(this.releaseRoot);
-      await atomicWrite(
-        this.activeRecordPath,
-        new TextEncoder().encode(canonicalRecord(snapshot.record)),
-        0o600,
-        this.faultInjector,
-        "before-active-replace",
-      );
+      if (commitActivePointer) {
+        await atomicWrite(
+          this.activeRecordPath,
+          new TextEncoder().encode(canonicalRecord(snapshot.record)),
+          0o600,
+          this.faultInjector,
+          "before-active-replace",
+        );
+      }
     } catch (error) {
       await rm(stagingDirectory, { recursive: true, force: true }).catch(() => undefined);
       if (error instanceof ToolError) throw error;
       return fail();
     }
-    const loaded = await this.readRelease(snapshot.record);
-    const result: StoredReleaseSet = {
-      ...loaded,
-      writesBlocked: false,
-      writeBlockReasons: [],
-    };
-    return Object.freeze(result);
+    return Object.freeze(await this.readRelease(snapshot.record));
   }
 
 
@@ -984,12 +991,48 @@ export class UpdateCache {
     lease?: ProcessLockLease,
   ): Promise<StoredReleaseSet> {
     return this.withOperationLock(lease, async (heldLease) => {
-      const result = await this.storeVerifiedReleaseSetUnlocked(input);
+      const result = await this.persistVerifiedReleaseSetUnlocked(input, true);
       heldLease.assertHeld();
-      return result;
+      return Object.freeze({ ...result, writesBlocked: false, writeBlockReasons: [] });
     });
   }
 
+
+  /** Persist a candidate without creating or replacing the active pointer. */
+  async stageVerifiedReleaseSet(
+    input: ReleaseSetSnapshot,
+    lease?: ProcessLockLease,
+  ): Promise<StagedReleaseSet> {
+    return this.withOperationLock(lease, async heldLease => {
+      const result = await this.persistVerifiedReleaseSetUnlocked(input, false);
+      heldLease.assertHeld();
+      return Object.freeze({ ...result, kind: "staged-release-set" as const });
+    });
+  }
+
+  /** Read/re-authenticate a proposal after restart without activating it. */
+  async loadStagedReleaseSet(
+    input: ReleaseSetRecord,
+    lease?: ProcessLockLease,
+  ): Promise<StagedReleaseSet | null> {
+    return this.withOperationLock(lease, async heldLease => {
+      const record = validateReleaseSetRecord(input);
+      await this.ensureReady();
+      try {
+        const info = await lstat(this.releaseDirectory(record));
+        if (info.isSymbolicLink() || !info.isDirectory()) return fail();
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+        if (error instanceof ToolError) throw error;
+        return fail();
+      }
+      const loaded = await this.readRelease(record);
+      if (this.verifySnapshot === undefined || typeof this.verifySnapshot.verify !== "function") return fail();
+      await this.verifySnapshot.verify(verifierSnapshot(loaded));
+      heldLease.assertHeld();
+      return Object.freeze({ ...loaded, kind: "staged-release-set" as const });
+    });
+  }
 
   /** Commit a release directory previously published by a verified store attempt. */
   private async commitStagedReleaseSetUnlocked(input: ReleaseSetRecord): Promise<StoredReleaseSet | null> {

@@ -399,7 +399,12 @@ export function parseCliInvocation(arguments_: readonly string[]): CliInvocation
   }
 
 
-  const options = parseCliOptions(commonArguments);
+  const options = selected.kind === "version" && usedCommon.has("--offline") && usedCommon.has("--no-update")
+    ? Object.freeze({
+        ...parseCliOptions(commonArguments.filter(argument => argument !== "--no-update")),
+        noUpdate: true,
+      })
+    : parseCliOptions(commonArguments);
   const allowedCommon = commonFlagsFor(selected.kind);
   if ([...usedCommon].some((flag) => !allowedCommon.has(flag))) {
     invalid("arguments", `only flags supported by ${selected.kind}`, "inapplicable common flag");

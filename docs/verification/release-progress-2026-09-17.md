@@ -215,3 +215,27 @@ source/artifact receipt, strictcodesign and unchangedNode hash verified. Indepen
 status review and transaction-lease closure approved. Production canonical install,
 apply/rollback/handoff/startup tuple selection and all live release/installation/
 GitLab acceptance gates remain outstanding.
+
+### September18 staged-candidate/readiness checkpoint
+
+- Added `stageVerifiedReleaseSet` and `loadStagedReleaseSet` to keep immutable
+  authenticated candidate files separate from `active-release-set.json`. Staging
+  preserves an existing active pointer byte-for-byte and never claims installation;
+  restart reads reauthenticate the exact signed snapshot. Independent review approved.
+- Added bounded `verifyNativeReadiness`: derives the executable only through the
+  authenticated native store, confirms host platform, rechecks the sealed file
+  around each child run, uses isolated private cwd/state/env and bounded shared
+  deadline, and runs exact SEA self-test, contract, renderer and version probes.
+  No active pointer or business side effect is performed. Real packaged SEA test
+  now passes after the parser contract fix.
+- `version --offline --no-update` is accepted only in the command-aware version
+  invocation path; generic `parseCliOptions` continues rejecting the conflicting
+  pair. This preserves ordinary command conflict policy while enabling a strictly
+  read-only readiness probe.
+- Fresh exact Node24.16.0 typecheck/build/full serial suite underumask077:
+  **1666 tests /1654 passed /0 failed /12 platform skips**. Current SEA receipt and
+  strict codesign verified.
+- Previous e3e42ae hosted CI: Portable, Secret scan and Mac ARM64 passed; Windows
+  was cancelled exactly at the60-minute job limit. CI serial suite remains intact;
+  budget raised to90minutes for the next run after this commit, not treated as a
+  workaround or a pass.

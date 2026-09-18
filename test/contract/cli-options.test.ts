@@ -6,6 +6,7 @@ import { isToolError } from "../../src/contracts/errors.ts";
 import { MAX_INPUT_BYTES, type InputIo } from "../../src/input/load-input.ts";
 import { loadCliInput, resolveCliInputTransport } from "../../src/cli/input.ts";
 import { mayPrompt, parseCliOptions } from "../../src/cli/options.ts";
+import { parseCliInvocation } from "../../src/cli/program.ts";
 
 function assertInputError(run: () => unknown, field?: string): void {
   assert.throws(run, (error: unknown) => {
@@ -124,6 +125,13 @@ test("parses explicit authentication modes", () => {
   assert.equal(parseCliOptions(["--auth=api"]).authMode, "api");
   assert.equal(parseCliOptions(["--auth", "auto"]).authMode, "auto");
   assertInputError(() => parseCliOptions(["--auth", "token"]));
+});
+
+test("version readiness probe may combine offline and no-update as redundant read-only disables", () => {
+  const invocation = parseCliInvocation(["version", "--offline", "--no-update", "--output", "json"]);
+  assert.equal(invocation.command.kind, "version");
+  assert.equal(invocation.options.offline, true);
+  assert.equal(invocation.options.noUpdate, true);
 });
 
 test("rejects duplicates, missing values, unsupported values, and conflicts as INPUT_ERROR", () => {
