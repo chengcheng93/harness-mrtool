@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, feature/production-composition]
+    branches: [main, feature/production-composition, codex/release-closure-20260918]
   pull_request:
   workflow_dispatch:
 

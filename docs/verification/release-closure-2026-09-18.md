@@ -64,3 +64,22 @@ managed installation/default update routing, T08 native bootstrap/old-version
 migration, T09 Skill/Plugin integration, T10 current-SHA release gates,
 T11–T12 signed publication/channel and real updates, T13 host/GitLab acceptance,
 T14 final evidence audit are not complete.
+
+## T01 bounded fixes and post-integration local verification
+
+- Committed fixture portability: `12ce23eeba24d47d7ed10db3f886174ce4097852`.
+- Committed reporter import/diagnostic fix: `dbbdcf30fede0f4cacf6513f240c1eceaa61abb6`.
+- Both scoped independent reviews passed spec and quality gates; no P0–P2
+  findings. A pre-existing optional missing nonempty symlink-diff assertion is
+  recorded for a later test-hardening slice, not hidden as native verification.
+- Exact Node24.16.0 typecheck → SEA rebuild → full serial suite → Darwin strict
+  codesign → git diff --check: exit0.
+- Full integrated suite: **1700 tests / 1688 passed / 0 failed / 12 skipped**,
+  240593.505167 ms. Same twelve Windows-only cases remain open on this host.
+- Reporter URL-loading regressions failed before the fix (including real #/%
+  filenames); fixed-enum diagnostics also have recorded RED/GREEN coverage.
+- Existing CI is enabled for the exact isolated work branch with read-only
+  permissions. The complete serial Windows command and 90-minute limit are
+  unchanged; no release tag is created by this checkpoint.
+- **T01 remains open until native Windows current-commit evidence is available.**
+  No installation, release, active-pointer update or GitLab write occurred.
