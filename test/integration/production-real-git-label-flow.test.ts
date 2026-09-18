@@ -13,6 +13,7 @@ import { RealGitLabelTransport } from "../helpers/real-git-label-transport.ts";
 const root = resolve(import.meta.dirname, "../..");
 const sourceBranch = "feature/task7";
 const endpoint = "git@gitlab.example.test:group/project.git";
+const allowTestAcl = Object.freeze({ verify: async (_path: string): Promise<void> => undefined });
 
 async function setup(t: test.TestContext) {
   const git = await GitFixture.create();
@@ -70,6 +71,7 @@ async function setup(t: test.TestContext) {
       cwd: git.worktreePath,
       readOnlyDefaults: {
         stateDirectory,
+        windowsAclVerifier: allowTestAcl,
         targetSessionResolver: { resolve: async () => ({
           origin: transport.origin, gitlab: client, project: transport.project,
           identity: { host: "gitlab.example.test", path: transport.project.fullPath }, targetRemote: "origin",

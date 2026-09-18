@@ -10,6 +10,8 @@ import { withUpdateLock } from "../../src/platform/lock.ts";
 import { ProcessLockError, type ProcessLockLease } from "../../src/platform/process-lock.ts";
 import { journalFixture, type JournalFixture } from "../helpers/installation-journal-fixture.ts";
 
+const allowTestAcl = Object.freeze({ verify: async (_path: string): Promise<void> => undefined });
+
 async function withStateRoot<T>(callback: (stateRoot: string) => Promise<T>): Promise<T> {
   const root = await mkdtemp(join(tmpdir(), "harness-mrtool-installation-journal-"));
   try {
@@ -36,7 +38,7 @@ function assertSecurity(error: unknown): true {
 
 test("persists and reloads a canonical journal under the fixed state root", async () => {
   await withStateRoot(async (stateRoot) => {
-    const store = createInstallationJournalStore(stateRoot);
+    const store = createInstallationJournalStore(stateRoot, { windowsAclVerifier: allowTestAcl });
     const journal = await fixtureForRoot(stateRoot);
 
     const written = await store.write(journal);
@@ -60,7 +62,7 @@ test("does not follow a journal symlink and leaves the target untouched", async 
     const outside = join(stateRoot, "outside.json");
     await writeFile(outside, "outside\n", { mode: 0o600 });
     await symlink(outside, join(stateRoot, "installation-journal.json"));
-    const store = createInstallationJournalStore(stateRoot);
+    const store = createInstallationJournalStore(stateRoot, { windowsAclVerifier: allowTestAcl });
 
     await assert.rejects(() => store.read(), assertSecurity);
     const journal = await fixtureForRoot(stateRoot);
@@ -72,7 +74,7 @@ test("does not follow a journal symlink and leaves the target untouched", async 
 test("rejects a journal with an external hard-link witness", async () => {
   if (process.platform === "win32") return;
   await withStateRoot(async (stateRoot) => {
-    const store = createInstallationJournalStore(stateRoot);
+    const store = createInstallationJournalStore(stateRoot, { windowsAclVerifier: allowTestAcl });
     const journal = await fixtureForRoot(stateRoot);
     await store.write(journal);
     await link(store.path, join(stateRoot, "journal-alias"));
@@ -92,7 +94,7 @@ test("can bind persistence to the shared branded update lease", async () => {
   await withStateRoot(async (stateRoot) => {
     const journal = await fixtureForRoot(stateRoot);
     await withUpdateLock(stateRoot, async (lease) => {
-      const store = createInstallationJournalStore(stateRoot, { lease });
+      const store = createInstallationJournalStore(stateRoot, { lease, windowsAclVerifier: allowTestAcl });
       await store.write(journal);
       assert.ok(await store.read());
       await store.remove();
@@ -104,7 +106,7 @@ test("can bind persistence to the shared branded update lease", async () => {
 test("a bound store rejects a forged lease before touching the journal root", async () => {
   await withStateRoot(async (stateRoot) => {
     const forged: ProcessLockLease = { assertHeld() {}, async release() {} };
-    const store = createInstallationJournalStore(stateRoot, { lease: forged });
+    const store = createInstallationJournalStore(stateRoot, { lease: forged, windowsAclVerifier: allowTestAcl });
     await assert.rejects(() => store.read(), (error: unknown) => {
       assert.ok(error instanceof ProcessLockError);
       assert.equal(error.reason, "unsafe");
@@ -117,10 +119,10 @@ test("a bound store rejects a forged lease before touching the journal root", as
 test("a fresh store instance reloads the durable journal and preserves invalid evidence", async () => {
   await withStateRoot(async (stateRoot) => {
     const journal = await fixtureForRoot(stateRoot);
-    const first = createInstallationJournalStore(stateRoot);
+    const first = createInstallationJournalStore(stateRoot, { windowsAclVerifier: allowTestAcl });
     await first.write(journal);
 
-    const second = createInstallationJournalStore(stateRoot);
+    const second = createInstallationJournalStore(stateRoot, { windowsAclVerifier: allowTestAcl });
     assert.deepEqual(await second.read(), journal);
     await writeFile(second.path, "{}\n", { mode: 0o600 });
     await assert.rejects(() => second.read(), (error: unknown) => {
@@ -135,7 +137,7 @@ test("a fresh store instance reloads the durable journal and preserves invalid e
 test("a replaced state root cannot reuse the old journal evidence", async () => {
   await withStateRoot(async (stateRoot) => {
     const journal = await fixtureForRoot(stateRoot);
-    const store = createInstallationJournalStore(stateRoot);
+    const store = createInstallationJournalStore(stateRoot, { windowsAclVerifier: allowTestAcl });
     await store.write(journal);
     const movedRoot = `${stateRoot}.moved`;
     await rename(stateRoot, movedRoot);
@@ -151,7 +153,7 @@ test("a replaced state root cannot reuse the old journal evidence", async () => 
 
 test("removes only the owned canonical journal and treats absence as idempotent", async () => {
   await withStateRoot(async (stateRoot) => {
-    const store = createInstallationJournalStore(stateRoot);
+    const store = createInstallationJournalStore(stateRoot, { windowsAclVerifier: allowTestAcl });
     const journal = await fixtureForRoot(stateRoot);
     await store.write(journal);
     await store.remove();

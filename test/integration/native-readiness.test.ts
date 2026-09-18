@@ -16,6 +16,7 @@ import {verifyNativeReadiness} from '../../src/update/native-readiness.ts';
 import {nativeReleaseFixture} from '../helpers/native-release-fixture.ts';
 
 const platform = process.platform === 'win32' ? 'windows-x64' : 'darwin-arm64';
+const allowTestAcl = Object.freeze({ verify: async (_path: string): Promise<void> => undefined });
 const hash = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
 type SpawnProbe = (path: string, args: readonly string[], options: SpawnOptions) => ChildProcess;
 async function cleanup(root: string) {
@@ -48,7 +49,7 @@ async function setup(t: TestContext, realSea = false, target: SupportedReleasePl
     f.options.verified = f.verify();
   }
   const snapshot = await createAuthenticatedReleaseSnapshot(f.options);
-  const options = {stateDirectory: root, platform: target, trustConfig: f.signed.trustConfig};
+  const options = {stateDirectory: root, platform: target, trustConfig: f.signed.trustConfig, windowsAclVerifier: allowTestAcl};
   const installed = await createNativeExecutableStore(options).materialize(snapshot);
   const manifest = JSON.parse(Buffer.from(f.signed.assets.files.get('bundle-manifest.json')!).toString());
   const bundleManifestHash = sha256Utf8(canonicalizeJson(manifest) + '\n');

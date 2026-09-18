@@ -13,6 +13,8 @@ import { recoverInstallationJournal, type InstallationRecoveryDriver } from "../
 import type { RecoveryFacts } from "../../src/update/installation-recovery.ts";
 import { journalFixture, type JournalFixture } from "../helpers/installation-journal-fixture.ts";
 
+const allowTestAcl = Object.freeze({ verify: async (_path: string): Promise<void> => undefined });
+
 const stableFacts: RecoveryFacts = Object.freeze({
   canonical: "previous", marker: "previous", active: "previous",
   previousComplete: true, nextComplete: true,
@@ -49,7 +51,7 @@ test("no journal is a stable no-op and never invokes the recovery driver", async
   await withStateRoot(async (stateRoot) => {
     const calls: string[] = [];
     await withUpdateLock(stateRoot, async (lease) => {
-      const store = createInstallationJournalStore(stateRoot, { lease });
+      const store = createInstallationJournalStore(stateRoot, { lease, windowsAclVerifier: allowTestAcl });
       await recoverInstallationJournal({ stateDirectory: stateRoot, store, lease,
         driver: driver({ async observe() { calls.push("observe"); return stableFacts; } }) });
     });
@@ -61,11 +63,12 @@ test("no journal is a stable no-op and never invokes the recovery driver", async
 test("a new process can reload the durable journal before recovery selection", async () => {
   await withStateRoot(async (stateRoot) => {
     const journal = await journalForRoot(stateRoot);
-    const store = createInstallationJournalStore(stateRoot);
+    const store = createInstallationJournalStore(stateRoot, { windowsAclVerifier: allowTestAcl });
     await store.write(journal);
     const script = [
       'import { createInstallationJournalStore } from "./src/update/installation-journal-store.ts";',
-      'const journal = await createInstallationJournalStore(process.env.STATE_ROOT).read();',
+      'const allowTestAcl = { verify: async (_path) => undefined };',
+      'const journal = await createInstallationJournalStore(process.env.STATE_ROOT, { windowsAclVerifier: allowTestAcl }).read();',
       'if (journal === null) process.exit(2);',
       'process.stdout.write(JSON.stringify({ revision: journal.revision, phase: journal.phase }));',
     ].join("\n");
@@ -92,7 +95,7 @@ test("blocked evidence is preserved and cannot invoke a recovery mutation", asyn
     const journal = await journalForRoot(stateRoot);
     let applied = false;
     await withUpdateLock(stateRoot, async (lease) => {
-      const store = createInstallationJournalStore(stateRoot, { lease });
+      const store = createInstallationJournalStore(stateRoot, { lease, windowsAclVerifier: allowTestAcl });
       await store.write(journal);
       await assert.rejects(
         () => recoverInstallationJournal({ stateDirectory: stateRoot, store, lease,
@@ -114,7 +117,7 @@ test("a recovery action must make durable progress before the journal can retire
     const journal = await journalForRoot(stateRoot);
     let applyCount = 0;
     await withUpdateLock(stateRoot, async (lease) => {
-      const store = createInstallationJournalStore(stateRoot, { lease });
+      const store = createInstallationJournalStore(stateRoot, { lease, windowsAclVerifier: allowTestAcl });
       await store.write(journal);
       await assert.rejects(
         () => recoverInstallationJournal({ stateDirectory: stateRoot, store, lease, maxSteps: 2,
@@ -135,7 +138,7 @@ test("a real recovery driver may retire the journal only after its action comple
   await withStateRoot(async (stateRoot) => {
     const journal = await journalForRoot(stateRoot);
     await withUpdateLock(stateRoot, async (lease) => {
-      const store = createInstallationJournalStore(stateRoot, { lease });
+      const store = createInstallationJournalStore(stateRoot, { lease, windowsAclVerifier: allowTestAcl });
       await store.write(journal);
       await recoverInstallationJournal({ stateDirectory: stateRoot, store, lease,
         driver: driver({ async apply() { await store.remove(); } }) });

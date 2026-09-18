@@ -8,6 +8,8 @@ import { runProductionMain } from "../../src/production-main.ts";
 import { exactReleaseFixture } from "../helpers/default-historical-fixture.ts";
 import { canonicalPayload, signedEnvelope } from "../helpers/signing.ts";
 
+const allowTestAcl = Object.freeze({ verify: async (_path: string): Promise<void> => undefined });
+
 async function fixture(t: test.TestContext) {
   const stateDirectory = await mkdtemp(resolve(await realpath(tmpdir()), "default-channel-"));
   t.after(() => rm(stateDirectory, { recursive: true, force: true }));
@@ -17,6 +19,7 @@ async function fixture(t: test.TestContext) {
   const defaults = {
     stateDirectory,
     trustConfig: signed.trustConfig,
+    windowsAclVerifier: allowTestAcl,
     channelUrl: "https://fixture.example.test/harness-mrtool/stable.envelope.json",
     transport: { async request(input: { url: string }) {
       requests.push(input.url);

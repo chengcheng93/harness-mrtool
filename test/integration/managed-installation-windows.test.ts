@@ -12,6 +12,7 @@ import {
 import { nativeReleaseFixture } from "../helpers/native-release-fixture.ts";
 
 const windows = { skip: process.platform !== "win32" };
+const allowTestAcl = Object.freeze({ verify: async (_path: string): Promise<void> => undefined });
 
 test("stages only the authenticated Windows native archive member", windows, async (t) => {
   const root = await mkdtemp(resolve(tmpdir(), "harness-mrtool-managed-win-"));
@@ -23,6 +24,7 @@ test("stages only the authenticated Windows native archive member", windows, asy
     snapshot,
     platform: "windows-x64",
     trustConfig: fixture.signed.trustConfig,
+    windowsAclVerifier: allowTestAcl,
   });
   assert.deepEqual(await readFile(stage.stagedExecutablePath), Buffer.from(fixture.native));
   const observed = await verifyManagedWindowsStage(stage);

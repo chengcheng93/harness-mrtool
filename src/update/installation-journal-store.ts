@@ -3,7 +3,7 @@ import { lstat, open, realpath, rm } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 
 import { ToolError } from "../contracts/errors.ts";
-import { ensurePrivateStateDirectory } from "../platform/state-path.ts";
+import { ensurePrivateStateDirectory, type WindowsAclVerifier } from "../platform/state-path.ts";
 import { assertUpdateLockLease } from "../platform/lock.ts";
 import type { ProcessLockLease } from "../platform/process-lock.ts";
 import {
@@ -71,8 +71,14 @@ function assertPrivateFile(info: JournalStat, expectedSize?: bigint): void {
       (info.uid !== BigInt(process.getuid!()) || (info.mode & 0o777n) !== 0o600n)) throw failure();
 }
 
-async function rootStat(stateRoot: string, create: boolean): Promise<JournalStat | null> {
-  if (create) await ensurePrivateStateDirectory(stateRoot);
+async function rootStat(
+  stateRoot: string,
+  create: boolean,
+  windowsAclVerifier?: WindowsAclVerifier,
+): Promise<JournalStat | null> {
+  if (create) {
+    await ensurePrivateStateDirectory(stateRoot, windowsAclVerifier === undefined ? {} : { windowsAclVerifier });
+  }
   try {
     const info = await lstat(stateRoot, { bigint: true }) as JournalStat;
     const physical = await realpath(stateRoot);
@@ -168,6 +174,8 @@ function sameRootEvidence(journal: InstallationJournal, root: JournalStat): void
 
 export interface InstallationJournalStoreOptions {
   readonly lease?: ProcessLockLease;
+  /** In-process test/embedding seam; production defaults retain the system verifier. */
+  readonly windowsAclVerifier?: WindowsAclVerifier;
 }
 
 export interface InstallationJournalStore {
@@ -189,6 +197,7 @@ export function createInstallationJournalStore(
 ): InstallationJournalStore {
   const stateRoot = validAbsoluteRoot(stateDirectory);
   const boundLease = options.lease;
+  const windowsAclVerifier = options.windowsAclVerifier;
   let knownRoot: { readonly dev: bigint; readonly ino: bigint } | undefined;
 
   function assertStableRoot(root: JournalStat): void {
@@ -206,7 +215,7 @@ export function createInstallationJournalStore(
 
   async function read(): Promise<InstallationJournal | null> {
     assertBoundLease();
-    const root = await rootStat(stateRoot, false);
+    const root = await rootStat(stateRoot, false, windowsAclVerifier);
     if (root === null) {
       if (knownRoot !== undefined) throw failure();
       return null;
@@ -222,7 +231,7 @@ export function createInstallationJournalStore(
   async function write(value: unknown): Promise<InstallationJournal> {
     assertBoundLease();
     const journal = parseInstallationJournal(encodeInstallationJournal(value));
-    const root = await rootStat(stateRoot, true);
+    const root = await rootStat(stateRoot, true, windowsAclVerifier);
     if (root === null) throw failure();
     assertStableRoot(root);
     sameRootEvidence(journal, root);
@@ -237,7 +246,7 @@ export function createInstallationJournalStore(
     }
 
     const bytes = encodeInstallationJournal(journal);
-    const rootBeforeWrite = await rootStat(stateRoot, false);
+    const rootBeforeWrite = await rootStat(stateRoot, false, windowsAclVerifier);
     if (rootBeforeWrite === null || !sameIdentity(root, rootBeforeWrite)) throw failure();
     const currentBytes = await readBounded(path);
     if (existingBytes === null ? currentBytes !== null :
@@ -252,7 +261,7 @@ export function createInstallationJournalStore(
 
   async function remove(): Promise<void> {
     assertBoundLease();
-    const root = await rootStat(stateRoot, false);
+    const root = await rootStat(stateRoot, false, windowsAclVerifier);
     if (root === null) {
       if (knownRoot !== undefined) throw failure();
       return;
