@@ -274,32 +274,34 @@ using System;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading;
-using Microsoft.Win32.SafeHandles;
 public static class ProcessLockNative {
  [StructLayout(LayoutKind.Sequential)] struct Info {
   public uint Attributes, CreationLow, CreationHigh, AccessLow, AccessHigh, WriteLow, WriteHigh;
   public uint Volume, SizeHigh, SizeLow, Links, IndexHigh, IndexLow;
  }
  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
- static extern SafeFileHandle CreateFileW(string path,uint access,uint share,IntPtr security,uint disposition,uint flags,IntPtr template);
+ static extern IntPtr CreateFileW(string path,uint access,uint share,IntPtr security,uint disposition,uint flags,IntPtr template);
  [DllImport("kernel32.dll", SetLastError=true)]
- static extern bool GetFileInformationByHandle(SafeFileHandle handle,out Info info);
- static SafeFileHandle held;
+ static extern bool GetFileInformationByHandle(IntPtr handle,out Info info);
+ [DllImport("kernel32.dll", SetLastError=true)]
+ static extern bool CloseHandle(IntPtr handle);
+ static readonly IntPtr InvalidHandle=new IntPtr(-1);
+ static IntPtr held=IntPtr.Zero;
  public static int Acquire(string path,ulong expectedIno,long timeoutMs) {
   var watch=Stopwatch.StartNew();
   while (watch.ElapsedMilliseconds < timeoutMs) {
    var candidate=CreateFileW(path,0xC0000000,0,IntPtr.Zero,4,0x00200000,IntPtr.Zero);
-   if (candidate.IsInvalid) { candidate.Dispose(); Thread.Sleep(5); continue; }
+   if (candidate==IntPtr.Zero || candidate==InvalidHandle) { Thread.Sleep(5); continue; }
    try {
-    Info info; if(!GetFileInformationByHandle(candidate,out info)) { candidate.Dispose(); return 1; }
+    Info info; if(!GetFileInformationByHandle(candidate,out info)) { CloseHandle(candidate); return 1; }
     ulong index=((ulong)info.IndexHigh<<32)|info.IndexLow;
-    if((info.Attributes&(0x10|0x400))!=0 || info.Links!=1 || index!=expectedIno) { candidate.Dispose(); return 25; }
+    if((info.Attributes&(0x10|0x400))!=0 || info.Links!=1 || index!=expectedIno) { CloseHandle(candidate); return 25; }
     held=candidate; return 0;
-   } catch { candidate.Dispose(); return 1; }
+   } catch { CloseHandle(candidate); return 1; }
   }
   return 24;
  }
- public static void Release() { held?.Dispose(); held=null; }
+ public static void Release() { if(held!=IntPtr.Zero && held!=InvalidHandle) CloseHandle(held); held=IntPtr.Zero; }
 }
 '@ | Out-Null
 $stage='acquire'
