@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import type { BigIntStats } from "node:fs";
+import { constants, type BigIntStats } from "node:fs";
 import { lstat, mkdir, open, rename, rm } from "node:fs/promises";
 import { dirname } from "node:path";
 
@@ -139,18 +139,25 @@ async function syncDirectory(path: string): Promise<void> {
   }
 }
 
-export async function writeActivationJournal(path: string, journal: ActivationJournal): Promise<void> {
-  const bytes = new TextEncoder().encode(canonicalActivationJournal(journal));
+export async function writeBoundedCanonicalFile(
+  path: string,
+  bytes: Uint8Array,
+  maxBytes: number,
+  onFailure: () => ToolError<"UPDATE_SECURITY_ERROR"> = securityFailure,
+): Promise<void> {
+  const owned = Uint8Array.from(bytes);
+  if (owned.byteLength < 1 || owned.byteLength > maxBytes) throw onFailure();
   const parent = dirname(path);
   await mkdir(parent, { recursive: true, mode: 0o700 });
   const temporary = `${path}.tmp.${randomBytes(12).toString("hex")}`;
   let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
-    handle = await open(temporary, "wx", 0o600);
+    handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL |
+      (constants.O_NOFOLLOW ?? 0), 0o600);
     let offset = 0;
-    while (offset < bytes.byteLength) {
-      const result = await handle.write(bytes, offset, bytes.byteLength - offset, offset);
-      if (result.bytesWritten <= 0) throw securityFailure();
+    while (offset < owned.byteLength) {
+      const result = await handle.write(owned, offset, owned.byteLength - offset, offset);
+      if (result.bytesWritten <= 0) throw onFailure();
       offset += result.bytesWritten;
     }
     await handle.sync();
@@ -161,8 +168,13 @@ export async function writeActivationJournal(path: string, journal: ActivationJo
   } catch (error) {
     await handle?.close().catch(() => undefined);
     await rm(temporary, { force: true }).catch(() => undefined);
-    throw error instanceof ToolError ? error : securityFailure();
+    throw error instanceof ToolError ? error : onFailure();
   }
+}
+
+export async function writeActivationJournal(path: string, journal: ActivationJournal): Promise<void> {
+  const bytes = new TextEncoder().encode(canonicalActivationJournal(journal));
+  await writeBoundedCanonicalFile(path, bytes, MAX_ACTIVATION_JOURNAL_BYTES);
 }
 
 export async function readActivationJournal(path: string): Promise<ActivationJournal | null> {
