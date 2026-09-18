@@ -126,6 +126,24 @@ export class GitFixture {
     await rename(resolve(this.worktreePath, oldPath), destination);
   }
 
+  /** Stage Git's exact mode/blob evidence without requiring host symlink privileges. */
+  async stageIndexEntry(
+    path: string,
+    content: string | Uint8Array,
+    mode: "100644" | "120000" = "100644",
+  ): Promise<string> {
+    const directory = await mkdtemp(join(this.root, "index-entry-"));
+    try {
+      const input = resolve(directory, "blob");
+      await writeFile(input, content);
+      const oid = (await this.git(["hash-object", "-w", "--no-filters", "--", input])).trim();
+      await this.git(["update-index", "--add", "--cacheinfo", `${mode},${oid},${path}`]);
+      return oid;
+    } finally {
+      await rm(directory, {recursive: true, force: true});
+    }
+  }
+
   async commitAll(message: string): Promise<string> {
     await this.git(["add", "--all"]);
     await this.git(["commit", "-m", message]);

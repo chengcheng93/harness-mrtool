@@ -56,13 +56,14 @@ test("binary content and symlinks cannot masquerade as readable documentation", 
   } finally { await fixture.dispose(); }
 });
 
-test("symlinks named as Markdown remain ambiguous and are never followed", async () => {
-  const { symlink } = await import("node:fs/promises");
-  const { resolve } = await import("node:path");
+test("committed symlinks named as Markdown remain ambiguous without host symlink privileges", async () => {
   const fixture = await GitFixture.create();
   try {
-    await symlink("src/modified.ts", resolve(fixture.worktreePath, "link.md"));
-    await fixture.commitAll("docs");
+    // The classifier reads committed Git mode/blob evidence, not the checkout.
+    // Stage mode 120000 directly so Windows needs no symlink privilege.
+    await fixture.stageIndexEntry("link.md", "src/modified.ts", "120000");
+    await fixture.git(["commit", "-m", "docs"]);
+    assert.match(await fixture.git(["ls-tree", "HEAD", "--", "link.md"]), /^120000 blob /u);
     const repository = await discoverRepository({ cwd: fixture.worktreePath, targetBranch: "main" });
     const diff = await changes.readCanonicalLabelDiff(repository);
     assert.equal(typeLabelFromDiff(diff.items), null);
@@ -87,11 +88,19 @@ test("untrusted git attributes cannot make binary blobs classify as docs", async
 test("reads renamed before/after blobs without matching other glob-like filenames", async () => {
   const fixture = await GitFixture.create();
   try {
-    await fixture.rename("src/rename-old.ts", "src/[new]*.ts");
+    // Bracket syntax is glob-like but legal on Windows, unlike '*'. An
+    // unchanged matching decoy ensures literal lookup cannot read another blob.
+    await fixture.commitFile("src/n.ts", "export const decoy = true;\n", "decoy baseline");
+    await fixture.git(["update-ref", "refs/remotes/origin/main", await fixture.head()]);
+    await fixture.rename("src/rename-old.ts", "src/[new].ts");
     await fixture.commitAll("refactor");
     const repository = await discoverRepository({ cwd: fixture.worktreePath, targetBranch: "main" });
     const diff = await changes.readCanonicalLabelDiff(repository);
     assert.equal(typeLabelFromDiff(diff.items), "type::refactor");
+    assert.equal(diff.items.length, 1);
+    assert.equal(diff.items[0]?.status, "renamed");
+    assert.equal(diff.items[0]?.newPath, "src/[new].ts");
+    assert.equal(diff.items[0]?.before, "export const renamed = true;\n");
     assert.equal(diff.items[0]?.before, diff.items[0]?.after);
   } finally { await fixture.dispose(); }
 });
