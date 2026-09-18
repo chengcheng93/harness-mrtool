@@ -644,7 +644,7 @@ export class UpdateStateStore {
 
 
 
-  async save(value: UpdateStateValue): Promise<StoredUpdateState> {
+  async save(value: UpdateStateValue, lease?: ProcessLockLease): Promise<StoredUpdateState> {
     const record = this.normalize(value);
     const serialized = `${canonicalizeJson(record as unknown as JsonValue)}\n`;
     const bytes = Buffer.from(serialized, "utf8");
@@ -735,6 +735,6 @@ export class UpdateStateStore {
         if (error instanceof ToolError) throw error;
         throw persistenceFailure();
       }
-    });
+    }, lease);
   }
 }
