@@ -220,5 +220,5 @@ export async function writeAnchoredFile(options: AnchoredFileWriteOptions): Prom
         await runHelper('/usr/bin/perl', ['-T', '-e', POSIX_HELPER, String(dev), String(ino), name, String(bytes.length)], { PATH: '/usr/bin:/bin' }, bytes, handle.fd);
       } finally { await handle.close(); }
     } else throw failure();
-  } catch { throw failure(); }
+  } catch (error) { throw error instanceof ToolError ? error : failure(); }
 }

@@ -249,33 +249,74 @@ function waitForHelper(
     child.once("error", () => fail("unavailable"));
     child.once("exit", (code) => {
       helperExited = true;
-      if (!settled) fail(code === 24 ? "timeout" : "unavailable");
+      if (!settled) fail(code === 24 ? "timeout" : code === 25 ? "unsafe" : "unavailable");
     });
   });
 }
 
 
-async function acquireWindows(path: string, timeoutMs: number): Promise<ProcessLockLease> {
-  const script = [
-    "$ErrorActionPreference = 'Stop'",
-    "$lockPath = $env:HMRTOOL_PROCESS_LOCK_PATH",
-    `$timeoutMs = ${String(timeoutMs)}`,
-    "$watch = [System.Diagnostics.Stopwatch]::StartNew()",
-    "$stream = $null",
-    "while ($null -eq $stream) { try { $stream = [System.IO.File]::Open($lockPath, 'OpenOrCreate', 'ReadWrite', 'None') } " +
-      "catch { if ($watch.ElapsedMilliseconds -ge $timeoutMs) { exit 24 }; Start-Sleep -Milliseconds 5 } }",
-    "[Console]::Out.WriteLine('LOCKED')",
-    "[Console]::Out.Flush()",
-    "[Console]::In.ReadLine() | Out-Null",
-    "$stream.Dispose()",
-  ].join("; ");
+const WINDOWS_LOCK_HELPER = String.raw`
+$ErrorActionPreference='Stop'
+try {
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public sealed class UnsafeProcessLock : Exception { public UnsafeProcessLock() : base("unsafe lock identity") {} }
+public static class ProcessLockNative {
+ [StructLayout(LayoutKind.Sequential)] struct Info {
+  public uint Attributes, CreationLow, CreationHigh, AccessLow, AccessHigh, WriteLow, WriteHigh;
+  public uint Volume, SizeHigh, SizeLow, Links, IndexHigh, IndexLow;
+ }
+ [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+ static extern SafeFileHandle CreateFileW(string path,uint access,uint share,IntPtr security,uint disposition,uint flags,IntPtr template);
+ [DllImport("kernel32.dll", SetLastError=true)]
+ static extern bool GetFileInformationByHandle(SafeFileHandle handle,out Info info);
+ static Info Inspect(SafeFileHandle handle) {
+  Info info; if(handle.IsInvalid || !GetFileInformationByHandle(handle,out info)) throw new Exception(); return info;
+ }
+ static SafeFileHandle held;
+ public static void Acquire(string path,ulong expectedIno) {
+  held=CreateFileW(path,0xC0000000,0,IntPtr.Zero,4,0x00200000,IntPtr.Zero);
+  try {
+   Info info=Inspect(held);
+   ulong index=((ulong)info.IndexHigh<<32)|info.IndexLow;
+   if((info.Attributes&(0x10|0x400))!=0 || info.Links!=1 || index!=expectedIno) throw new UnsafeProcessLock();
+  } catch {
+   held?.Dispose(); held=null; throw;
+  }
+ }
+ public static void Release() { held?.Dispose(); held=null; }
+}
+'@ | Out-Null
+$timeoutMs=[int64]$env:HMRTOOL_PROCESS_LOCK_TIMEOUT
+$watch=[System.Diagnostics.Stopwatch]::StartNew()
+while ($true) {
+ try { [ProcessLockNative]::Acquire($env:HMRTOOL_PROCESS_LOCK_PATH,[ulong]$env:HMRTOOL_PROCESS_LOCK_INO); break }
+ catch [UnsafeProcessLock] { exit 25 }
+ catch { if ($watch.ElapsedMilliseconds -ge $timeoutMs) { exit 24 }; Start-Sleep -Milliseconds 5 }
+}
+[Console]::Out.WriteLine('LOCKED')
+[Console]::Out.Flush()
+[Console]::In.ReadLine() | Out-Null
+[ProcessLockNative]::Release()
+exit 0
+} catch [UnsafeProcessLock] { exit 25 } catch { exit 1 }
+`;
+
+async function acquireWindows(path: string, timeoutMs: number, expected: LockFileIdentity): Promise<ProcessLockLease> {
   const child = spawn(
     resolveWindowsPowerShellPath(),
-    ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+    ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(WINDOWS_LOCK_HELPER, "utf16le").toString("base64")],
     {
       windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, HMRTOOL_PROCESS_LOCK_PATH: path },
+      env: {
+        ...process.env,
+        HMRTOOL_PROCESS_LOCK_PATH: path,
+        HMRTOOL_PROCESS_LOCK_INO: expected.ino.toString(),
+        HMRTOOL_PROCESS_LOCK_TIMEOUT: String(timeoutMs),
+      },
     },
   );
   return waitForHelper(child, timeoutMs);
@@ -412,7 +453,7 @@ export const systemProcessLockProvider: ProcessLockProvider = {
     const expectedDirectory = process.platform === "darwin" ? await lockDirectoryIdentity(path) : undefined;
     const expected = await prepareLockFile(path);
     const lease = process.platform === "win32"
-      ? await acquireWindows(path, timeoutMs)
+      ? await acquireWindows(path, timeoutMs, expected)
       : process.platform === "linux"
         ? await acquireLinux(path, timeoutMs)
         : process.platform === "darwin"
@@ -421,7 +462,7 @@ export const systemProcessLockProvider: ProcessLockProvider = {
     if (lease === null) throw new ProcessLockError("unavailable");
     try {
       if (expectedDirectory !== undefined) await assertLockDirectoryIdentity(expectedDirectory);
-      await assertLockIdentity(path, expected);
+      if (process.platform !== "win32") await assertLockIdentity(path, expected);
     } catch (error) {
       await lease.release().catch(() => undefined);
       throw error;
