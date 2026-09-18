@@ -70,8 +70,12 @@ function failureDetails(data) {
     if (diagnostic === undefined && typeof reason === 'string' && /^(?:timeout|unsafe|unavailable)$/u.test(reason)) {
       diagnostic = `process-lock:${reason}`;
     }
+    const helperDiagnostic = ownValue(error, 'diagnostic');
     if (diagnostic === undefined && typeof actual === 'string' && /^windows-helper:[a-z-]{1,32}$/u.test(actual)) {
       diagnostic = actual;
+    }
+    if (diagnostic === undefined && typeof helperDiagnostic === 'string' && /^windows-lock-helper:[a-z-]{1,32}$/u.test(helperDiagnostic)) {
+      diagnostic = helperDiagnostic;
     }
     error = ownValue(error, 'cause');
   }

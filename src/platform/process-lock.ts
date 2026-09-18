@@ -19,7 +19,10 @@ export interface ProcessLockProvider {
 
 
 export class ProcessLockError extends Error {
-  constructor(readonly reason: "timeout" | "unsafe" | "unavailable") {
+  constructor(
+    readonly reason: "timeout" | "unsafe" | "unavailable",
+    readonly diagnostic?: `windows-lock-helper:${string}`,
+  ) {
     super(`Process lock ${reason}`);
   }
 }
@@ -175,13 +178,17 @@ function waitForHelper(
       }
     };
 
-    const fail = (reason: ProcessLockError["reason"], terminate = true): void => {
+    const fail = (
+      reason: ProcessLockError["reason"],
+      terminate = true,
+      diagnostic?: ProcessLockError["diagnostic"],
+    ): void => {
       if (settled) return;
       settled = true;
       if (timeout !== undefined) clearTimeout(timeout);
       if (terminate) terminateHelper();
       void waitForClose(HELPER_REAP_TIMEOUT_MS).then((closed) => {
-        rejectPromise(new ProcessLockError(closed ? reason : "unavailable"));
+        rejectPromise(new ProcessLockError(closed ? reason : "unavailable", diagnostic));
       });
     };
 
@@ -209,7 +216,10 @@ function waitForHelper(
       }
       if (!output.includes("\n")) return;
       if (output.trim() !== "LOCKED") {
-        fail("unavailable");
+        const diagnostic = /^ERR:[a-z-]{1,32}$/u.test(output.trim())
+          ? `windows-lock-helper:${output.trim().slice(4)}` as const
+          : undefined;
+        fail("unavailable", true, diagnostic);
         return;
       }
       settled = true;
@@ -257,6 +267,7 @@ function waitForHelper(
 
 const WINDOWS_LOCK_HELPER = String.raw`
 $ErrorActionPreference='Stop'
+$stage='compile'
 try {
 Add-Type -TypeDefinition @'
 using System;
@@ -291,14 +302,18 @@ public static class ProcessLockNative {
  public static void Release() { held?.Dispose(); held=null; }
 }
 '@ | Out-Null
+$stage='acquire'
 $code=[ProcessLockNative]::Acquire($env:HMRTOOL_PROCESS_LOCK_PATH,[ulong]$env:HMRTOOL_PROCESS_LOCK_INO,[int64]$env:HMRTOOL_PROCESS_LOCK_TIMEOUT)
+if($code -eq 1) { [Console]::Out.WriteLine('ERR:acquire'); exit 26 }
 if($code -ne 0) { exit $code }
+$stage='ready'
 [Console]::Out.WriteLine('LOCKED')
 [Console]::Out.Flush()
 [Console]::In.ReadLine() | Out-Null
+$stage='release'
 [ProcessLockNative]::Release()
 exit 0
-} catch { exit 1 }
+} catch { try { [Console]::Out.WriteLine('ERR:'+ $stage) } catch {}; exit 26 }
 `
 
 async function acquireWindows(path: string, timeoutMs: number, expected: LockFileIdentity): Promise<ProcessLockLease> {
