@@ -184,8 +184,9 @@ test(${JSON.stringify(knownName)}, () => assert.equal("SECRET_ACTUAL", "SECRET_E
     delete env.NODE_TEST_CONTEXT;
     const run = runProcess(process.execPath, ["--test", "--test-reporter=spec", fixture], { env });
     assert.equal(run.status, 1);
-    assert.match(run.stdout, /SECRET_ACTUAL/);
-    const result = report(run.stdout + run.stderr, String(run.status));
+    const spec = run.stdout + run.stderr;
+    assert.match(spec, /SECRET_ACTUAL/);
+    const result = report(spec, String(run.status));
     assert.equal(result.status, 0);
     assert.equal(result.stderr, "");
     assert.equal(result.stdout, [
