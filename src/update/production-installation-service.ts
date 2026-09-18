@@ -296,6 +296,10 @@ export function createProductionInstallationService(options: ProductionInstallat
         return Object.freeze({status: "unchanged" as const, active: previous.record, observed});
       }
       if (candidate.snapshot.record.manifestSequence <= previous.record.manifestSequence) throw failure("candidate-sequence-is-not-newer", "UPDATE_REQUIRED");
+      // The current Windows adapter is still a physical rotation primitive. It
+      // does not yet provide the required claimed-launch/persistence-pending
+      // settlement protocol, so never expose it as an installed result.
+      if (platform === "windows-x64") throw failure("windows-persistence-settlement-unavailable");
       const finalChannel = await channel.check(false, lease);
       if (!finalChannel.latestVersionConfirmed || finalChannel.verified.payloadSha256 !== candidateAuth.verified.payloadSha256) throw failure("candidate-channel-payload-changed", "CONCURRENT_UPDATE");
       const stagedCache = await cache.stageVerifiedReleaseSet(candidate.snapshot, lease);
