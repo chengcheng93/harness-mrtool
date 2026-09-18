@@ -362,8 +362,15 @@ export function createProductionInstallationService(options: ProductionInstallat
       if (typeof force !== "boolean") throw new TypeError("Update force flag is invalid");
       return applyCandidate(await preparer.prepare(force), "apply");
     },
-    async rollback(): Promise<InstallationResult> {
-      return applyCandidate(await preparer.prepare(true), "rollback");
+    async rollback(expectedCliVersion?: string): Promise<InstallationResult> {
+      if (expectedCliVersion !== undefined && (typeof expectedCliVersion !== "string" || expectedCliVersion.trim() === "")) {
+        throw new TypeError("Rollback version assertion is invalid");
+      }
+      const candidate = await preparer.prepare(true);
+      if (expectedCliVersion !== undefined && candidate.snapshot.record.cliVersion !== expectedCliVersion) {
+        throw failure("signed rollback target does not match the requested version", "UPDATE_REQUIRED");
+      }
+      return applyCandidate(candidate, "rollback");
     },
     async recover(): Promise<void> {
       await withUpdateLock(stateDirectory, async lease => {

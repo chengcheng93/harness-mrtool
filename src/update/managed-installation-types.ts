@@ -31,7 +31,7 @@ export interface ProductionInstallationOptions extends ProductionReleasePreparat
 
 export interface ProductionInstallationService {
   apply(force: boolean): Promise<InstallationResult>;
-  rollback(): Promise<InstallationResult>;
+  rollback(expectedCliVersion?: string): Promise<InstallationResult>;
   /** Resolves only after stable coherence; unresolved pending/repair must reject. */
   recover(): Promise<void>;
 }

@@ -46,10 +46,11 @@ import {
   runPublicInvocationPreflight,
   type PublicInvocationPreflight,
 } from "./update/preflight.ts";
-import { createUpdaterCommandServices } from "./cli/commands/updater.ts";
+import { createUpdaterCommandServices, createInstallationCommandServices } from "./cli/commands/updater.ts";
 import { createProductionChannelCheckHandler, type ProductionChannelCommandDefaults } from "./cli/commands/production-channel.ts";
 import { createSkillCommandServices, type SkillCommandService } from "./cli/commands/skill.ts";
 import type { UpdateService } from "./update/service.ts";
+import type { ProductionInstallationService } from "./update/managed-installation-types.ts";
 import { authenticateReleaseSnapshot } from "./update/release-set-verifier.ts";
 import { currentReleasePlatform } from "./update/production-release-preparation.ts";
 
@@ -75,6 +76,7 @@ export interface ProductionMainDependencies {
   readonly targetProjectResolver?: TargetProjectResolver;
   readonly updatePreflight?: PublicInvocationPreflight;
   readonly updateService?: UpdateService;
+  readonly installationService?: ProductionInstallationService;
   readonly updateChannelDefaults?: ProductionChannelCommandDefaults;
   readonly skillService?: SkillCommandService;
 }
@@ -172,6 +174,9 @@ async function publicCommandHandlers(
       ...(dependencies.updateService === undefined
         ? lazyDefaultUpdaterCommandServices(dependencies.updateChannelDefaults)
         : injectedUpdaterCommandServices(dependencies.updateService)),
+      ...(dependencies.installationService === undefined
+        ? {}
+        : createInstallationCommandServices(dependencies.installationService)),
       ...(dependencies.skillService === undefined
         ? {}
         : createSkillCommandServices(dependencies.skillService)),
