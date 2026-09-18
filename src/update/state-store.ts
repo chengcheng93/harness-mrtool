@@ -232,6 +232,10 @@ function sameJson(left: unknown, right: unknown): boolean {
 
 
 async function syncDirectory(path: string): Promise<void> {
+  // Windows has no portable fsync-able directory handle through Node.
+  // File contents are flushed before rename; do not turn a valid state commit
+  // into a platform-specific failure while reopening the directory.
+  if (process.platform === "win32") return;
   let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
     handle = await open(path, "r");
