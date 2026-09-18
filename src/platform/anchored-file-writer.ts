@@ -99,7 +99,10 @@ public static class AnchoredNativeWriter {
     if((target.Attributes&0x10)==0 || (target.Attributes&0x400)!=0) throw new IOException();
    }
    ulong index=((ulong)target.IndexHigh<<32)|target.IndexLow;
-   if(index!=ino || (ulong)target.Volume!=dev) throw new IOException();
+   // libuv may expose a zero device number on Windows even though the
+   // kernel handle has a real volume serial. The ancestor handles and file
+   // index still provide the pinned-root check in that case.
+   if(index!=ino || (dev!=0 && (ulong)target.Volume!=dev)) throw new IOException();
    using(var h=CreateFileW(Path.Combine(directory,name),0x40000000,0,IntPtr.Zero,1,0x00200000,IntPtr.Zero)) {
     Info created=Inspect(h);
     if((created.Attributes&(0x10|0x400))!=0 || created.Links!=1) throw new IOException();
