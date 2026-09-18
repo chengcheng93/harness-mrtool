@@ -189,6 +189,15 @@ export function createInstallationJournalStore(
 ): InstallationJournalStore {
   const stateRoot = validAbsoluteRoot(stateDirectory);
   const boundLease = options.lease;
+  let knownRoot: { readonly dev: bigint; readonly ino: bigint } | undefined;
+
+  function assertStableRoot(root: JournalStat): void {
+    if (knownRoot === undefined) {
+      knownRoot = Object.freeze({ dev: root.dev, ino: root.ino });
+      return;
+    }
+    if (knownRoot.dev !== root.dev || knownRoot.ino !== root.ino) throw failure();
+  }
 
   function assertBoundLease(): void {
     if (boundLease !== undefined) assertUpdateLockLease(boundLease, stateRoot);
@@ -198,7 +207,11 @@ export function createInstallationJournalStore(
   async function read(): Promise<InstallationJournal | null> {
     assertBoundLease();
     const root = await rootStat(stateRoot, false);
-    if (root === null) return null;
+    if (root === null) {
+      if (knownRoot !== undefined) throw failure();
+      return null;
+    }
+    assertStableRoot(root);
     const file = await readBounded(path);
     if (file === null) return null;
     const journal = parseInstallationJournal(file.bytes);
@@ -211,6 +224,7 @@ export function createInstallationJournalStore(
     const journal = parseInstallationJournal(encodeInstallationJournal(value));
     const root = await rootStat(stateRoot, true);
     if (root === null) throw failure();
+    assertStableRoot(root);
     sameRootEvidence(journal, root);
 
     const existingBytes = await readBounded(path);
@@ -239,7 +253,11 @@ export function createInstallationJournalStore(
   async function remove(): Promise<void> {
     assertBoundLease();
     const root = await rootStat(stateRoot, false);
-    if (root === null) return;
+    if (root === null) {
+      if (knownRoot !== undefined) throw failure();
+      return;
+    }
+    assertStableRoot(root);
     const currentBytes = await readBounded(path);
     if (currentBytes === null) return;
     const loaded = parseInstallationJournal(currentBytes.bytes);

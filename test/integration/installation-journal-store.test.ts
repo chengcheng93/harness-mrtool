@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, lstat, readFile, readdir, rm, symlink, link, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, lstat, readFile, readdir, rename, rm, symlink, link, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -110,6 +110,42 @@ test("a bound store rejects a forged lease before touching the journal root", as
       assert.equal(error.reason, "unsafe");
       return true;
     });
+  });
+});
+
+
+test("a fresh store instance reloads the durable journal and preserves invalid evidence", async () => {
+  await withStateRoot(async (stateRoot) => {
+    const journal = await fixtureForRoot(stateRoot);
+    const first = createInstallationJournalStore(stateRoot);
+    await first.write(journal);
+
+    const second = createInstallationJournalStore(stateRoot);
+    assert.deepEqual(await second.read(), journal);
+    await writeFile(second.path, "{}\n", { mode: 0o600 });
+    await assert.rejects(() => second.read(), (error: unknown) => {
+      assert.ok(error instanceof ToolError);
+      assert.equal(error.code, "UPDATE_SECURITY_ERROR");
+      return true;
+    });
+    assert.equal(await readFile(second.path, "utf8"), "{}\n");
+  });
+});
+
+test("a replaced state root cannot reuse the old journal evidence", async () => {
+  await withStateRoot(async (stateRoot) => {
+    const journal = await fixtureForRoot(stateRoot);
+    const store = createInstallationJournalStore(stateRoot);
+    await store.write(journal);
+    const movedRoot = `${stateRoot}.moved`;
+    await rename(stateRoot, movedRoot);
+    await mkdir(stateRoot, { mode: 0o700 });
+    try {
+      await assert.rejects(() => store.read(), assertSecurity);
+    } finally {
+      await rm(stateRoot, { recursive: true, force: true });
+      await rename(movedRoot, stateRoot);
+    }
   });
 });
 
