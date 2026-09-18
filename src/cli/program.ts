@@ -401,7 +401,8 @@ export function parseCliInvocation(arguments_: readonly string[]): CliInvocation
 
   const options = selected.kind === "version" && usedCommon.has("--offline") && usedCommon.has("--no-update")
     ? Object.freeze({
-        ...parseCliOptions(commonArguments.filter(argument => argument !== "--no-update")),
+        ...parseCliOptions(commonArguments.filter((argument, index) =>
+          argument !== "--no-update" || commonArguments.indexOf(argument) !== index)),
         noUpdate: true,
       })
     : parseCliOptions(commonArguments);

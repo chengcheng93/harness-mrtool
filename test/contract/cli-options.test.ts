@@ -127,6 +127,10 @@ test("parses explicit authentication modes", () => {
   assertInputError(() => parseCliOptions(["--auth", "token"]));
 });
 
+test("version readiness probe still rejects duplicate no-update flags", () => {
+  assertInputError(() => parseCliInvocation(["version", "--offline", "--no-update", "--no-update", "--output", "json"]));
+});
+
 test("version readiness probe may combine offline and no-update as redundant read-only disables", () => {
   const invocation = parseCliInvocation(["version", "--offline", "--no-update", "--output", "json"]);
   assert.equal(invocation.command.kind, "version");
