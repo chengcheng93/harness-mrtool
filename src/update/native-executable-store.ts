@@ -32,8 +32,11 @@ function sealedFile(stat:BigIntStats,size:number){return stat.isFile()&&!stat.is
 function owned(stat:BigIntStats){return process.platform==='win32'||stat.uid===BigInt(process.getuid!());}
 async function directory(path:string,mode:number):Promise<BigIntStats>{
  const before=await lstat(path,{bigint:true});const physical=await realpath(path);const after=await lstat(path,{bigint:true});
- if(!before.isDirectory()||before.isSymbolicLink()||!after.isDirectory()||after.isSymbolicLink()||!same(before,after)||
-  !owned(after)||!pathEqual(physical,path)||(process.platform!=='win32'&&(Number(after.mode)&0o7777)!==mode))fail();
+ if(!before.isDirectory()||before.isSymbolicLink()||!after.isDirectory()||after.isSymbolicLink())fail('native-store:directory-stat');
+ if(!same(before,after))fail('native-store:directory-identity');
+ if(!owned(after))fail('native-store:directory-owner');
+ if(!pathEqual(physical,path))fail('native-store:directory-realpath');
+ if(process.platform!=='win32'&&(Number(after.mode)&0o7777)!==mode)fail('native-store:directory-mode');
  return after;
 }
 async function flushDirectory(path:string){

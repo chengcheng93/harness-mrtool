@@ -79,10 +79,11 @@ async function directoryIdentity(path: string, expected?: FileIdentity): Promise
     const before = await lstat(path, { bigint: true }) as BigIntStats;
     const physical = await realpath(path);
     const after = await lstat(path, { bigint: true }) as BigIntStats;
-    if (!before.isDirectory() || before.isSymbolicLink() || !after.isDirectory() || after.isSymbolicLink() ||
-        !samePath(physical, path) || before.dev !== after.dev || before.ino !== after.ino) throw failure("managed-installation:directory");
+    if (!before.isDirectory() || before.isSymbolicLink() || !after.isDirectory() || after.isSymbolicLink()) throw failure("managed-installation:directory-stat");
+    if (!samePath(physical, path)) throw failure("managed-installation:directory-realpath");
+    if (before.dev !== after.dev || before.ino !== after.ino) throw failure("managed-installation:directory-race");
     const result = copyIdentity(before);
-    if (expected !== undefined && (result.dev !== expected.dev || result.ino !== expected.ino)) throw failure("managed-installation:directory");
+    if (expected !== undefined && (result.dev !== expected.dev || result.ino !== expected.ino)) throw failure("managed-installation:directory-expected");
     return result;
   } catch (error) {
     throw error instanceof ToolError ? error : failure("managed-installation:directory");

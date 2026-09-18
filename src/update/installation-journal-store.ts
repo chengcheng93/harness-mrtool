@@ -88,10 +88,11 @@ async function rootStat(
   try {
     const info = await lstat(stateRoot, { bigint: true }) as JournalStat;
     const physical = await realpath(stateRoot);
-    if (info.isSymbolicLink() || !info.isDirectory() || !samePath(physical, stateRoot) ||
-        (process.platform !== "win32" &&
-          (info.uid !== BigInt(process.getuid!()) || (info.mode & 0o777n) !== 0o700n))) {
-      throw failure();
+    if (info.isSymbolicLink() || !info.isDirectory()) throw failure("installation-journal:root-stat");
+    if (!samePath(physical, stateRoot)) throw failure("installation-journal:root-realpath");
+    if (process.platform !== "win32" &&
+        (info.uid !== BigInt(process.getuid!()) || (info.mode & 0o777n) !== 0o700n)) {
+      throw failure("installation-journal:root-mode");
     }
     return info;
   } catch (error) {
