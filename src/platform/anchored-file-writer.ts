@@ -92,17 +92,20 @@ public static class AnchoredNativeWriter {
     if(part=="." || part==".." || part.IndexOf(':')>=0 || part.EndsWith(".") || part.EndsWith(" ")) throw new IOException();
     current=Path.Combine(current,part); paths.Add(current);
    }
-   Info target=new Info();
+   Info target=new Info(); ulong volume=0; bool haveVolume=false;
    foreach(string path in paths) {
     var h=CreateFileW(path,0x80,3,IntPtr.Zero,3,0x02200000,IntPtr.Zero);
     pins.Add(h); target=Inspect(h);
     if((target.Attributes&0x10)==0 || (target.Attributes&0x400)!=0) throw new IOException();
+    if(!haveVolume) { volume=target.Volume; haveVolume=true; }
+    else if(target.Volume!=volume) throw new IOException();
    }
    ulong index=((ulong)target.IndexHigh<<32)|target.IndexLow;
-   // libuv may expose a zero device number on Windows even though the
-   // kernel handle has a real volume serial. The ancestor handles and file
-   // index still provide the pinned-root check in that case.
-   if(index!=ino || (dev!=0 && (ulong)target.Volume!=dev)) throw new IOException();
+   // libuv's Windows st_dev is not the kernel volume serial on every
+   // supported runner (and may be zero). Pin the volume from the held
+   // ancestor handles instead, then compare the final directory's file
+   // index to the identity captured by Node.
+   if(index!=ino || !haveVolume) throw new IOException();
    using(var h=CreateFileW(Path.Combine(directory,name),0x40000000,0,IntPtr.Zero,1,0x80200000,IntPtr.Zero)) {
     Info created=Inspect(h);
     if((created.Attributes&(0x10|0x400))!=0 || created.Links!=1) throw new IOException();
