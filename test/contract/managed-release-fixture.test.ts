@@ -469,3 +469,38 @@ test("fix1: seeded origin commitments remain platform-specific", async () => {
   await authenticateReleaseSnapshot(snapshot, { platform: "darwin-arm64", trustConfig: origin.trustConfig });
   assert.equal(advance(mac, origin.trustState).highestSequence, 43);
 });
+
+for (const platform of ["darwin-arm64", "windows-x64"] as const) {
+  test(`${platform}: three successive distinct candidates and later exact rollback share one accepted lineage`, async () => {
+    const origin = await exactReleaseFixture();
+    const family = releaseFamily(origin);
+    let trust = origin.trustState;
+    const candidates = [];
+    const snapshots = [];
+    for (let index = 0; index < 3; index += 1) {
+      const candidate = await family(platform, {
+        sequence: 43 + index, variantByte: index + 1, cliVersion: `0.1.${6 + index}`,
+        releaseSetId: `three-candidate-${index}`,
+      });
+      trust = advance(candidate, trust);
+      assert.equal(trust.highestSequence, 43 + index);
+      candidates.push(candidate);
+      snapshots.push(await createAuthenticatedReleaseSnapshot(candidate.options));
+    }
+    assert.equal(new Set(candidates.map(candidate => hash(candidate.native))).size, 3);
+    assert.equal(new Set(snapshots.map(snapshot => snapshot.record.cliSha256)).size, 3);
+    assert.equal(new Set(candidates.map(candidate => candidate.options.verified.manifest.components.cli.tag)).size, 3);
+    const rollback = await family(platform, {
+      sequence: 46, variantByte: 1, cliVersion: "0.1.6", releaseSetId: "rollback-first-of-three",
+    });
+    trust = advance(rollback, trust);
+    assert.equal(trust.highestSequence, 46);
+    const rollbackSnapshot = await createAuthenticatedReleaseSnapshot(rollback.options);
+    assert.deepEqual(rollback.native, candidates[0]!.native);
+    assert.deepEqual(rollback.options.cliArchive, candidates[0]!.options.cliArchive);
+    assert.deepEqual(rollback.options.templateReceipt, candidates[0]!.options.templateReceipt);
+    assert.equal(rollbackSnapshot.record.cliSha256, snapshots[0]!.record.cliSha256);
+    assert.notEqual(rollbackSnapshot.record.transactionId, snapshots[0]!.record.transactionId);
+    assert.equal(rollback.options.verified.manifest.components.cli.tag, candidates[0]!.options.verified.manifest.components.cli.tag);
+  });
+}
