@@ -5,9 +5,20 @@ const ROOT = resolve(import.meta.dirname, '..');
 const MAX_FILES = 512;
 const MAX_LINE = 1_000_000;
 const MAX_COUNT = 1_000_000;
+const MAX_ERROR_DEPTH = 4;
+const FAILURE_TYPES = new Set([
+  'testCodeFailure', 'testTimeoutFailure', 'cancelledByParent',
+  'parentAlreadyFinished', 'testAborted', 'subtestsFailed', 'hookFailed',
+  'uncaughtException', 'unhandledRejection',
+]);
+const ERROR_CODES = new Set([
+  'ERR_TEST_FAILURE', 'ERR_ASSERTION', 'ERR_MODULE_NOT_FOUND',
+  'ERR_UNSUPPORTED_ESM_URL_SCHEME', 'ABORT_ERR', 'ETIMEDOUT',
+  'ENOENT', 'EACCES', 'EPERM', 'EBUSY',
+]);
 
 // Only source-controlled-shaped test paths discovered in this checkout may be
-// emitted. Never include test titles, diagnostics, errors, stdout or stderr.
+// emitted. Never include test titles, messages, stacks, stdout or stderr.
 function testPaths(root) {
   const result = new Map();
   let scanned = 0;
@@ -36,6 +47,28 @@ function counts(data) {
   return fields.map(key => `${key}=${c[key]}`).join(' ');
 }
 
+// Error metadata is untrusted: do not invoke getters or coerce values.
+function ownValue(value, key) {
+  if (value === null || typeof value !== 'object') return undefined;
+  try { return Object.getOwnPropertyDescriptor(value, key)?.value; }
+  catch { return undefined; }
+}
+function failureDetails(data) {
+  let error = ownValue(ownValue(data, 'details'), 'error');
+  let failureType;
+  let code;
+  for (let depth = 0; depth < MAX_ERROR_DEPTH && error !== undefined; depth++) {
+    const type = ownValue(error, 'failureType');
+    if (failureType === undefined && FAILURE_TYPES.has(type)) failureType = type;
+    const candidate = ownValue(error, 'code');
+    // Prefer the first specific cause code over Node's generic failure wrapper.
+    if (ERROR_CODES.has(candidate) && (code === undefined || code === 'ERR_TEST_FAILURE')) code = candidate;
+    error = ownValue(error, 'cause');
+  }
+  return (failureType === undefined ? '' : ` failureType=${failureType}`)
+    + (code === undefined ? '' : ` code=${code}`);
+}
+
 /** Streaming CI diagnostics only. Node's test runner retains exit-code authority. */
 export function createProgressReporter(root = ROOT) {
   const paths = testPaths(resolve(root));
@@ -53,7 +86,7 @@ export function createProgressReporter(root = ROOT) {
       } else if (event?.type === 'test:fail' && path !== undefined && !failed.has(path)) {
         failed.add(path);
         const line = Number.isSafeInteger(data.line) && data.line > 0 && data.line <= MAX_LINE ? ` line=${data.line}` : '';
-        yield `::error::Native suite FAIL ${path}${line}\n`;
+        yield `::error::Native suite FAIL ${path}${line}${failureDetails(data)}\n`;
       } else if (event?.type === 'test:summary') {
         const summary = counts(data);
         if (summary === null) continue;
