@@ -13,7 +13,7 @@ import { UpdateStateStore, type UpdateStateStoreFaultInjector } from "../../src/
 import { updateTrustConfigSha256 } from "../../src/update/trust-config.ts";
 import { nativeReleaseFixture } from "../helpers/native-release-fixture.ts";
 
-const platform = "darwin-arm64" as const;
+const platform = process.platform === "win32" ? "windows-x64" : "darwin-arm64" as const;
 const windowsAclVerifier = { verify: async (): Promise<void> => undefined };
 const staleName = `update-state.json.tmp.${"a".repeat(24)}`;
 

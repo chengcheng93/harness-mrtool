@@ -50,7 +50,7 @@ async function setup(t: TestContext, realSea = false, target: SupportedReleasePl
   }
   const snapshot = await createAuthenticatedReleaseSnapshot(f.options);
   const options = {stateDirectory: root, platform: target, trustConfig: f.signed.trustConfig, windowsAclVerifier: allowTestAcl};
-  const installed = await createNativeExecutableStore(options).materialize(snapshot);
+  const installed = target === platform ? await createNativeExecutableStore(options).materialize(snapshot) : undefined as never;
   const manifest = JSON.parse(Buffer.from(f.signed.assets.files.get('bundle-manifest.json')!).toString());
   const bundleManifestHash = sha256Utf8(canonicalizeJson(manifest) + '\n');
   const version = snapshot.record.cliVersion;
