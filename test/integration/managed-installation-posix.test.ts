@@ -4,9 +4,11 @@ import { chmod, lstat, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { AnchoredMoveFileIdentity } from "../../src/platform/anchored-file-mover.ts";
+import { createAuthenticatedReleaseSnapshot } from "../../src/update/release-set-verifier.ts";
+import { nativeReleaseFixture } from "../helpers/native-release-fixture.ts";
 import test from "node:test";
 
-import { publishManagedPosixCandidate, restoreManagedPosixPrevious, stageManagedPosixCandidate, removeManagedPosixStage, verifyManagedPosixStage } from "../../src/update/managed-installation-posix.ts";
+import { publishManagedPosixCandidate, restoreManagedPosixPrevious, stageAuthenticatedManagedPosixCandidate, stageManagedPosixCandidate, removeManagedPosixStage, verifyManagedPosixStage } from "../../src/update/managed-installation-posix.ts";
 
 const darwin = { skip: process.platform !== "darwin" };
 
@@ -160,5 +162,29 @@ test("restores the authorized previous pair while retaining the current pair", d
     assert.deepEqual(rollback.retainedCurrent, current);
     assert.deepEqual(await readFile(join(root, "harness-mrtool")), Buffer.from([0x7f, 0x53, 0x45, 0x41, 9]));
     assert.deepEqual(await readFile(join(root, "harness-mrtool.previous-" + "1".repeat(32))), Buffer.from([0x7f, 0x53, 0x45, 0x41, 10]));
+  });
+});
+
+
+test("stages only the authenticated native archive member and canonical marker", darwin, async () => {
+  await installationRoot(async (root) => {
+    const fixture = await nativeReleaseFixture("darwin-arm64", { variantByte: 11 });
+    const snapshot = await createAuthenticatedReleaseSnapshot(fixture.options);
+    const candidate = await stageAuthenticatedManagedPosixCandidate({
+      installationDirectory: root,
+      snapshot,
+      platform: "darwin-arm64",
+      trustConfig: fixture.signed.trustConfig,
+    });
+    assert.deepEqual(await readFile(candidate.executablePath), Buffer.from(fixture.native));
+    const marker = JSON.parse(await readFile(candidate.markerPath, "utf8")) as Record<string, unknown>;
+    assert.deepEqual(marker, {
+      schemaVersion: 1,
+      repository: `${fixture.signed.trustConfig.repository.owner}/${fixture.signed.trustConfig.repository.name}`,
+      tag: "cli-v0.1.6",
+      archiveSha256: snapshot.record.cliSha256,
+      executableSha256: sha(fixture.native),
+    });
+    await removeManagedPosixStage(candidate);
   });
 });

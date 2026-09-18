@@ -4,9 +4,12 @@ import { lstat, mkdir, open, realpath, rm, rmdir } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 
 import { ToolError } from "../contracts/errors.ts";
+import { canonicalizeJson } from "../contracts/jcs.ts";
 import { moveAnchoredFile, type AnchoredMoveFileIdentity } from "../platform/anchored-file-mover.ts";
 import { writeAnchoredFile } from "../platform/anchored-file-writer.ts";
 import { openNativeMutationExecutor } from "../platform/native-mutation-executor.ts";
+import { validateReleaseSetSnapshot, type ReleaseSetSnapshot } from "./cache.ts";
+import { authenticateReleaseSnapshot, type ReleaseSnapshotOptions } from "./release-set-verifier.ts";
 
 const EXECUTABLE_NAME = "harness-mrtool" as const;
 const MARKER_NAME = ".harness-mrtool-install.json" as const;
@@ -213,6 +216,11 @@ export interface ManagedPosixStageInput {
   readonly markerSha256: string;
 }
 
+export interface AuthenticatedManagedPosixStageInput extends ReleaseSnapshotOptions {
+  readonly installationDirectory: string;
+  readonly snapshot: ReleaseSetSnapshot;
+}
+
 export interface ManagedPosixStage {
   readonly installationDirectory: string;
   readonly stageDirectory: string;
@@ -270,6 +278,42 @@ export interface ManagedPosixStageObservation {
  * deliberately does not replace the canonical executable, marker or active
  * pointer; publication belongs to the outer installation transaction.
  */
+export async function stageAuthenticatedManagedPosixCandidate(
+  input: AuthenticatedManagedPosixStageInput,
+): Promise<ManagedPosixStage> {
+  if (process.platform !== "darwin") throw failure();
+  try {
+    const owned = validateReleaseSetSnapshot({
+      record: input.snapshot.record,
+      cliBytes: input.snapshot.cliBytes,
+      templateBytes: input.snapshot.templateBytes,
+      receiptBytes: input.snapshot.receiptBytes,
+    });
+    const authenticated = await authenticateReleaseSnapshot(owned, input);
+    const executableBytes = authenticated.executableBytes;
+    const executableSha256 = createHash("sha256").update(executableBytes).digest("hex");
+    const manifest = authenticated.verified.manifest;
+    const marker = new TextEncoder().encode(`${canonicalizeJson({
+      schemaVersion: 1,
+      repository: `${manifest.repository.owner}/${manifest.repository.name}`,
+      tag: manifest.components.cli.tag,
+      archiveSha256: owned.record.cliSha256,
+      executableSha256,
+    })}
+`);
+    const markerSha256 = createHash("sha256").update(marker).digest("hex");
+    return stageManagedPosixCandidate({
+      installationDirectory: input.installationDirectory,
+      executableBytes,
+      markerBytes: marker,
+      executableSha256,
+      markerSha256,
+    });
+  } catch (error) {
+    throw error instanceof ToolError ? error : failure();
+  }
+}
+
 export async function stageManagedPosixCandidate(input: ManagedPosixStageInput): Promise<ManagedPosixStage> {
   if (process.platform !== "darwin") throw failure();
   const root = absoluteRoot(input.installationDirectory);
