@@ -525,7 +525,7 @@ interface RecoveryFacts {
 }
 type RecoveryDecision =
   | 'verify-stable-previous' | 'verify-stable-next'
-  | 'abort-preparation' | 'restore-previous' | 'finish-next'
+  | 'abort-preparation' | 'restore-previous' | 'finish-previous' | 'finish-next'
   | 'wait-settlement' | 'revoke-unadmitted-launch'
   | 'transfer-retention' | 'finish-cleanup' | 'block';
 declare function decideInstallationRecovery(
@@ -534,6 +534,8 @@ declare function decideInstallationRecovery(
 ```
 
 Enrollment/policy/control/retention failures dominate tuple classification: a complete-looking P/N does not bypass them. `fenced-current-epoch` requires the native executor proof, not a boolean derived from absent PIDs; settled launch states require native settlement evidence.
+
+`finish-previous` and `finish-next` include verification and terminal retention transfer, not journal retirement. `finish-cleanup` requires a consistent terminal outcome and transferred ownership for either outcome. Precommit promotion requires an intact predecessor/backup pair even if policy no longer permits reactivating it; postcommit A=N still rolls forward without a downgrade.
 
 A decision is not a capability and cannot itself execute any operation. Production executor re-observes after each effect, under the same epoch, before advancing. This also avoids treating same executable bytes as proof of the same release tuple: P/N can share CLI bytes while differing in signed authorization or Template. A, signed snapshots, and journal bindings—not C alone—disambiguate selection.
 
