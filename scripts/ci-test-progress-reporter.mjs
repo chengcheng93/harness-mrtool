@@ -13,6 +13,7 @@ const FAILURE_TYPES = new Set([
 ]);
 const ERROR_CODES = new Set([
   'ERR_TEST_FAILURE', 'ERR_ASSERTION', 'ERR_MODULE_NOT_FOUND',
+  'UPDATE_SECURITY_ERROR', 'UPDATE_REQUIRED', 'CONCURRENT_UPDATE', 'INTERNAL_ERROR', 'REPOSITORY_ERROR', 'INPUT_ERROR',
   'ERR_UNSUPPORTED_ESM_URL_SCHEME', 'ABORT_ERR', 'ETIMEDOUT',
   'ENOENT', 'EACCES', 'EPERM', 'EBUSY',
 ]);
@@ -65,6 +66,10 @@ function failureDetails(data) {
     // Prefer the first specific cause code over Node's generic failure wrapper.
     if (ERROR_CODES.has(candidate) && (code === undefined || code === 'ERR_TEST_FAILURE')) code = candidate;
     const actual = ownValue(ownValue(error, 'details'), 'actual');
+    const reason = ownValue(error, 'reason');
+    if (diagnostic === undefined && typeof reason === 'string' && /^(?:timeout|unsafe|unavailable)$/u.test(reason)) {
+      diagnostic = `process-lock:${reason}`;
+    }
     if (diagnostic === undefined && typeof actual === 'string' && /^windows-helper:[a-z-]{1,32}$/u.test(actual)) {
       diagnostic = actual;
     }

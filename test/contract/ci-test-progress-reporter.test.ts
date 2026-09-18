@@ -111,6 +111,8 @@ test('native CI reporter finds nested codes without reflecting unknown error met
  });
  assert.equal(await failure(nested),failPrefix+' failureType=testCodeFailure code=EPERM\n');
  assert.equal(await failure({details:{actual:'windows-helper:exclusive-create'}}),failPrefix+' diagnostic=windows-helper:exclusive-create\n');
+ assert.equal(await failure({reason:'unavailable'}),failPrefix+' diagnostic=process-lock:unavailable\n');
+ assert.equal(await failure({reason:'SECRET-REASON'}),failPrefix+'\n');
  assert.equal(await failure({details:{actual:'SECRET-PATH'}}),failPrefix+'\n');
  assert.equal(await failure({code:'ERR_ASSERTION',cause:{code:'EPERM'}}),failPrefix+' code=ERR_ASSERTION\n');
  assert.equal(await failure({code:'ERR_TEST_FAILURE',cause:{code:'ERR_SECRET_UNKNOWN',cause:{code:'ENOENT'}}}),failPrefix+' code=ENOENT\n');
