@@ -29,7 +29,9 @@ function readWindow(fd, position, length) {
 
 function openRegularFile(path) {
   // Do not follow a symlink or block on a FIFO supplied in place of a log.
-  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  const noFollow = constants.O_NOFOLLOW ?? 0;
+  const nonBlock = process.platform === "win32" ? 0 : (constants.O_NONBLOCK ?? 0);
+  const fd = openSync(path, constants.O_RDONLY | noFollow | nonBlock);
   try {
     const stat = fstatSync(fd);
     if (!stat.isFile()) throw new Error("Not a regular file");

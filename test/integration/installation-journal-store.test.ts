@@ -52,7 +52,7 @@ test("persists and reloads a canonical journal under the fixed state root", asyn
     assert.equal(info.isFile(), true);
     assert.equal(info.isSymbolicLink(), false);
     assert.equal(info.nlink, 1);
-    assert.equal(info.mode & 0o777, 0o600);
+    if (process.platform !== "win32") assert.equal(info.mode & 0o777, 0o600);
     assert.deepEqual(await readdir(stateRoot), ["installation-journal.json"]);
   });
 });
