@@ -12,6 +12,12 @@ import {
 } from "../../src/update/managed-installation-enrollment.ts";
 
 function fixture(phase: ManagedInstallationEnrollment["phase"] = "enrolled"): ManagedInstallationEnrollment {
+  const installationLocator = process.platform === "win32"
+    ? "C:\\Users\\example\\AppData\\Local\\harness-mrtool"
+    : "/Users/example/.local/share/harness-mrtool";
+  const stateLocator = process.platform === "win32"
+    ? "C:\\Users\\example\\AppData\\Local\\harness-mrtool\\state"
+    : "/Users/example/.local/state/harness-mrtool";
   return {
     enrollmentVersion: 1,
     phase,
@@ -25,8 +31,8 @@ function fixture(phase: ManagedInstallationEnrollment["phase"] = "enrolled"): Ma
       state: { dev: "4", ino: "400" },
     },
     locators: {
-      installation: "/Users/example/.local/share/harness-mrtool",
-      state: "/Users/example/.local/state/harness-mrtool",
+      installation: installationLocator,
+      state: stateLocator,
     },
     bootstrapPolicy: { generation: 7, digest: "b".repeat(64) },
   };
