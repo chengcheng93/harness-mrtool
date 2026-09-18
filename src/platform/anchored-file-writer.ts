@@ -9,7 +9,7 @@ import { resolveWindowsPowerShellPath } from './state-path.ts';
 export interface AnchoredFileWriteOptions {
   readonly directory: string;
   readonly expectedIdentity: { readonly dev: bigint; readonly ino: bigint };
-  readonly name: 'harness-mrtool' | 'harness-mrtool.exe';
+  readonly name: 'harness-mrtool' | 'harness-mrtool.exe' | '.harness-mrtool-install.json';
   readonly bytes: Uint8Array;
 }
 
@@ -31,7 +31,7 @@ $Config{d_fchdir} eq 'define' or die 'unsupported';
 my ($dev,$ino,$name,$length)=@ARGV;
 $dev =~ /\A([0-9]+)\z/ or die 'identity'; $dev=$1;
 $ino =~ /\A([0-9]+)\z/ or die 'identity'; $ino=$1;
-$name =~ /\A(harness-mrtool(?:\.exe)?)\z/ or die 'name'; $name=$1;
+$name =~ /\A(harness-mrtool(?:\.exe)?|\.harness-mrtool-install\.json)\z/ or die 'name'; $name=$1;
 $length =~ /\A([0-9]+)\z/ or die 'length'; $length=0+$1;
 $length > 0 && $length <= 268435456 or die 'length';
 open(my $dir,'<&=3') or die 'descriptor';
@@ -82,7 +82,7 @@ public static class AnchoredNativeWriter {
   Info i; if(h.IsInvalid || !GetFileInformationByHandle(h,out i)) throw new IOException(); return i;
  }
  public static void Write(string directory,ulong dev,ulong ino,string name,long length) {
-  if(length<1 || length>268435456 || (name!="harness-mrtool" && name!="harness-mrtool.exe")) throw new IOException();
+  if(length<1 || length>268435456 || (name!="harness-mrtool" && name!="harness-mrtool.exe" && name!=".harness-mrtool-install.json")) throw new IOException();
   string root=Path.GetPathRoot(directory);
   if(root==null || root.Length!=3 || root[1]!=':' || root[2]!='\\' || !String.Equals(Path.GetFullPath(directory),directory,StringComparison.OrdinalIgnoreCase)) throw new IOException();
   var pins=new List<SafeFileHandle>();
@@ -175,7 +175,7 @@ export async function writeAnchoredFile(options: AnchoredFileWriteOptions): Prom
     const directory = options.directory, name = options.name;
     const { dev, ino } = options.expectedIdentity;
     if (typeof directory !== 'string' || !isAbsolute(directory) || resolve(directory) !== directory || directory.includes('\0') ||
-        (name !== 'harness-mrtool' && name !== 'harness-mrtool.exe') ||
+        (name !== 'harness-mrtool' && name !== 'harness-mrtool.exe' && name !== '.harness-mrtool-install.json') ||
         typeof dev !== 'bigint' || typeof ino !== 'bigint' || dev < 0n || ino < 1n || dev > MAX_IDENTITY || ino > MAX_IDENTITY ||
         !(options.bytes instanceof Uint8Array) || options.bytes.length < 1 || options.bytes.length > MAX_BYTES) throw failure();
     const bytes = Uint8Array.from(options.bytes);
