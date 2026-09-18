@@ -71,7 +71,10 @@ for(const damage of ['wrong-bytes','hardlink','extra-file','writable-file','spec
 }
 test('a linked native root is rejected without changing external directory permissions',async(t)=>{
  if(process.platform==='win32')return t.skip('POSIX symlink fixture');
- const {root,snapshot,store}=await setup(t);const external=resolve(root,'external');await mkdir(external,{mode:0o755});await symlink(external,resolve(root,'native'));
+ const {root,snapshot,store}=await setup(t);const external=resolve(root,'external');await mkdir(external,{mode:0o755});
+ // Set the owned fixture's starting permissions explicitly: CI's private
+ // umask077 otherwise turns mkdir(mode0755) into0700 before the test begins.
+ await chmod(external,0o755);await symlink(external,resolve(root,'native'));
  await assert.rejects(store.materialize(snapshot),{code:'UPDATE_SECURITY_ERROR'});
  assert.equal((await lstat(external)).mode&0o777,0o755);assert.deepEqual(await readdir(external),[]);
 });

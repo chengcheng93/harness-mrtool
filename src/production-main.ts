@@ -50,6 +50,8 @@ import { createUpdaterCommandServices } from "./cli/commands/updater.ts";
 import { createProductionChannelCheckHandler, type ProductionChannelCommandDefaults } from "./cli/commands/production-channel.ts";
 import { createSkillCommandServices, type SkillCommandService } from "./cli/commands/skill.ts";
 import type { UpdateService } from "./update/service.ts";
+import { authenticateReleaseSnapshot } from "./update/release-set-verifier.ts";
+import { currentReleasePlatform } from "./update/production-release-preparation.ts";
 
 declare const __HARNESS_MRTOOL_VERSION__: string;
 declare const __HARNESS_MRTOOL_BOOTSTRAP_BUNDLE__: unknown;
@@ -107,7 +109,19 @@ function lazyDefaultUpdaterCommandServices(
   return Object.freeze({
     selfUpdateCheck: createProductionChannelCheckHandler(cliVersion, channelDefaults),
     selfUpdateStatus: async (invocation) => {
-      resolved ??= createDefaultUpdaterCommandServices();
+      resolved ??= createDefaultUpdaterCommandServices({
+        executedCliVersion: cliVersion,
+        ...(channelDefaults.stateDirectory === undefined ? {} : { stateDirectory: channelDefaults.stateDirectory }),
+        ...(channelDefaults.windowsAclVerifier === undefined ? {} : { windowsAclVerifier: channelDefaults.windowsAclVerifier }),
+        verifySnapshot: {
+          async verify(snapshot) {
+            await authenticateReleaseSnapshot(snapshot, {
+              platform: channelDefaults.platform ?? currentReleasePlatform(),
+              ...(channelDefaults.trustConfig === undefined ? {} : { trustConfig: channelDefaults.trustConfig }),
+            });
+          },
+        },
+      });
       const handler = resolved.selfUpdateStatus;
       if (handler === undefined) throw new TypeError("Default updater status handler is unavailable");
       return handler(invocation);

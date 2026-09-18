@@ -4,7 +4,7 @@ import {
   ensurePrivateStateDirectory,
   type WindowsAclVerifier,
 } from "../platform/state-path.ts";
-import { withUpdateLock } from "../platform/lock.ts";
+import { assertUpdateLockLease, withUpdateLock } from "../platform/lock.ts";
 import type { ProcessLockLease } from "../platform/process-lock.ts";
 import { ToolError } from "../contracts/errors.ts";
 import {
@@ -49,6 +49,7 @@ export interface ReleaseSetActivationCache {
 }
 
 export interface ActivateReleaseSetOptions {
+  readonly lease?: ProcessLockLease;
   readonly stateDirectory: string;
   readonly next: ReleaseSetSnapshot;
   /** Cryptographic/application boundary; self-consistent bytes are not enough. */
@@ -59,6 +60,7 @@ export interface ActivateReleaseSetOptions {
 }
 
 export interface RecoverReleaseSetOptions {
+  readonly lease?: ProcessLockLease;
   /** Required whenever recovery may observe an active release set. */
   readonly verifySnapshot: ReleaseSetSnapshotVerifier;
   readonly cache?: Pick<
@@ -198,10 +200,12 @@ export async function recoverReleaseSet(
   if (options.verifySnapshot === undefined || typeof options.verifySnapshot.verify !== "function") {
     throw securityFailure();
   }
+  const existingLease = options.lease;
+  if (existingLease !== undefined) assertUpdateLockLease(existingLease, resolve(stateDirectory));
   const root = await prepareStateDirectory(stateDirectory, options.windowsAclVerifier);
   const cache = makeRecoveryCache(root, options);
   const path = journalPath(root);
-  return withUpdateLock(root, async (lease) => {
+  const run = async (lease: ProcessLockLease): Promise<LoadedReleaseSet | null> => {
     lease.assertHeld();
     const active = await recoverUnderLock(path, cache, lease);
     lease.assertHeld();
@@ -211,18 +215,21 @@ export async function recoverReleaseSet(
     if (active !== null) await options.verifySnapshot.verify(active);
     lease.assertHeld();
     return active;
-  });
+  };
+  return existingLease === undefined ? withUpdateLock(root, run) : run(existingLease);
 }
 
 export async function activateReleaseSet(options: ActivateReleaseSetOptions): Promise<StoredReleaseSet> {
   if (options.verifySnapshot === undefined || typeof options.verifySnapshot.verify !== "function") {
     throw securityFailure();
   }
+  const existingLease = options.lease;
+  if (existingLease !== undefined) assertUpdateLockLease(existingLease, resolve(options.stateDirectory));
   const root = await prepareStateDirectory(options.stateDirectory, options.windowsAclVerifier);
   const normalizedOptions = { ...options, stateDirectory: root };
   const cache = makeCache(normalizedOptions);
   const path = journalPath(root);
-  return withUpdateLock(root, async (lease) => {
+  const run = async (lease: ProcessLockLease): Promise<StoredReleaseSet> => {
     lease.assertHeld();
     const current = await recoverUnderLock(path, cache, lease);
     lease.assertHeld();
@@ -256,5 +263,6 @@ export async function activateReleaseSet(options: ActivateReleaseSetOptions): Pr
     await removeActivationJournal(path);
     lease.assertHeld();
     return stored;
-  });
+  };
+  return existingLease === undefined ? withUpdateLock(root, run) : run(existingLease);
 }

@@ -7,7 +7,10 @@ import {
 import type { ProductionCommandHandler } from "./production.ts";
 
 /** In-process embedding/test seams only. No public flags or env can supply roots/URLs. */
-export type ProductionChannelCommandDefaults = ProductionChannelClientOptions;
+export type ProductionChannelCommandDefaults = ProductionChannelClientOptions & {
+  /** Trusted in-process platform seam; never taken from CLI arguments/environment. */
+  readonly platform?: import("../../update/release-set-verifier.ts").SupportedReleasePlatform;
+};
 
 /** Checking is not installing: no cache pointer, executable or Skill is activated here. */
 export function createProductionChannelCheckHandler(

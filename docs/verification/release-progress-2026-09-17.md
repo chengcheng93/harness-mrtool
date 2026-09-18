@@ -187,3 +187,31 @@ closure separately exercised2.39.5, Apple2.50.1 and2.55.0. Hosted native CI is t
 next gate; skipped Windows cases remain unproven on this Mac. Publishing, default
 apply/rollback, actual installation/activation and live GitLab acceptance are still
 incomplete and are not implied by this source checkpoint.
+
+### September18 status/transaction follow-up
+
+Hosted CI35304381915: portable and secret scan passed; Mac had one fixture failure,
+reproduced locally under the diagnostic step's umask077 (mkdir0755 started as0700).
+The test now explicitly chmods only its owned external fixture to0755 before
+checking that a linked root leaves those permissions unchanged. No production
+permission, symlink or signature check was relaxed. Windows result was still
+pending at the latest observation; it is not counted as passed.
+
+Default self-update.status now actually authenticates the selected configured
+cache using the production snapshot verifier. It reports the running CLI version
+separately from the cached version, and keeps physical installation unknown until
+native installation is proven. The checked-in test uses cached0.1.7 vs running0.1.6
+and rejects the wrong signing root, with no network request.
+
+UpdateStateStore.load, activation and recovery can now borrow one root-branded
+update lease. Invalid/other-root/expired capabilities are rejected before filesystem
+preparation. Activation/recovery capture the validated capability before yielding,
+so mutable caller options cannot trigger a nested acquisition. This is prerequisite
+transaction composition, not a completed installer/apply handler.
+
+Fresh exactNode24.16.0 typecheck, SEA rebuild and full serial suite underumask077:
+**1621 tests /1609 passed /0 failed /12 platform skips**, about186seconds. Current
+source/artifact receipt, strictcodesign and unchangedNode hash verified. Independent
+status review and transaction-lease closure approved. Production canonical install,
+apply/rollback/handoff/startup tuple selection and all live release/installation/
+GitLab acceptance gates remain outstanding.

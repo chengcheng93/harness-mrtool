@@ -25,7 +25,7 @@ import {
   type ProcessLockLease,
   type ProcessLockProvider,
 } from "../platform/process-lock.ts";
-import { withUpdateLock } from "../platform/lock.ts";
+import { assertUpdateLockLease, withUpdateLock } from "../platform/lock.ts";
 import {
   copyTrustState,
   createTrustState,
@@ -324,30 +324,30 @@ export class UpdateStateStore {
 
   private async locked<T>(
     operation: (lease: ProcessLockLease, rootIdentity: BigIntStats) => Promise<T>,
+    existingLease?: ProcessLockLease,
   ): Promise<T> {
+    if (existingLease !== undefined) assertUpdateLockLease(existingLease, this.stateDirectory);
     await this.prepareDirectory();
     const rootIdentity = await this.stateDirectoryIdentity();
     try {
-      return await withUpdateLock(
-        this.stateDirectory,
-        async (lease) => {
-          lease.assertHeld();
-          await this.faultInjector?.hit("after-lock-acquired");
-          lease.assertHeld();
-          await this.stateDirectoryIdentity(rootIdentity);
-          await this.cleanStaleTemporaryFiles(lease, rootIdentity);
-          lease.assertHeld();
-          await this.stateDirectoryIdentity(rootIdentity);
-          const result = await operation(lease, rootIdentity);
-          lease.assertHeld();
-          await this.stateDirectoryIdentity(rootIdentity);
-          return result;
-        },
-        {
-          ...(this.lockProvider === undefined ? {} : { provider: this.lockProvider }),
-          ...(this.lockTimeoutMs === undefined ? {} : { timeoutMs: this.lockTimeoutMs }),
-        },
-      );
+      const run = async (lease: ProcessLockLease): Promise<T> => {
+        lease.assertHeld();
+        await this.faultInjector?.hit("after-lock-acquired");
+        lease.assertHeld();
+        await this.stateDirectoryIdentity(rootIdentity);
+        await this.cleanStaleTemporaryFiles(lease, rootIdentity);
+        lease.assertHeld();
+        await this.stateDirectoryIdentity(rootIdentity);
+        const result = await operation(lease, rootIdentity);
+        lease.assertHeld();
+        await this.stateDirectoryIdentity(rootIdentity);
+        return result;
+      };
+      if (existingLease !== undefined) return await run(existingLease);
+      return await withUpdateLock(this.stateDirectory, run, {
+        ...(this.lockProvider === undefined ? {} : { provider: this.lockProvider }),
+        ...(this.lockTimeoutMs === undefined ? {} : { timeoutMs: this.lockTimeoutMs }),
+      });
     } catch (error) {
       if (error instanceof ToolError) throw error;
       if (error instanceof ProcessLockError && error.reason === "unsafe") throw securityFailure();
@@ -569,9 +569,9 @@ export class UpdateStateStore {
 
 
 
-  async load(): Promise<StoredUpdateState | null> {
-    return this.locked(async (lease, rootIdentity) =>
-      (await this.readState(lease, rootIdentity)).state);
+  async load(lease?: ProcessLockLease): Promise<StoredUpdateState | null> {
+    return this.locked(async (heldLease, rootIdentity) =>
+      (await this.readState(heldLease, rootIdentity)).state, lease);
   }
 
 

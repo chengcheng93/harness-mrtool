@@ -51,6 +51,7 @@ function rejectSshApiMode(invocation: CliInvocation, kind: string): void {
 }
 
 export interface DefaultUpdaterCommandOptions {
+  readonly executedCliVersion?: string;
   readonly stateDirectory?: string;
   readonly windowsAclVerifier?: WindowsAclVerifier;
   /**
@@ -64,6 +65,7 @@ export interface DefaultUpdaterCommandOptions {
 
 function updateStatusExecution(
   loaded: LoadedReleaseSet | null,
+  executedCliVersion: string,
 ): CliCommandExecution {
   const record = loaded?.record;
   return {
@@ -74,16 +76,16 @@ function updateStatusExecution(
         usingLastKnownGood: loaded !== null,
         latestVersionConfirmed: false,
         warning: loaded === null
-          ? "No verified active release set is installed."
+          ? "No verified active release set is cached."
           : loaded.writesBlocked
             ? "The active release set is integrity-checked but write-blocked by update policy."
-            : "Active release set loaded; no network check was requested.",
+            : "Verified release cache loaded; native installation has not been confirmed and no network check was requested.",
         securityAnomaly: loaded?.writesBlocked ?? false,
         activationRequired: false,
         hostRefreshMayBeRequired: false,
         persistencePending: false,
-        executedVersion: record?.cliVersion ?? "unknown",
-        installedVersion: record?.cliVersion ?? "unknown",
+        executedVersion: executedCliVersion,
+        installedVersion: "unknown",
       },
       ...(record === undefined ? {} : {
         versions: {
@@ -98,6 +100,7 @@ function updateStatusExecution(
     output: {
       data: {
         command: "self-update.status",
+        installationConfirmed: false,
         state: loaded === null ? "empty" : loaded.writesBlocked ? "write-blocked" : "ready",
         ...(record === undefined ? {} : {
           releaseSetId: record.releaseSetId,
@@ -129,7 +132,7 @@ export function createDefaultUpdaterCommandServices(
   return {
     selfUpdateStatus: async () => updateStatusExecution(await cache.loadLastKnownGoodOrNull(
       options.verifiedManifest === undefined ? {} : { verifiedManifest: options.verifiedManifest },
-    )),
+    ), options.executedCliVersion ?? "unknown"),
   };
 }
 
