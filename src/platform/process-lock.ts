@@ -290,14 +290,14 @@ public static class ProcessLockNative {
  public static int Acquire(string path,ulong expectedIno,long timeoutMs) {
   var watch=Stopwatch.StartNew();
   while (watch.ElapsedMilliseconds < timeoutMs) {
-   var candidate=CreateFileW(path,0xC0000000,0,IntPtr.Zero,4,0x00200000,IntPtr.Zero);
+   var candidate=CreateFileW(path,0xC0000000,0,IntPtr.Zero,4,0x02200000,IntPtr.Zero);
    if (candidate==IntPtr.Zero || candidate==InvalidHandle) { Thread.Sleep(5); continue; }
    try {
     Info info; if(!GetFileInformationByHandle(candidate,out info)) { CloseHandle(candidate); return 1; }
     ulong index=((ulong)info.IndexHigh<<32)|info.IndexLow;
     if((info.Attributes&(0x10|0x400))!=0 || info.Links!=1 || index!=expectedIno) { CloseHandle(candidate); return 25; }
     held=candidate; return 0;
-   } catch { CloseHandle(candidate); return 1; }
+   } catch { CloseHandle(candidate); return 2; }
   }
   return 24;
  }
@@ -306,7 +306,8 @@ public static class ProcessLockNative {
 '@ | Out-Null
 $stage='acquire'
 $code=[ProcessLockNative]::Acquire($env:HMRTOOL_PROCESS_LOCK_PATH,[ulong]$env:HMRTOOL_PROCESS_LOCK_INO,[int64]$env:HMRTOOL_PROCESS_LOCK_TIMEOUT)
-if($code -eq 1) { [Console]::Out.WriteLine('ERR:acquire'); exit 26 }
+if($code -eq 1) { [Console]::Out.WriteLine('ERR:info'); exit 26 }
+if($code -eq 2) { [Console]::Out.WriteLine('ERR:exception'); exit 26 }
 if($code -ne 0) { exit $code }
 $stage='ready'
 [Console]::Out.WriteLine('LOCKED')
