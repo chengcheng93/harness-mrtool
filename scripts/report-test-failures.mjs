@@ -29,7 +29,7 @@ function readWindow(fd, position, length) {
 
 function openRegularFile(path) {
   // Do not follow a symlink or block on a FIFO supplied in place of a log.
-  const noFollow = constants.O_NOFOLLOW ?? 0;
+  const noFollow = process.platform === "win32" ? 0 : (constants.O_NOFOLLOW ?? 0);
   const nonBlock = process.platform === "win32" ? 0 : (constants.O_NONBLOCK ?? 0);
   const fd = openSync(path, constants.O_RDONLY | noFollow | nonBlock);
   try {
