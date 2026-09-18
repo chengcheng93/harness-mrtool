@@ -44,6 +44,11 @@ function validAbsoluteRoot(value: unknown): string {
   return value;
 }
 
+function samePath(left: string, right: string): boolean {
+  if (process.platform === "win32") return resolve(left).toLowerCase() === resolve(right).toLowerCase();
+  return resolve(left) === resolve(right);
+}
+
 function sameIdentity(left: JournalStat, right: JournalStat): boolean {
   return left.dev === right.dev && left.ino === right.ino;
 }
@@ -82,7 +87,7 @@ async function rootStat(
   try {
     const info = await lstat(stateRoot, { bigint: true }) as JournalStat;
     const physical = await realpath(stateRoot);
-    if (info.isSymbolicLink() || !info.isDirectory() || resolve(physical) !== stateRoot ||
+    if (info.isSymbolicLink() || !info.isDirectory() || !samePath(physical, stateRoot) ||
         (process.platform !== "win32" &&
           (info.uid !== BigInt(process.getuid!()) || (info.mode & 0o777n) !== 0o700n))) {
       throw failure();
