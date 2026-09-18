@@ -110,6 +110,8 @@ test('native CI reporter finds nested codes without reflecting unknown error met
   code:'ERR_TEST_FAILURE',failureType:'testCodeFailure',stack:'SECRET-STACK',actual:'SECRET-A',expected:'SECRET-B',
  });
  assert.equal(await failure(nested),failPrefix+' failureType=testCodeFailure code=EPERM\n');
+ assert.equal(await failure({details:{actual:'windows-helper:exclusive-create'}}),failPrefix+' diagnostic=windows-helper:exclusive-create\n');
+ assert.equal(await failure({details:{actual:'SECRET-PATH'}}),failPrefix+'\n');
  assert.equal(await failure({code:'ERR_ASSERTION',cause:{code:'EPERM'}}),failPrefix+' code=ERR_ASSERTION\n');
  assert.equal(await failure({code:'ERR_TEST_FAILURE',cause:{code:'ERR_SECRET_UNKNOWN',cause:{code:'ENOENT'}}}),failPrefix+' code=ENOENT\n');
  assert.equal(await failure({failureType:'SECRET-TYPE',cause:{failureType:'testTimeoutFailure',code:'ETIMEDOUT'}}),failPrefix+' failureType=testTimeoutFailure code=ETIMEDOUT\n');

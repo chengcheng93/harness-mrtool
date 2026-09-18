@@ -16,10 +16,10 @@ export interface AnchoredFileWriteOptions {
 const MAX_BYTES = 256 * 1024 * 1024;
 const HELPER_TIMEOUT_MS = 60_000;
 const MAX_IDENTITY = (1n << 64n) - 1n;
-function failure(): ToolError<'UPDATE_SECURITY_ERROR'> {
+function failure(actual = 'anchored write failed'): ToolError<'UPDATE_SECURITY_ERROR'> {
   return new ToolError('UPDATE_SECURITY_ERROR', 'Anchored executable write rejected', {
     field: 'update.executable', expected: 'exclusive bounded creation in the pinned directory',
-    actual: 'anchored write failed', safeNextStep: 'Keep the installed release and inspect the incomplete private native directory.',
+    actual, safeNextStep: 'Keep the installed release and inspect the incomplete private native directory.',
   });
 }
 
@@ -82,42 +82,52 @@ public static class AnchoredNativeWriter {
   Info i; if(h.IsInvalid || !GetFileInformationByHandle(h,out i)) throw new IOException(); return i;
  }
  public static void Write(string directory,ulong dev,ulong ino,string name,long length) {
-  if(length<1 || length>268435456 || (name!="harness-mrtool" && name!="harness-mrtool.exe" && name!="harness-mrtool.exe.new" && name!=".harness-mrtool-install.json" && name!=".harness-mrtool-install.json.new")) throw new IOException();
-  string root=Path.GetPathRoot(directory);
-  if(root==null || root.Length!=3 || root[1]!=':' || root[2]!='\\' || !String.Equals(Path.GetFullPath(directory),directory,StringComparison.OrdinalIgnoreCase)) throw new IOException();
-  var pins=new List<SafeFileHandle>();
+  string stage="validate";
   try {
-   var paths=new List<string>(); paths.Add(root); string current=root;
-   foreach(string part in directory.Substring(root.Length).Split(new char[]{'\\'},StringSplitOptions.RemoveEmptyEntries)) {
-    if(part=="." || part==".." || part.IndexOf(':')>=0 || part.EndsWith(".") || part.EndsWith(" ")) throw new IOException();
-    current=Path.Combine(current,part); paths.Add(current);
-   }
-   Info target=new Info(); ulong volume=0; bool haveVolume=false;
-   foreach(string path in paths) {
-    var h=CreateFileW(path,0x80,3,IntPtr.Zero,3,0x02200000,IntPtr.Zero);
-    pins.Add(h); target=Inspect(h);
-    if((target.Attributes&0x10)==0 || (target.Attributes&0x400)!=0) throw new IOException();
-    if(!haveVolume) { volume=target.Volume; haveVolume=true; }
-    else if(target.Volume!=volume) throw new IOException();
-   }
-   ulong index=((ulong)target.IndexHigh<<32)|target.IndexLow;
-   // libuv's Windows st_dev is not the kernel volume serial on every
-   // supported runner (and may be zero). Pin the volume from the held
-   // ancestor handles instead, then compare the final directory's file
-   // index to the identity captured by Node.
-   if(index!=ino || !haveVolume) throw new IOException();
-   using(var h=CreateFileW(Path.Combine(directory,name),0x40000000,0,IntPtr.Zero,1,0x80200000,IntPtr.Zero)) {
-    Info created=Inspect(h);
-    if((created.Attributes&(0x10|0x400))!=0 || created.Links!=1) throw new IOException();
-    using(var output=new FileStream(h,FileAccess.Write,65536,false)) {
-     var input=Console.OpenStandardInput(); var buffer=new byte[65536]; long remaining=length;
-     while(remaining>0) {int count=input.Read(buffer,0,(int)Math.Min(buffer.Length,remaining)); if(count<=0) throw new IOException(); output.Write(buffer,0,count); remaining-=count;}
-     if(input.ReadByte()!=-1) throw new IOException(); output.Flush(true);
-     Info finished=Inspect(h);
-     if(finished.Links!=1 || (((ulong)finished.SizeHigh<<32)|finished.SizeLow)!=(ulong)length) throw new IOException();
+   if(length<1 || length>268435456 || (name!="harness-mrtool" && name!="harness-mrtool.exe" && name!="harness-mrtool.exe.new" && name!=".harness-mrtool-install.json" && name!=".harness-mrtool-install.json.new")) throw new IOException();
+   string root=Path.GetPathRoot(directory);
+   if(root==null || root.Length!=3 || root[1]!=':' || root[2]!='\\' || !String.Equals(Path.GetFullPath(directory),directory,StringComparison.OrdinalIgnoreCase)) throw new IOException();
+   var pins=new List<SafeFileHandle>();
+   try {
+    stage="pin-ancestors";
+    var paths=new List<string>(); paths.Add(root); string current=root;
+    foreach(string part in directory.Substring(root.Length).Split(new char[]{'\\'},StringSplitOptions.RemoveEmptyEntries)) {
+     if(part=="." || part==".." || part.IndexOf(':')>=0 || part.EndsWith(".") || part.EndsWith(" ")) throw new IOException();
+     current=Path.Combine(current,part); paths.Add(current);
     }
-   }
-  } finally {for(int i=pins.Count-1;i>=0;i--) pins[i].Dispose();}
+    Info target=new Info(); ulong volume=0; bool haveVolume=false;
+    foreach(string path in paths) {
+     var h=CreateFileW(path,0x80,3,IntPtr.Zero,3,0x02200000,IntPtr.Zero);
+     pins.Add(h); target=Inspect(h);
+     if((target.Attributes&0x10)==0 || (target.Attributes&0x400)!=0) throw new IOException();
+     if(!haveVolume) { volume=target.Volume; haveVolume=true; }
+     else if(target.Volume!=volume) throw new IOException();
+    }
+    ulong index=((ulong)target.IndexHigh<<32)|target.IndexLow;
+    // libuv's Windows st_dev is not the kernel volume serial on every
+    // supported runner (and may be zero). Pin the volume from the held
+    // ancestor handles instead, then compare the final directory's file
+    // index to the identity captured by Node.
+    if(index!=ino || !haveVolume) throw new IOException();
+    stage="exclusive-create";
+    using(var h=CreateFileW(Path.Combine(directory,name),0x40000000,0,IntPtr.Zero,1,0x80200000,IntPtr.Zero)) {
+     Info created=Inspect(h);
+     if((created.Attributes&(0x10|0x400))!=0 || created.Links!=1) throw new IOException();
+     stage="stream-and-flush";
+     using(var output=new FileStream(h,FileAccess.Write,65536,false)) {
+      var input=Console.OpenStandardInput(); var buffer=new byte[65536]; long remaining=length;
+      while(remaining>0) {int count=input.Read(buffer,0,(int)Math.Min(buffer.Length,remaining)); if(count<=0) throw new IOException(); output.Write(buffer,0,count); remaining-=count;}
+      if(input.ReadByte()!=-1) throw new IOException(); output.Flush(true);
+      Info finished=Inspect(h);
+      if(finished.Links!=1 || (((ulong)finished.SizeHigh<<32)|finished.SizeLow)!=(ulong)length) throw new IOException();
+     }
+    }
+    stage="complete";
+   } finally {for(int i=pins.Count-1;i>=0;i--) pins[i].Dispose();}
+  } catch {
+   try { Console.Out.Write("ERR:"+stage+"\n"); } catch {}
+   throw;
+  }
  }
 }
 '@ | Out-Null
@@ -137,7 +147,11 @@ async function runHelper(executable: string, args: string[], env: NodeJS.Process
     function settle(ok: boolean) {
       if (settled) return;
       settled = true; clearTimeout(timer);
-      if (ok) done(); else reject(failure());
+      if (ok) done();
+      else {
+        const diagnostic = /^ERR:[a-z-]{1,32}$/u.exec(output.trim())?.[0];
+        reject(failure(diagnostic === undefined ? 'anchored write failed' : `windows-helper:${diagnostic.slice(4)}`));
+      }
     }
     function abort() {
       if (settled || failed) return;

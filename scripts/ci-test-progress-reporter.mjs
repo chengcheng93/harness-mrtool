@@ -57,16 +57,22 @@ function failureDetails(data) {
   let error = ownValue(ownValue(data, 'details'), 'error');
   let failureType;
   let code;
+  let diagnostic;
   for (let depth = 0; depth < MAX_ERROR_DEPTH && error !== undefined; depth++) {
     const type = ownValue(error, 'failureType');
     if (failureType === undefined && FAILURE_TYPES.has(type)) failureType = type;
     const candidate = ownValue(error, 'code');
     // Prefer the first specific cause code over Node's generic failure wrapper.
     if (ERROR_CODES.has(candidate) && (code === undefined || code === 'ERR_TEST_FAILURE')) code = candidate;
+    const actual = ownValue(ownValue(error, 'details'), 'actual');
+    if (diagnostic === undefined && typeof actual === 'string' && /^windows-helper:[a-z-]{1,32}$/u.test(actual)) {
+      diagnostic = actual;
+    }
     error = ownValue(error, 'cause');
   }
   return (failureType === undefined ? '' : ` failureType=${failureType}`)
-    + (code === undefined ? '' : ` code=${code}`);
+    + (code === undefined ? '' : ` code=${code}`)
+    + (diagnostic === undefined ? '' : ` diagnostic=${diagnostic}`);
 }
 
 /** Streaming CI diagnostics only. Node's test runner retains exit-code authority. */
