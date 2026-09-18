@@ -51,6 +51,8 @@ import { createProductionChannelCheckHandler, type ProductionChannelCommandDefau
 import { createSkillCommandServices, type SkillCommandService } from "./cli/commands/skill.ts";
 import type { UpdateService } from "./update/service.ts";
 import type { ProductionInstallationService } from "./update/managed-installation-types.ts";
+import { defaultStateDirectory } from "./platform/state-path.ts";
+import { createProductionInstallationService } from "./update/production-installation-service.ts";
 import { authenticateReleaseSnapshot } from "./update/release-set-verifier.ts";
 import { currentReleasePlatform } from "./update/production-release-preparation.ts";
 
@@ -131,6 +133,37 @@ function lazyDefaultUpdaterCommandServices(
   });
 }
 
+function lazyDefaultInstallationCommandServices(
+  channelDefaults: ProductionChannelCommandDefaults = {},
+): Pick<ProductionCommandServices, "selfUpdateApply" | "selfUpdateRollback"> {
+  let resolved: Pick<ProductionCommandServices, "selfUpdateApply" | "selfUpdateRollback"> | undefined;
+  return Object.freeze({
+    selfUpdateApply: async (invocation) => {
+      resolved ??= createInstallationCommandServices(createProductionInstallationService({
+        ...channelDefaults,
+        stateDirectory: channelDefaults.stateDirectory ?? defaultStateDirectory(),
+        // In a packaged SEA, process.execPath is the installed native binary.
+        // Development invocations therefore fail closed at the canonical
+        // installation verification gate instead of mutating the Node runtime.
+        installationDirectory: dirname(resolve(process.execPath)),
+      }));
+      const handler = resolved.selfUpdateApply;
+      if (handler === undefined) throw new TypeError("Default installation apply handler is unavailable");
+      return handler(invocation);
+    },
+    selfUpdateRollback: async (invocation) => {
+      resolved ??= createInstallationCommandServices(createProductionInstallationService({
+        ...channelDefaults,
+        stateDirectory: channelDefaults.stateDirectory ?? defaultStateDirectory(),
+        installationDirectory: dirname(resolve(process.execPath)),
+      }));
+      const handler = resolved.selfUpdateRollback;
+      if (handler === undefined) throw new TypeError("Default installation rollback handler is unavailable");
+      return handler(invocation);
+    },
+  });
+}
+
 function injectedUpdaterCommandServices(
   service: UpdateService,
 ): Pick<ProductionCommandServices, "selfUpdateCheck" | "selfUpdateStatus"> {
@@ -175,7 +208,7 @@ async function publicCommandHandlers(
         ? lazyDefaultUpdaterCommandServices(dependencies.updateChannelDefaults)
         : injectedUpdaterCommandServices(dependencies.updateService)),
       ...(dependencies.installationService === undefined
-        ? {}
+        ? lazyDefaultInstallationCommandServices(dependencies.updateChannelDefaults)
         : createInstallationCommandServices(dependencies.installationService)),
       ...(dependencies.skillService === undefined
         ? {}
