@@ -82,7 +82,7 @@ public static class AnchoredNativeWriter {
  static Info Inspect(SafeFileHandle h) {
   Info i; if(h.IsInvalid || !GetFileInformationByHandle(h,out i)) throw new IOException(); return i;
  }
- public static void Write(string directory,ulong dev,ulong ino,string name,long length) {
+ public static bool Write(string directory,ulong dev,ulong ino,string name,long length) {
   string stage="validate";
   try {
    if(length<1 || length>268435456 || (name!="harness-mrtool" && name!="harness-mrtool.exe" && name!="harness-mrtool.exe.new" && name!=".harness-mrtool-install.json" && name!=".harness-mrtool-install.json.new")) throw new IOException();
@@ -124,18 +124,22 @@ public static class AnchoredNativeWriter {
      }
     }
     stage="complete";
+    return true;
    } finally {for(int i=pins.Count-1;i>=0;i--) pins[i].Dispose();}
   } catch {
    try { Console.Out.Write("ERR:"+stage+"\n"); } catch {}
-   throw;
+   return false;
   }
  }
 }
 '@ | Out-Null
-[AnchoredNativeWriter]::Write($env:HMR_ANCHOR_DIRECTORY,[ulong]$env:HMR_ANCHOR_DEV,[ulong]$env:HMR_ANCHOR_INO,$env:HMR_ANCHOR_NAME,[long]$env:HMR_ANCHOR_LENGTH)
+} catch { [Console]::Out.Write("ERR:add-type"+[char]10); exit 1 }
+try {
+  $ok = [AnchoredNativeWriter]::Write($env:HMR_ANCHOR_DIRECTORY,[ulong]$env:HMR_ANCHOR_DEV,[ulong]$env:HMR_ANCHOR_INO,$env:HMR_ANCHOR_NAME,[long]$env:HMR_ANCHOR_LENGTH)
+} catch { [Console]::Out.Write("ERR:invoke"+[char]10); exit 1 }
+if (-not $ok) { exit 1 }
 [Console]::Out.Write("OK"+[char]10)
 exit 0
-} catch { [Console]::Out.Write("ERR:powershell"+[char]10); exit 1 }
 `;
 
 async function runHelper(executable: string, args: string[], env: NodeJS.ProcessEnv, bytes: Uint8Array, fd?: number): Promise<void> {
