@@ -122,6 +122,7 @@ test('native CI reporter finds nested codes without reflecting unknown error met
  assert.equal(await failure({details:{actual:'windows-helper:exclusive-create'}}),failPrefix+' diagnostic=windows-helper:exclusive-create\n');
  assert.equal(await failure({details:{actual:'native-store:operation'}}),failPrefix+' diagnostic=native-store:operation\n');
  assert.equal(await failure({details:{actual:'application-bundle:version'}}),failPrefix+' diagnostic=application-bundle:version\n');
+ assert.equal(await failure({details:{actual:'application-bundle:version-exit-7'}}),failPrefix+' diagnostic=application-bundle:version-exit-7\n');
  assert.equal(await failure({actual:{details:{actual:'managed-installation:file'}}}),failPrefix+' diagnostic=managed-installation:file\n');
  assert.equal(await failure({details:{actual:'SECRET-PATH'}}),failPrefix+'\n');
  assert.equal(await failure({reason:'unavailable'}),failPrefix+' diagnostic=process-lock:unavailable\n');

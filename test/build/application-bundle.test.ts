@@ -23,7 +23,7 @@ const repositoryRoot = resolve(import.meta.dirname, "../..");
 const templateBundlePath = resolve(repositoryRoot, "template-bundle");
 
 function assertApplicationBundleProcess(result: ReturnType<typeof runProcess>, operation: string): void {
-  const reason = result.error !== undefined ? "error" : result.status !== 0 ? "status" : result.stderr !== "" ? "stderr" : null;
+  const reason = result.error !== undefined ? "error" : result.status !== 0 ? `exit-${String(result.status)}` : result.stderr !== "" ? "stderr" : null;
   if (reason !== null) {
     throw new ToolError("INTERNAL_ERROR", "Application bundle command failed", {
       field: "runtime",
