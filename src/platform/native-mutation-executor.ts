@@ -2,7 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { constants } from "node:fs";
 import { randomUUID, createHash } from "node:crypto";
 import { lstat, open, realpath } from "node:fs/promises";
-import { isAbsolute, resolve } from "node:path";
+import { isAbsolute, resolve, win32 } from "node:path";
 
 import { samePhysicalPath } from "./windows-path.ts";
 import { resolveWindowsPowerShellPath } from "./state-path.ts";
@@ -624,6 +624,22 @@ try {
 
 class WindowsNativeMutationExecutor extends DarwinNativeMutationExecutor {}
 
+export function windowsNativeExecutorEnvironment(environment: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const powershell = resolveWindowsPowerShellPath(environment);
+  const systemRoot = win32.dirname(win32.dirname(win32.dirname(win32.dirname(powershell))));
+  const system32 = win32.join(systemRoot, "System32");
+  const temporary = environment.TEMP ?? environment.TMP ?? win32.join(systemRoot, "Temp");
+  return Object.freeze({
+    ...environment,
+    SystemRoot: systemRoot,
+    WINDIR: systemRoot,
+    PATH: environment.PATH ?? system32,
+    TEMP: temporary,
+    TMP: environment.TMP ?? temporary,
+  });
+}
+
+
 async function validateWindowsRoot(directory: string): Promise<void> {
   assertAbsoluteNormalizedPath(directory);
   try {
@@ -649,7 +665,7 @@ async function startWindowsNativeExecutor(directory: string): Promise<NativeMuta
         windowsHide: true,
         stdio: ["pipe", "pipe", "pipe"],
         env: {
-          SystemRoot: process.env.SystemRoot ?? "C:\\Windows",
+          ...windowsNativeExecutorEnvironment(),
           HMRTOOL_NATIVE_EXECUTOR_ROOT: directory,
           HMRTOOL_NATIVE_EXECUTOR_EPOCH: epochId,
         },
