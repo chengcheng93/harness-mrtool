@@ -70,6 +70,10 @@ jobs:
         run: npm test -- --test-concurrency=1 --test-name-pattern="Windows publisher flushes once|default Windows ACL adapter secures" test/integration/windows-write-through-move.test.ts test/unit/context-store.test.ts
       - name: Run one complete-inventory serial Windows suite group with safe live progress
         run: node scripts/windows-suite-group.mjs --group ${{ matrix.group }} --groups 4
+      - name: Probe native store boundary safely
+        if: failure() && matrix.group == 2
+        shell: pwsh
+        run: node --import tsx scripts/windows-native-store-probe.mjs
       - name: Probe safe Windows failure stages
         if: failure() && matrix.group == 2
         shell: pwsh
