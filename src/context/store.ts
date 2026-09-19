@@ -521,15 +521,19 @@ export class CandidateContextStore {
           !/^[A-Za-z0-9:._-]{1,128}$/u.test(identity.startKey)) {
         throw new Error("invalid process identity");
       }
+    } catch {
+      throw internalError("Candidate context process identity is unavailable", "native-store:process-identity");
+    }
+    try {
       processLock = await this.processLockProvider.acquire(this.processLockPath, this.lockTimeoutMs);
     } catch (error) {
       if (error instanceof ProcessLockError && error.reason === "timeout") {
-        throw internalError("Candidate context lock timed out");
+        throw internalError("Candidate context lock timed out", "native-store:process-lock-timeout");
       }
-      throw internalError(
-        "Candidate context process lock is unavailable",
-        error instanceof ProcessLockError ? error.diagnostic : undefined,
-      );
+      const diagnostic = error instanceof ProcessLockError
+        ? error.diagnostic ?? `native-store:process-lock-${error.reason}`
+        : "native-store:process-lock-exception";
+      throw internalError("Candidate context process lock is unavailable", diagnostic);
     }
     let leaseCreated = false;
     try {
