@@ -63,7 +63,7 @@ export function createDefaultWriteServices(
       stateDirectory: options.stateDirectory ?? defaultStateDirectory(),
       ...(options.windowsAclVerifier === undefined ? {} : { windowsAclVerifier: options.windowsAclVerifier }),
     });
-    const historical = createDefaultHistoricalBundleLoader(currentBundle, { ...options.historicalBundleDefaults, stateDirectory: options.stateDirectory });
+    const historical = createDefaultHistoricalBundleLoader(currentBundle, { ...options.historicalBundleDefaults, stateDirectory: options.stateDirectory, ...(options.windowsAclVerifier === undefined ? {} : { windowsAclVerifier: options.windowsAclVerifier }) });
     const mrIid = command.kind === "create" ? null : command.iid;
     if (command.kind !== "create" && mrIid === null) throw new ToolError("INPUT_ERROR", "An MR IID is required", {
       field: "iid", expected: "a resolved MR IID", actual: null, safeNextStep: "Specify the merge request IID and retry.",
