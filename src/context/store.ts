@@ -119,11 +119,14 @@ function contextInputError(reason: string, field = "contextId"): ToolError<"INPU
   });
 }
 
-function internalError(reason: string): ToolError<"INTERNAL_ERROR"> {
+function internalError(reason: string, diagnostic?: string): ToolError<"INTERNAL_ERROR"> {
+  const actual = diagnostic !== undefined && /^(?:windows-helper|windows-lock-helper|native-store|native-readiness|managed-installation|update-state|installation-journal):[a-z-]{1,32}$/u.test(diagnostic)
+    ? diagnostic
+    : "local context state is unavailable";
   return new ToolError("INTERNAL_ERROR", reason, {
     field: null,
     expected: "a locked, valid, private candidate context store",
-    actual: "local context state is unavailable",
+    actual,
     safeNextStep: "Retry the command; inspect the quarantined state file if the problem persists.",
   });
 }
@@ -523,7 +526,10 @@ export class CandidateContextStore {
       if (error instanceof ProcessLockError && error.reason === "timeout") {
         throw internalError("Candidate context lock timed out");
       }
-      throw internalError("Candidate context process lock is unavailable");
+      throw internalError(
+        "Candidate context process lock is unavailable",
+        error instanceof ProcessLockError ? error.diagnostic : undefined,
+      );
     }
     let leaseCreated = false;
     try {
