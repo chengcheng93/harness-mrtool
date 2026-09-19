@@ -129,6 +129,21 @@ function candidateWith(
   }));
 }
 
+/** Validate a path-free plan against one prepared Windows outer journal before I/O. */
+export function validateWindowsMutationPlanForJournal(
+  current: unknown,
+  plan: WindowsMutationPlan,
+): InstallationJournal {
+  try {
+    const journal = validateInstallationJournal(current);
+    checkPlan(journal, plan);
+    return journal;
+  } catch (error) {
+    if (error instanceof ToolError) throw error;
+    throw failure("malformed-plan-binding");
+  }
+}
+
 /** Attach observed fixed-slot evidence to a prepared Windows outer journal. */
 export function attachWindowsInnerJournal(
   current: unknown,
