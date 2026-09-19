@@ -12,6 +12,8 @@ export type ProductionChannelCommandDefaults = ProductionChannelClientOptions & 
   readonly fetch?: typeof globalThis.fetch;
   /** Trusted in-process platform seam; never taken from CLI arguments/environment. */
   readonly platform?: import("../../update/release-set-verifier.ts").SupportedReleasePlatform;
+  /** Trusted in-process Skill active-path seam; never taken from CLI arguments/environment. */
+  readonly defaultActivePath?: string;
 };
 
 /** Checking is not installing: no cache pointer, executable or Skill is activated here. */

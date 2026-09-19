@@ -170,7 +170,11 @@ test("production main forwards the loaded Skill invocation pin to its default se
       "--skill-protocol", "1", "--output", "json",
     ],
     {
-      updateChannelDefaults: { stateDirectory: resolve(home, "state") },
+      updateChannelDefaults: {
+        stateDirectory: resolve(home, "state"),
+        defaultActivePath: resolve(home, "user", "harness-mr"),
+        windowsAclVerifier: { verify: async () => undefined },
+      },
       updatePreflight: { run: async () => undefined },
       stdout: output,
       stderr: output,
