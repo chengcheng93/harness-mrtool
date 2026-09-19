@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 
 import { canonicalizeJson, sha256Utf8 } from "../contracts/jcs.ts";
 import { ToolError } from "../contracts/errors.ts";
@@ -14,6 +14,7 @@ import type {
 } from "./installation-journal.ts";
 import { validateInstallationJournal, validateInstallationLaunchEvidence } from "./installation-journal.ts";
 import { advanceWindowsLaunchEvidence } from "./windows-launch-transition.ts";
+import { decodeWindowsPersistenceDescriptor } from "./windows-persistence-descriptor.ts";
 import type { WindowsMutationPlan } from "./windows-mutation-plan.ts";
 
 export interface WindowsInnerJournalObservation {
@@ -26,6 +27,7 @@ export interface WindowsLaunchDescriptorObservation {
   readonly identity: InstallationFileIdentity;
   readonly sha256: string;
   readonly size: number;
+  readonly bytes: Uint8Array;
 }
 
 export interface WindowsLaunchReservationInput {
@@ -78,6 +80,23 @@ function checkPlan(journal: InstallationJournal, plan: WindowsMutationPlan): voi
       plan.next.markerSha256 !== journal.nextEvidence.marker.sha256 ||
       plan.next.markerSize !== journal.nextEvidence.marker.size) {
     throw failure("plan-evidence-mismatch");
+  }
+}
+
+function descriptorMatches(journal: InstallationJournal, input: WindowsLaunchReservationInput): boolean {
+  const descriptor = input.descriptor;
+  if (!(descriptor.bytes instanceof Uint8Array) || descriptor.bytes.byteLength < 1 || descriptor.bytes.byteLength > 8 * 1024 ||
+      descriptor.size !== descriptor.bytes.byteLength ||
+      createHash("sha256").update(descriptor.bytes).digest("hex") !== descriptor.sha256) return false;
+  try {
+    const decoded = decodeWindowsPersistenceDescriptor(descriptor.bytes);
+    return decoded.launchId === input.launchId && decoded.reservationId === input.reservationId &&
+      decoded.attemptId === journal.attemptId && decoded.transactionId === journal.transactionId &&
+      decoded.expectedRevision === journal.revision + 1 &&
+      decoded.parent.pid === input.parent.pid && decoded.parent.startKey === input.parent.startKey &&
+      decoded.parent.launchNonce === input.parent.launchNonce;
+  } catch {
+    return false;
   }
 }
 
@@ -264,7 +283,8 @@ export function reserveWindowsLaunch(
         !/^[a-f0-9]{64}$/u.test(input.descriptor.sha256) || !validIdentity(input.descriptor.identity) ||
         !Number.isSafeInteger(input.descriptor.size) || input.descriptor.size < 1 || input.descriptor.size > 8 * 1024 || input.parent === null ||
         !Number.isSafeInteger(input.parent.pid) || input.parent.pid < 1 || input.parent.pid > 0xffffffff ||
-        !/^win:[1-9][0-9]{0,19}$/u.test(input.parent.startKey) || !/^[a-f0-9]{32}$/u.test(input.parent.launchNonce)) {
+        !/^win:[1-9][0-9]{0,19}$/u.test(input.parent.startKey) || !/^[a-f0-9]{32}$/u.test(input.parent.launchNonce) ||
+        !descriptorMatches(journal, input)) {
       throw failure("invalid-launch-reservation");
     }
     const authorityEpoch = journal.control.authorityEpoch + 1;

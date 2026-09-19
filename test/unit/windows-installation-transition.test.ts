@@ -8,6 +8,7 @@ import {
   markWindowsExecutionPending,
 } from "../../src/update/windows-installation-transition.ts";
 import { validateInstallationJournal } from "../../src/update/installation-journal.ts";
+import { encodeWindowsPersistenceDescriptor } from "../../src/update/windows-persistence-descriptor.ts";
 import { journalFixture, randomId, digest, withLaunch } from "../helpers/installation-journal-fixture.ts";
 
 function preparedWithoutInner() {
@@ -71,11 +72,18 @@ test("reserving a Windows launch records an unsettled reserved lifecycle and des
   const withInner = attachWindowsInnerJournal(journal, planFor(journal), {
     identity: { dev: "2", ino: "105" }, sha256: digest("inner"), size: 512,
   });
+  const launchId = randomId(20);
+  const reservationId = randomId(21);
+  const parent = { pid: 200, startKey: "win:134000000000000000", launchNonce: randomId(22) };
+  const bytes = encodeWindowsPersistenceDescriptor({
+    schemaVersion: 1, launchId, reservationId, attemptId: withInner.attemptId,
+    transactionId: withInner.transactionId, expectedRevision: withInner.revision + 1, parent,
+  });
   const next = reserveWindowsLaunch(withInner, {
-    launchId: randomId(20),
-    reservationId: randomId(21),
-    descriptor: { identity: { dev: "3", ino: "205" }, sha256: digest("descriptor"), size: 128 },
-    parent: { pid: 200, startKey: "win:134000000000000000", launchNonce: randomId(22) },
+    launchId,
+    reservationId,
+    descriptor: { identity: { dev: "3", ino: "205" }, sha256: digest(bytes), size: bytes.length, bytes },
+    parent,
   });
   assert.equal(next.windows?.launch?.state, "reserved");
   assert.equal(next.windows?.launch?.settlement.state, "unsettled");
@@ -109,4 +117,23 @@ test("admitted Windows launch can enter execution-pending only through a durable
   assert.equal(pending.windows?.launch?.state, "admitted");
   assert.equal(pending.windows?.launch?.settlement.state, "unsettled");
   assert.equal(pending.control.operations.length, journal.control.operations.length + 1);
+});
+
+
+test("Windows launch reservation rejects descriptor bytes whose digest or binding drifts", () => {
+  const journal = preparedWithoutInner();
+  const withInner = attachWindowsInnerJournal(journal, planFor(journal), {
+    identity: { dev: "2", ino: "105" }, sha256: digest("inner"), size: 512,
+  });
+  const launchId = randomId(23);
+  const reservationId = randomId(24);
+  const parent = { pid: 200, startKey: "win:134000000000000000", launchNonce: randomId(25) };
+  const bytes = encodeWindowsPersistenceDescriptor({
+    schemaVersion: 1, launchId, reservationId, attemptId: withInner.attemptId,
+    transactionId: withInner.transactionId, expectedRevision: withInner.revision + 1, parent,
+  });
+  assert.throws(() => reserveWindowsLaunch(withInner, {
+    launchId, reservationId, parent,
+    descriptor: { identity: { dev: "3", ino: "205" }, sha256: digest("wrong"), size: bytes.length, bytes },
+  }), /windows installation transition is unsafe/u);
 });
