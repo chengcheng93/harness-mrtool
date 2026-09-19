@@ -49,7 +49,7 @@ import {
 import {tupleDigest} from "./journal.ts";
 import {coordinateWindowsInnerJournal} from "./windows-installation-coordinator.ts";
 import {createWindowsMutationPlan} from "./windows-persistence-handoff.ts";
-import {launchWindowsPersistenceHelper} from "./windows-persistence-helper.ts";
+import {launchWindowsPersistenceHelper, recoverWindowsPersistence} from "./windows-persistence-helper.ts";
 import {
   verifyInstalledRelease,
   type InstalledReleaseObservation,
@@ -362,6 +362,7 @@ export function createProductionInstallationService(options: ProductionInstallat
       return applyCandidate(candidate, "rollback");
     },
     async recover(): Promise<void> {
+      if (platform === "windows-x64" && await recoverWindowsPersistence(stateDirectory, installationDirectory)) return;
       await withUpdateLock(stateDirectory, async lease => {
         const store = createInstallationJournalStore(stateDirectory, {lease, ...(options.windowsAclVerifier === undefined ? {} : {windowsAclVerifier: options.windowsAclVerifier})});
         await recoverTerminal(lease, store);
