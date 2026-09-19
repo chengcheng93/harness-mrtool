@@ -25,9 +25,9 @@ for (const [pattern, value] of safeAssertions) {
   process.stdout.write(`::notice::Native safe diagnostic ${value}\n`);
 }
 const safeLocations = [
-  [/test\/integration\/update-transaction-lease\.test\.ts:(\d+):\d+/gu, 'assertion:update-lease-line-'],
-  [/test\/integration\/production-migration-adapter\.test\.ts:(\d+):\d+/gu, 'assertion:production-migration-line-'],
-  [/test\/integration\/native-executable-store\.test\.ts:(\d+):\d+/gu, 'assertion:native-store-line-'],
+  [/test[\\/]integration[\\/]update-transaction-lease\.test\.ts:(\d+):\d+/gu, 'assertion:update-lease-line-'],
+  [/test[\\/]integration[\\/]production-migration-adapter\.test\.ts:(\d+):\d+/gu, 'assertion:production-migration-line-'],
+  [/test[\\/]integration[\\/]native-executable-store\.test\.ts:(\d+):\d+/gu, 'assertion:native-store-line-'],
 ];
 for (const [pattern, prefix] of safeLocations) {
   for (const match of text.matchAll(pattern)) {
