@@ -4,6 +4,9 @@ import { randomUUID, createHash } from "node:crypto";
 import { lstat, open, realpath } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 
+import { samePhysicalPath } from "./windows-path.ts";
+import { resolveWindowsPowerShellPath } from "./state-path.ts";
+
 import { ToolError } from "../contracts/errors.ts";
 
 export const MUTATION_SLOT = "transaction" as const;
@@ -65,7 +68,7 @@ const epochStates = new WeakMap<object, EpochState>();
 function securityFailure(): ToolError<"UPDATE_SECURITY_ERROR"> {
   return new ToolError("UPDATE_SECURITY_ERROR", "Native mutation authority is unavailable", {
     field: "update.nativeMutation",
-    expected: "a live Darwin native executor with an authenticated fixed-slot protocol",
+    expected: "a live native executor with an authenticated fixed-slot protocol",
     actual: "native mutation authority rejected or became unavailable",
     safeNextStep: "Keep the installed release and inspect the private update state before retrying.",
   });
@@ -556,10 +559,136 @@ async function startNativeExecutor(
   }
 }
 
-export async function openNativeMutationExecutor(installationDirectory: string): Promise<NativeMutationExecutor> {
-  if (process.platform !== "darwin") throw securityFailure();
+const WINDOWS_NATIVE_EXECUTOR = String.raw`
+$ErrorActionPreference='Stop'
+$root=$env:HMRTOOL_NATIVE_EXECUTOR_ROOT
+$epoch=$env:HMRTOOL_NATIVE_EXECUTOR_EPOCH
+if([string]::IsNullOrEmpty($root) -or [string]::IsNullOrEmpty($epoch)) { exit 31 }
+if([IO.Path]::GetFullPath($root) -ne $root -or $epoch -notmatch '^[0-9a-f-]{36}$') { exit 31 }
+$rootInfo=Get-Item -LiteralPath $root -Force
+if(!$rootInfo.PSIsContainer -or (($rootInfo.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) { exit 31 }
+$lockPath=[IO.Path]::Combine($root,'.update.lock')
+$targetPath=[IO.Path]::Combine($root,'installation-transaction.json')
+$lock=$null
+try {
+  $lock=[IO.File]::Open($lockPath,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None,4096,[IO.FileOptions]::WriteThrough)
+  $lockInfo=Get-Item -LiteralPath $lockPath -Force
+  if($lockInfo.PSIsContainer -or (($lockInfo.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) { exit 31 }
+  [Console]::Out.WriteLine(('READY' + [char]9 + $epoch)); [Console]::Out.Flush()
+  $reserved=$null
+  $admitted=$false
+  while($true) {
+    $line=[Console]::In.ReadLine()
+    if($null -eq $line) { exit 31 }
+    if($line.Length -gt 600000) { exit 31 }
+    $parts=$line.Split([char]9,[StringSplitOptions]::None)
+    $command=$parts[0]
+    if($command -eq 'RESERVE' -and $parts.Count -eq 6) {
+      $receivedEpoch=$parts[1]; $sequence=$parts[2]; $operation=$parts[3]; $length=$parts[4]; $sha=$parts[5]
+      if($receivedEpoch -ne $epoch -or $sequence -notmatch '^[1-9][0-9]*$' -or $operation -notmatch '^[0-9a-f-]{36}$' -or $length -notmatch '^[1-9][0-9]*$' -or [int64]$length -gt 262144 -or $sha -notmatch '^[0-9a-f]{64}$' -or $null -ne $reserved -or $admitted) { exit 31 }
+      $reserved=@($receivedEpoch,[int64]$sequence,$operation,[int64]$length,$sha)
+      [Console]::Out.WriteLine(('OK' + [char]9 + 'RESERVE' + [char]9 + $sequence + [char]9 + $operation)); [Console]::Out.Flush(); continue
+    }
+    if($command -eq 'ADMIT' -and $parts.Count -eq 7) {
+      $receivedEpoch=$parts[1]; $sequence=$parts[2]; $operation=$parts[3]; $length=$parts[4]; $sha=$parts[5]; $hex=$parts[6]
+      if($null -eq $reserved -or $admitted -or $receivedEpoch -ne $reserved[0] -or [int64]$sequence -ne $reserved[1] -or $operation -ne $reserved[2] -or [int64]$length -ne $reserved[3] -or $sha -ne $reserved[4] -or $hex -notmatch '^[0-9a-f]*$' -or $hex.Length -ne 2 * [int64]$length) { exit 31 }
+      $bytes=New-Object byte[] ([int64]$length)
+      for($index=0; $index -lt $bytes.Length; $index++) { $bytes[$index]=[Convert]::ToByte($hex.Substring($index * 2,2),16) }
+      $shaProvider=[Security.Cryptography.SHA256]::Create()
+      try { $actual=([BitConverter]::ToString($shaProvider.ComputeHash($bytes))).Replace('-','').ToLowerInvariant() } finally { $shaProvider.Dispose() }
+      if($actual -ne $sha -or (Test-Path -LiteralPath $targetPath -PathType Any)) { exit 31 }
+      $output=$null
+      try {
+        $output=[IO.File]::Open($targetPath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None,4096,[IO.FileOptions]::WriteThrough)
+        $output.Write($bytes,0,$bytes.Length)
+        $output.Flush($true)
+        $output.Dispose(); $output=$null
+      } finally { if($null -ne $output) { $output.Dispose() } }
+      $admitted=$true
+      [Console]::Out.WriteLine(('OK' + [char]9 + 'ADMIT' + [char]9 + $sequence + [char]9 + $operation + [char]9 + $sha)); [Console]::Out.Flush(); continue
+    }
+    if($command -eq 'REVOKE' -and $parts.Count -eq 4) {
+      $receivedEpoch=$parts[1]; $sequence=$parts[2]; $operation=$parts[3]
+      if($null -eq $reserved -or $admitted -or $receivedEpoch -ne $reserved[0] -or [int64]$sequence -ne $reserved[1] -or $operation -ne $reserved[2]) { exit 31 }
+      $reserved=$null
+      [Console]::Out.WriteLine(('OK' + [char]9 + 'REVOKE' + [char]9 + $sequence + [char]9 + $operation)); [Console]::Out.Flush(); continue
+    }
+    if($command -eq 'CLOSE' -and $parts.Count -eq 1) {
+      $lock.Dispose(); $lock=$null
+      [Console]::Out.WriteLine(('OK' + [char]9 + 'CLOSE')); [Console]::Out.Flush(); exit 0
+    }
+    exit 31
+  }
+} catch { exit 31 } finally { if($null -ne $lock) { $lock.Dispose() } }
+`;
+
+class WindowsNativeMutationExecutor extends DarwinNativeMutationExecutor {}
+
+async function validateWindowsRoot(directory: string): Promise<void> {
+  assertAbsoluteNormalizedPath(directory);
   try {
-    return await startNativeExecutor(installationDirectory);
+    const descriptor = await lstat(directory, { bigint: true });
+    const physical = await realpath(directory);
+    if (!descriptor.isDirectory() || descriptor.isSymbolicLink() || !samePhysicalPath(physical, directory)) throw securityFailure();
+  } catch (error) {
+    throw error instanceof ToolError ? error : securityFailure();
+  }
+}
+
+async function startWindowsNativeExecutor(directory: string): Promise<NativeMutationExecutor> {
+  await validateWindowsRoot(directory);
+  let child: ChildProcessWithoutNullStreams | undefined;
+  let childClose: Promise<CloseObservation> | undefined;
+  try {
+    const epochId = randomUUID();
+    child = spawn(
+      resolveWindowsPowerShellPath(),
+      ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(WINDOWS_NATIVE_EXECUTOR, "utf16le").toString("base64")],
+      {
+        shell: false,
+        windowsHide: true,
+        stdio: ["pipe", "pipe", "pipe"],
+        env: {
+          SystemRoot: process.env.SystemRoot ?? "C:\\Windows",
+          HMRTOOL_NATIVE_EXECUTOR_ROOT: directory,
+          HMRTOOL_NATIVE_EXECUTOR_EPOCH: epochId,
+        },
+      },
+    ) as ChildProcessWithoutNullStreams;
+    childClose = closeObservation(child);
+    child.stderr.resume();
+    const protocol = new LineProtocol(child);
+    const ready = await protocol.nextLine(STARTUP_TIMEOUT_MS);
+    const fields = ready.split("\t");
+    if (fields.length !== 2 || fields[0] !== "READY" || fields[1] !== epochId) throw securityFailure();
+    const executorToken = {};
+    const epochState = {} as EpochState;
+    const epoch = Object.defineProperties(epochState, {
+      attemptId: {
+        configurable: false,
+        enumerable: true,
+        get(this: object): string { return assertEpoch(this, executorToken).attemptId; },
+      },
+    }) as unknown as InstallationEpoch;
+    const finalEpochState: EpochState = { publicValue: epoch, attemptId: epochId, executorToken, live: true };
+    epochStates.set(epoch, finalEpochState);
+    Object.freeze(epoch);
+    return new WindowsNativeMutationExecutor(child, epoch, finalEpochState, protocol);
+  } catch (error) {
+    if (child !== undefined) {
+      if (child.stdin !== null) child.stdin.destroy();
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      await childClose?.catch(() => undefined);
+    }
+    throw error instanceof ToolError ? error : securityFailure();
+  }
+}
+
+export async function openNativeMutationExecutor(installationDirectory: string): Promise<NativeMutationExecutor> {
+  try {
+    if (process.platform === "darwin") return await startNativeExecutor(installationDirectory);
+    if (process.platform === "win32") return await startWindowsNativeExecutor(installationDirectory);
+    throw securityFailure();
   } catch (error) {
     throw error instanceof ToolError ? error : securityFailure();
   }

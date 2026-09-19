@@ -69,6 +69,32 @@ test("Darwin native executor reserves without mutating and admits through its fi
   await executor.close();
 });
 
+const windows = { skip: process.platform !== "win32" };
+
+test("Windows native executor owns the fixed slot and preserves epoch fencing", windows, async (t) => {
+  const root = await temporaryInstallation(t);
+  const original = Uint8Array.from([31, 32, 33, 34]);
+  const mutation = prepareMutation(original);
+  original.fill(0x58);
+  const executor = await openNativeMutationExecutor(root);
+  t.after(() => executor.close());
+
+  await executor.reserve(mutation);
+  assert.deepEqual((await readdir(root)).sort(), [".update.lock"]);
+  const receipt = await executor.admit(mutation);
+  assert.equal(receipt.slot, "transaction");
+  assert.equal(receipt.epochId, executor.epoch.attemptId);
+  assert.deepEqual(await readFile(target(root)), Buffer.from([31, 32, 33, 34]));
+  await executor.close();
+
+  const successor = await openNativeMutationExecutor(root);
+  t.after(() => successor.close());
+  const next = prepareMutation(Uint8Array.from([35, 36]));
+  await successor.reserve(next);
+  await assert.rejects(successor.admit(next), { code: "UPDATE_SECURITY_ERROR" });
+  await successor.close();
+});
+
 test("prepared bytes are copied before asynchronous execution", darwin, async (t) => {
   const root = await temporaryInstallation(t);
   const original = Uint8Array.from([1, 2, 3, 4]);
