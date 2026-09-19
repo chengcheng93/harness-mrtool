@@ -82,9 +82,11 @@ public static class AnchoredNativeWriter {
  static Info Inspect(SafeFileHandle h) {
   Info i; if(h.IsInvalid || !GetFileInformationByHandle(h,out i)) throw new IOException(); return i;
  }
- public static bool Write(string directory,ulong dev,ulong ino,string name,long length) {
+ public static bool Write(string directory,string devText,string inoText,string name,string lengthText) {
   string stage="validate";
   try {
+   ulong dev,ino; long length;
+   if(devText==null || !UInt64.TryParse(devText,out dev) || inoText==null || !UInt64.TryParse(inoText,out ino) || lengthText==null || !Int64.TryParse(lengthText,out length)) throw new IOException();
    if(length<1 || length>268435456 || (name!="harness-mrtool" && name!="harness-mrtool.exe" && name!="harness-mrtool.exe.new" && name!=".harness-mrtool-install.json" && name!=".harness-mrtool-install.json.new")) throw new IOException();
    string root=Path.GetPathRoot(directory);
    if(root==null || root.Length!=3 || root[1]!=':' || root[2]!='\\' || !String.Equals(Path.GetFullPath(directory),directory,StringComparison.OrdinalIgnoreCase)) throw new IOException();
@@ -135,7 +137,7 @@ public static class AnchoredNativeWriter {
 '@ | Out-Null
 } catch { [Console]::Out.Write("ERR:add-type"+[char]10); exit 1 }
 try {
-  $ok = [AnchoredNativeWriter]::Write($env:HMR_ANCHOR_DIRECTORY,[ulong]$env:HMR_ANCHOR_DEV,[ulong]$env:HMR_ANCHOR_INO,$env:HMR_ANCHOR_NAME,[long]$env:HMR_ANCHOR_LENGTH)
+  $ok = [AnchoredNativeWriter]::Write($env:HMR_ANCHOR_DIRECTORY,$env:HMR_ANCHOR_DEV,$env:HMR_ANCHOR_INO,$env:HMR_ANCHOR_NAME,$env:HMR_ANCHOR_LENGTH)
 } catch { [Console]::Out.Write("ERR:invoke"+[char]10); exit 1 }
 if (-not $ok) { exit 1 }
 [Console]::Out.Write("OK"+[char]10)
