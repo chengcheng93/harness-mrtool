@@ -97,8 +97,9 @@ public static class AnchoredNativeWriter {
    if(root.Length!=3) throw new IOException();
    stage="path-root-format";
    if(root[1]!=':' || root[2]!='\\') throw new IOException();
-   stage="path-normalize";
-   if(!String.Equals(Path.GetFullPath(directory),directory,StringComparison.OrdinalIgnoreCase)) throw new IOException();
+   // Node has already required an absolute, resolved path. Windows may retain
+   // an 8.3 spelling while .NET normalizes it to a long spelling; the kernel
+   // handle/reparse and file-index checks below are the authority, not spelling.
    var pins=new List<SafeFileHandle>();
    try {
     stage="pin-ancestors";
