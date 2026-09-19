@@ -74,6 +74,26 @@ async function readFixedFile(path: string): Promise<{ readonly bytes: Uint8Array
   }
 }
 
+async function assertSafeInstallationRoot(root: string): Promise<void> {
+  const rootBefore = await lstat(root, { bigint: true }) as BigIntStats;
+  const physical = await realpath(root);
+  const rootAfter = await lstat(root, { bigint: true }) as BigIntStats;
+  if (!rootBefore.isDirectory() || rootBefore.isSymbolicLink() || !rootAfter.isDirectory() || rootAfter.isSymbolicLink() ||
+      !samePhysicalPath(physical, root) || !sameIdentity(rootBefore, rootAfter)) {
+    throw failure("unsafe-installation-root");
+  }
+}
+
+/** Validate the fixed managed root before any native mutation is admitted. */
+export async function validateWindowsInstallationRoot(installationDirectory: string): Promise<void> {
+  const root = absoluteRoot(installationDirectory);
+  try {
+    await assertSafeInstallationRoot(root);
+  } catch (error) {
+    throw error instanceof ToolError ? error : failure("unsafe-installation-root");
+  }
+}
+
 /**
  * Re-observes the fixed native transaction slot and binds it to the expected
  * plan. This is evidence only; it neither publishes canonical files nor
@@ -85,13 +105,7 @@ export async function observeWindowsInnerJournal(
 ): Promise<WindowsInnerJournalObservation> {
   const root = absoluteRoot(installationDirectory);
   try {
-    const rootBefore = await lstat(root, { bigint: true }) as BigIntStats;
-    const physical = await realpath(root);
-    const rootAfter = await lstat(root, { bigint: true }) as BigIntStats;
-    if (!rootBefore.isDirectory() || rootBefore.isSymbolicLink() || !rootAfter.isDirectory() || rootAfter.isSymbolicLink() ||
-        !samePhysicalPath(physical, root) || !sameIdentity(rootBefore, rootAfter)) {
-      throw failure("unsafe-installation-root");
-    }
+    await assertSafeInstallationRoot(root);
     const expected = encodeWindowsMutationPlan(expectedPlan);
     const file = await readFixedFile(resolve(root, WINDOWS_INNER_JOURNAL_FILENAME));
     if (file.bytes.length !== expected.length || file.bytes.some((byte, index) => byte !== expected[index])) {

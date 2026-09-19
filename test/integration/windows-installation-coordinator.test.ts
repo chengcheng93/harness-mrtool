@@ -86,3 +86,24 @@ test("rejects a plan drift before invoking native mutation authority", async () 
   }), { code: "UPDATE_SECURITY_ERROR" });
   assert.equal(reserved, false);
 });
+
+test("rejects an invalid installation root before native admission", async () => {
+  const current = preparedWithoutInner();
+  const plan = planFor(current);
+  let reserved = false;
+  const executor = {
+    epoch: { attemptId: "a".repeat(32) },
+    async reserve() { reserved = true; },
+    async admit() { throw new Error("must not admit"); },
+    async revoke() {},
+    async close() {},
+  };
+  const missing = resolve("/private/var/tmp", `windows-coordinator-missing-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  await assert.rejects(coordinateWindowsInnerJournal({
+    current,
+    installationDirectory: missing,
+    executor,
+    plan,
+  }), { code: "UPDATE_SECURITY_ERROR" });
+  assert.equal(reserved, false);
+});

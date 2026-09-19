@@ -5,7 +5,7 @@ import {
   validateWindowsMutationPlanForJournal,
 } from "./windows-installation-transition.ts";
 import type { InstallationJournal } from "./installation-journal.ts";
-import { observeWindowsInnerJournal, type WindowsInnerJournalObservation } from "./windows-inner-journal.ts";
+import { observeWindowsInnerJournal, validateWindowsInstallationRoot, type WindowsInnerJournalObservation } from "./windows-inner-journal.ts";
 import { admitWindowsMutationPlan } from "./windows-mutation-authority.ts";
 import type { WindowsMutationPlan } from "./windows-mutation-plan.ts";
 
@@ -42,6 +42,7 @@ export async function coordinateWindowsInnerJournal(
 ): Promise<WindowsInnerJournalCoordinationResult> {
   try {
     const current = validateWindowsMutationPlanForJournal(input.current, input.plan);
+    await validateWindowsInstallationRoot(input.installationDirectory);
     const admitted = await admitWindowsMutationPlan(input.executor, input.plan);
     const observation = await observeWindowsInnerJournal(input.installationDirectory, admitted.plan);
     const journal = attachWindowsInnerJournal(current, admitted.plan, observation);
