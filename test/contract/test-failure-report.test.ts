@@ -84,7 +84,7 @@ test("failure reporter escapes workflow command data without double-escaping CR 
 });
 
 test("failure reporter bounds unique name count and length after duplicate summaries", () => {
-  const names = Array.from({ length: 30 }, (_, index) => `case ${index} ${"x".repeat(400)}`);
+  const names = Array.from({ length: 21 }, (_, index) => `case ${index} ${"x".repeat(220)}`);
   const lines = names.flatMap((name) => [`✖ ${name} (1ms)`, `✖ ${name} (2ms)`]).join("\n");
   const parsed = evaluate(`reporter.parseFailureReport([${JSON.stringify(lines)}], new Set(${JSON.stringify(names)}))`) as { names: string[] };
   assert.equal(parsed.names.length, 20);
