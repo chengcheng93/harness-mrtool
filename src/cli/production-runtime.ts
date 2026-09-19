@@ -96,7 +96,7 @@ export interface ProductionReadOnlyDefaultOverrides {
    * Keep persistence and exact historical validation real; replace only trust bootstrap
    * and external transports for controlled embeddings and integration tests. */
   readonly historicalBundleDefaults?: Pick<DefaultHistoricalBundleLoaderOptions,
-    "trustConfig" | "channelTransport" | "channelUrl" | "releaseAssets">;
+    "trustConfig" | "channelTransport" | "channelUrl" | "releaseAssets" | "windowsAclVerifier">;
   readonly contextStore?: DefaultContextStore;
   readonly historicalMrBundleLoader?: ProductionHistoricalMrBundleLoader;
   readonly inputIo?: InputIo;
@@ -807,7 +807,7 @@ export function createProductionReadOnlyDefaults(
                 allowManualDescriptionDrift: input.allowManualDescriptionDrift === true,
                 receiptLoader: new VerificationReceiptStore({ stateDirectory: options.stateDirectory ?? defaultStateDirectory(),
                   ...(options.windowsAclVerifier === undefined ? {} : { windowsAclVerifier: options.windowsAclVerifier }) }),
-                bundleLoader: createDefaultHistoricalBundleLoader(options.currentBundle, { ...options.historicalBundleDefaults, stateDirectory: options.stateDirectory }),
+                bundleLoader: createDefaultHistoricalBundleLoader(options.currentBundle, { ...options.historicalBundleDefaults, stateDirectory: options.stateDirectory, ...(options.windowsAclVerifier === undefined ? {} : { windowsAclVerifier: options.windowsAclVerifier }) }),
               } }),
             }, {
               iid: mrIid!,

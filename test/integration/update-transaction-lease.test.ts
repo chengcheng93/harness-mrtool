@@ -194,8 +194,17 @@ test("leased load keeps root identity checks before stale-file cleanup", async (
       await mkdir(f.root, { mode: 0o700 });
       await writeFile(resolve(f.root, staleName), "do not clean replacement");
     } });
-    await assert.rejects(swapped.load(lease), { code: "UPDATE_SECURITY_ERROR" });
-    assert.equal(await readFile(resolve(f.root, staleName), "utf8"), "do not clean replacement");
+    if (process.platform === "win32") {
+      // The live Windows lock pins the state-root ancestors with no delete
+      // sharing, so the adversarial root rename is denied by the kernel before
+      // the replacement directory can be created. The operation still fails
+      // closed and cannot clean a file in the untouched root.
+      await assert.rejects(swapped.load(lease), { code: "INTERNAL_ERROR" });
+      await assert.rejects(readFile(resolve(f.root, staleName), "utf8"), { code: "ENOENT" });
+    } else {
+      await assert.rejects(swapped.load(lease), { code: "UPDATE_SECURITY_ERROR" });
+      assert.equal(await readFile(resolve(f.root, staleName), "utf8"), "do not clean replacement");
+    }
   });
 });
 

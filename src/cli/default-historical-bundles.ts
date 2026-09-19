@@ -1,7 +1,7 @@
 import type { HistoricalBundleLoader, VerificationBundleReference } from "../app/verify-mr.ts";
 import { validateTemplateBundle } from "../bundle/validate.ts";
 import { canonicalizeJson, copyJsonValue, sha256Utf8 } from "../contracts/jcs.ts";
-import { defaultStateDirectory } from "../platform/state-path.ts";
+import { defaultStateDirectory, type WindowsAclVerifier } from "../platform/state-path.ts";
 import type { ProcessLockProvider } from "../platform/process-lock.ts";
 import { copyTrustState, createTrustState, isCanonicalTemplateReleaseTag, updateSecurityError, type UpdateTrustState } from "../update/envelope.ts";
 import { createHistoricalBundleLoader, type HistoricalBundleReleaseAssetSource } from "../update/historical-bundle-loader.ts";
@@ -14,6 +14,7 @@ import type { TrustedBundleSelection } from "./commands/local.ts";
 
 export interface DefaultHistoricalBundleLoaderOptions {
   readonly stateDirectory?: string | undefined;
+  readonly windowsAclVerifier?: WindowsAclVerifier;
   readonly lockProvider?: ProcessLockProvider;
   /** Explicit in-process composition seams; never sourced from MR metadata or environment. */
   readonly trustConfig?: UpdateTrustConfig;
@@ -55,6 +56,7 @@ export function createDefaultHistoricalBundleLoader(
         stateDirectory: options.stateDirectory ?? defaultStateDirectory(),
         trustConfigSha256: updateTrustConfigSha256(trustConfig),
         bootstrapKeys: trustConfig.bootstrapKeys,
+        ...(options.windowsAclVerifier === undefined ? {} : { windowsAclVerifier: options.windowsAclVerifier }),
         ...(options.lockProvider === undefined ? {} : { lockProvider: options.lockProvider }),
       });
       const stored = await store.load();

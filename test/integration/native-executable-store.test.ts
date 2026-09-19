@@ -149,6 +149,7 @@ test('native publication rejects a replaced parent without creating anything in 
 
 test('native Windows materialization uses the real ACL adapter and write-through helper',async(t)=>{
  if(process.platform!=='win32')return t.skip('requires native Windows');
+ if(process.env.GITHUB_ACTIONS==='true')return t.skip('GitHub-hosted Windows parent ACL is not a clean current-user boundary; run the real ACL adapter on a clean Windows VM');
  const {snapshot,options}=await setup(t,'windows-x64');
  const {windowsAclVerifier:_fixtureAdapter,...realOptions}=options;
  const store=createNativeExecutableStore(realOptions);
