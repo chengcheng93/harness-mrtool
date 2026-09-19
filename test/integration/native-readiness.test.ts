@@ -171,7 +171,9 @@ for (const failure of ['nonzero', 'signal', 'stderr', 'garbage', 'bom', 'sea-fal
     await assert.rejects(verifyNativeReadiness(f.snapshot, {...f.options, nativeReadiness: {spawn: spawnProbe, timeoutMs: failure === 'timeout' ? 300 : 5000, maxOutputBytes: 4096}}), (error: any) => {
       assert.equal(error.code, 'UPDATE_SECURITY_ERROR'); assert.ok(!JSON.stringify(error).includes('secret-child-output')); return true;
     });
-    assert.ok(performance.now() - start < 7000); assert.equal(children.length > 0, failure !== 'spawn-throw'); assert.ok(closed.every(Boolean));
+    assert.ok(performance.now() - start < 7000, 'native-readiness:failure-timeout');
+    assert.equal(children.length > 0, failure !== 'spawn-throw', 'native-readiness:child-count');
+    assert.ok(closed.every(Boolean), 'native-readiness:child-close');
     for (const child of children) if (child.pid) assert.throws(() => process.kill(child.pid!, 0));
     await assert.rejects(access(cwd), {code: 'ENOENT'});
   });
