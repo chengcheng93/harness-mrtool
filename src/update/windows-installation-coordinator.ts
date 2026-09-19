@@ -42,7 +42,10 @@ export async function coordinateWindowsInnerJournal(
 ): Promise<WindowsInnerJournalCoordinationResult> {
   try {
     const current = validateWindowsMutationPlanForJournal(input.current, input.plan);
-    await validateWindowsInstallationRoot(input.installationDirectory);
+    const root = await validateWindowsInstallationRoot(input.installationDirectory);
+    if (root.dev !== current.roots.installation.dev || root.ino !== current.roots.installation.ino) {
+      throw failure("installation-root-identity-mismatch");
+    }
     const admitted = await admitWindowsMutationPlan(input.executor, input.plan);
     const observation = await observeWindowsInnerJournal(input.installationDirectory, admitted.plan);
     const journal = attachWindowsInnerJournal(current, admitted.plan, observation);

@@ -74,7 +74,12 @@ async function readFixedFile(path: string): Promise<{ readonly bytes: Uint8Array
   }
 }
 
-async function assertSafeInstallationRoot(root: string): Promise<void> {
+export interface WindowsInstallationRootIdentity {
+  readonly dev: string;
+  readonly ino: string;
+}
+
+async function assertSafeInstallationRoot(root: string): Promise<WindowsInstallationRootIdentity> {
   const rootBefore = await lstat(root, { bigint: true }) as BigIntStats;
   const physical = await realpath(root);
   const rootAfter = await lstat(root, { bigint: true }) as BigIntStats;
@@ -82,13 +87,14 @@ async function assertSafeInstallationRoot(root: string): Promise<void> {
       !samePhysicalPath(physical, root) || !sameIdentity(rootBefore, rootAfter)) {
     throw failure("unsafe-installation-root");
   }
+  return Object.freeze({ dev: String(rootAfter.dev), ino: String(rootAfter.ino) });
 }
 
 /** Validate the fixed managed root before any native mutation is admitted. */
-export async function validateWindowsInstallationRoot(installationDirectory: string): Promise<void> {
+export async function validateWindowsInstallationRoot(installationDirectory: string): Promise<WindowsInstallationRootIdentity> {
   const root = absoluteRoot(installationDirectory);
   try {
-    await assertSafeInstallationRoot(root);
+    return await assertSafeInstallationRoot(root);
   } catch (error) {
     throw error instanceof ToolError ? error : failure("unsafe-installation-root");
   }

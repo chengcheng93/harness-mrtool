@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, rm } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 import test from "node:test";
 
@@ -14,6 +14,16 @@ function preparedWithoutInner() {
   const fixture = journalFixture("windows-x64", "prepared");
   fixture.windows!.inner = null;
   fixture.slots = fixture.slots.filter((slot) => slot.name !== "windows-inner-journal");
+  return validateInstallationJournal(fixture);
+}
+
+async function preparedWithoutInnerAt(root: string) {
+  const fixture = journalFixture("windows-x64", "prepared");
+  fixture.windows!.inner = null;
+  fixture.slots = fixture.slots.filter((slot) => slot.name !== "windows-inner-journal");
+  const identity = await lstat(root, { bigint: true });
+  fixture.roots.installation = { dev: String(identity.dev), ino: String(identity.ino) };
+  fixture.roots.state = { dev: String(identity.dev), ino: String(identity.ino + 1n) };
   return validateInstallationJournal(fixture);
 }
 
@@ -49,7 +59,7 @@ test("coordinates native fixed-slot admission into one outer Windows inner-journ
   const executor = await openNativeMutationExecutor(root);
   t.after(() => executor.close());
 
-  const current = preparedWithoutInner();
+  const current = await preparedWithoutInnerAt(root);
   const plan = planFor(current);
   const result = await coordinateWindowsInnerJournal({
     current,
@@ -106,4 +116,30 @@ test("rejects an invalid installation root before native admission", async () =>
     plan,
   }), { code: "UPDATE_SECURITY_ERROR" });
   assert.equal(reserved, false);
+});
+
+test("rejects a native root whose identity is not bound to the outer journal", async () => {
+  const root = await mkdtemp(resolve("/private/var/tmp", "windows-coordinator-root-mismatch-"));
+  await chmod(root, 0o700);
+  try {
+    const current = preparedWithoutInner();
+    const plan = planFor(current);
+    let reserved = false;
+    const executor = {
+      epoch: { attemptId: "a".repeat(32) },
+      async reserve() { reserved = true; },
+      async admit() { throw new Error("must not admit"); },
+      async revoke() {},
+      async close() {},
+    };
+    await assert.rejects(coordinateWindowsInnerJournal({
+      current,
+      installationDirectory: root,
+      executor,
+      plan,
+    }), { code: "UPDATE_SECURITY_ERROR" });
+    assert.equal(reserved, false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
