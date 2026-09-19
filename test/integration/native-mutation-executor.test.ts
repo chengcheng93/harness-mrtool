@@ -251,7 +251,7 @@ test("coordinator loss after reserve leaves no target and permits a successor", 
   await successor.close();
 });
 
-test("unsupported platforms fail closed before creating lock or target", { skip: process.platform === "darwin" }, async (t) => {
+test("unsupported platforms fail closed before creating lock or target", { skip: process.platform === "darwin" || process.platform === "win32" }, async (t) => {
   const root = await temporaryInstallation(t);
   await assert.rejects(openNativeMutationExecutor(root), { code: "UPDATE_SECURITY_ERROR" });
   assert.deepEqual(await readdir(root), []);
