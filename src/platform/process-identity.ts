@@ -116,6 +116,54 @@ export const systemProcessIdentityProvider: ProcessIdentityProvider = {
   inspect: inspectSystemProcess,
 };
 
+export interface ProcessExitWaitOptions {
+  readonly provider?: ProcessIdentityProvider;
+  readonly sleep?: (milliseconds: number) => Promise<void>;
+  readonly pollMs?: number;
+  readonly timeoutMs?: number;
+}
+
+/**
+ * Waits for one exact process instance to exit. A PID that is reused by a
+ * different process is never treated as the parent becoming alive again.
+ * Unknown inspection is fail-closed because a Windows persistence helper must
+ * not mutate while the old executable may still be running.
+ */
+export async function waitForProcessExit(
+  expected: ProcessIdentity,
+  options: ProcessExitWaitOptions = {},
+): Promise<void> {
+  if (expected === null || typeof expected !== "object" || !validPid(expected.pid) ||
+      validStartKey(expected.startKey) === undefined) {
+    throw new Error("process identity unavailable");
+  }
+  const timeoutMs = options.timeoutMs ?? 30_000;
+  const pollMs = options.pollMs ?? 50;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 300_000 ||
+      !Number.isSafeInteger(pollMs) || pollMs < 1 || pollMs > 10_000) {
+    throw new Error("process exit wait bounds are invalid");
+  }
+  const provider = options.provider ?? systemProcessIdentityProvider;
+  const sleep = options.sleep ?? ((milliseconds: number) => new Promise<void>((resolvePromise) => {
+    setTimeout(resolvePromise, milliseconds);
+  }));
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    let state: ProcessIdentityStatus;
+    try {
+      state = await provider.inspect(expected.pid);
+    } catch {
+      throw new Error("process identity unavailable");
+    }
+    if (state.state === "dead") return;
+    if (state.state === "unknown") throw new Error("process identity unavailable");
+    if (state.startKey !== expected.startKey) throw new Error("process identity changed");
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new Error("process exit wait timed out");
+    await sleep(Math.min(pollMs, remaining));
+  }
+}
+
 let currentIdentityPromise: Promise<ProcessIdentity> | undefined;
 
 function currentProcessIdentity(): Promise<ProcessIdentity> {
