@@ -36,6 +36,7 @@ export interface ProductionReleaseAssetRequest extends ProductionReleaseRequest 
 export interface ProductionReleaseSource {
   readonly downloadAsset: (request: ProductionReleaseAssetRequest) => Promise<Uint8Array>;
   readonly downloadTemplateReceipt: (request: ProductionReleaseRequest) => Promise<Uint8Array>;
+  readonly downloadSkillReceipt: (request: ProductionReleaseRequest) => Promise<Uint8Array>;
 }
 
 function fail(): never {
@@ -191,6 +192,14 @@ export function createProductionReleaseSource(
     async downloadTemplateReceipt(request: ProductionReleaseRequest): Promise<Uint8Array> {
       try {
         if (component(request.tag) !== "templates") fail();
+        return await download(releaseUrl(request, RECEIPT_NAME), RECEIPT_LIMIT, fetcher);
+      } catch {
+        return fail();
+      }
+    },
+    async downloadSkillReceipt(request: ProductionReleaseRequest): Promise<Uint8Array> {
+      try {
+        if (component(request.tag) !== "skill") fail();
         return await download(releaseUrl(request, RECEIPT_NAME), RECEIPT_LIMIT, fetcher);
       } catch {
         return fail();

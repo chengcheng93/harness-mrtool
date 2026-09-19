@@ -49,6 +49,7 @@ import {
 import { createUpdaterCommandServices, createInstallationCommandServices } from "./cli/commands/updater.ts";
 import { createProductionChannelCheckHandler, type ProductionChannelCommandDefaults } from "./cli/commands/production-channel.ts";
 import { createSkillCommandServices, type SkillCommandService } from "./cli/commands/skill.ts";
+import { createProductionSkillCommandService } from "./skill/production-service.ts";
 import type { UpdateService } from "./update/service.ts";
 import type { ProductionInstallationService } from "./update/managed-installation-types.ts";
 import { defaultStateDirectory } from "./platform/state-path.ts";
@@ -133,6 +134,27 @@ function lazyDefaultUpdaterCommandServices(
   });
 }
 
+function lazyDefaultSkillCommandServices(
+  channelDefaults: ProductionChannelCommandDefaults = {},
+): Pick<ProductionCommandServices, "skillInstall" | "skillActivate" | "skillStatus"> {
+  let resolved: SkillCommandService | undefined;
+  function service(): SkillCommandService {
+    if (resolved === undefined) {
+      resolved = createProductionSkillCommandService({
+        ...channelDefaults,
+        cliVersion,
+        stateDirectory: channelDefaults.stateDirectory ?? defaultStateDirectory(),
+      });
+    }
+    return resolved;
+  }
+  return createSkillCommandServices({
+    install: (path) => service().install(path),
+    activate: (version, path) => service().activate(version, path),
+    status: () => service().status(),
+  });
+}
+
 function lazyDefaultInstallationCommandServices(
   channelDefaults: ProductionChannelCommandDefaults = {},
 ): Pick<ProductionCommandServices, "selfUpdateApply" | "selfUpdateRollback"> {
@@ -211,7 +233,7 @@ async function publicCommandHandlers(
         ? lazyDefaultInstallationCommandServices(dependencies.updateChannelDefaults)
         : createInstallationCommandServices(dependencies.installationService)),
       ...(dependencies.skillService === undefined
-        ? {}
+        ? lazyDefaultSkillCommandServices(dependencies.updateChannelDefaults)
         : createSkillCommandServices(dependencies.skillService)),
       ...createManualCommandServices({
         cliVersion,

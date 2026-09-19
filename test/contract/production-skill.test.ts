@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { parseCliInvocation } from "../../src/cli/program.ts";
 import { createSkillCommandServices, type SkillCommandService } from "../../src/cli/commands/skill.ts";
-import type { SkillActivationResult, SkillStageResult, SkillStatus } from "../../src/skill/manager.ts";
+import type { SkillActivationResult, SkillInvocationPin, SkillStageResult, SkillStatus } from "../../src/skill/manager.ts";
 import { runProductionMain } from "../../src/production-main.ts";
 
 const status: SkillStatus = Object.freeze({
@@ -97,6 +97,26 @@ test("Skill status is read-only and returns no installation path or credential m
     ? result.output.data.command
     : undefined, "skill.status");
   assert.equal(JSON.stringify(result).includes("C:\\Skills"), false);
+});
+
+
+test("Skill command adapter forwards the loaded Skill invocation pin", async () => {
+  let received: SkillInvocationPin | undefined;
+  const service: SkillCommandService = {
+    install: async () => stage,
+    activate: async () => activation,
+    status: async (pin) => {
+      received = pin;
+      return status;
+    },
+  };
+  const handlers = createSkillCommandServices(service);
+  const invocation = parseCliInvocation([
+    "skill", "status", "--client", "codex-skill", "--client-version", "1.2.3",
+    "--skill-protocol", "1", "--output", "json",
+  ]);
+  await handlers.skillStatus(invocation);
+  assert.deepEqual(received, { loadedSkillVersion: "1.2.3", loadedSkillProtocol: 1 });
 });
 
 test("production main uses the injected Skill service for status", async () => {

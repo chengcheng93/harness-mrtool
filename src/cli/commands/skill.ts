@@ -1,11 +1,21 @@
 import type { CliCommandExecution } from "../execute.ts";
 import type { CliInvocation } from "../program.ts";
-import type { SkillActivationResult, SkillStageResult, SkillStatus } from "../../skill/manager.ts";
+import type { SkillActivationResult, SkillInvocationPin, SkillStageResult, SkillStatus } from "../../skill/manager.ts";
 
 export interface SkillCommandService {
-  readonly install: (path: string) => Promise<SkillStageResult>;
-  readonly activate: (version: string, path: string) => Promise<SkillActivationResult>;
-  readonly status: () => Promise<SkillStatus>;
+  readonly install: (path: string, pin?: SkillInvocationPin) => Promise<SkillStageResult>;
+  readonly activate: (version: string, path: string, pin?: SkillInvocationPin) => Promise<SkillActivationResult>;
+  readonly status: (pin?: SkillInvocationPin) => Promise<SkillStatus>;
+}
+
+function invocationPin(invocation: CliInvocation): SkillInvocationPin | undefined {
+  const version = invocation.options.clientVersion;
+  const protocol = invocation.options.skillProtocol;
+  if (version === null && protocol === null) return undefined;
+  if (version === null || protocol === null) {
+    throw new TypeError("Skill invocation pin is incomplete");
+  }
+  return Object.freeze({ loadedSkillVersion: version, loadedSkillProtocol: protocol });
 }
 
 const STATUS_FIELDS = [
@@ -65,17 +75,17 @@ export function createSkillCommandServices(service: SkillCommandService): {
   return Object.freeze({
     skillInstall: async (invocation: CliInvocation): Promise<CliCommandExecution> => {
       if (invocation.command.kind !== "skill.install") throw new TypeError("Skill install invocation is invalid");
-      const staged = await service.install(invocation.command.path);
+      const staged = await service.install(invocation.command.path, invocationPin(invocation));
       return execution("skill.install", staged);
     },
     skillActivate: async (invocation: CliInvocation): Promise<CliCommandExecution> => {
       if (invocation.command.kind !== "skill.activate") throw new TypeError("Skill activate invocation is invalid");
-      const activated = await service.activate(invocation.command.version, invocation.command.path);
+      const activated = await service.activate(invocation.command.version, invocation.command.path, invocationPin(invocation));
       return execution("skill.activate", activated);
     },
     skillStatus: async (invocation: CliInvocation): Promise<CliCommandExecution> => {
       if (invocation.command.kind !== "skill.status") throw new TypeError("Skill status invocation is invalid");
-      return execution("skill.status", await service.status());
+      return execution("skill.status", await service.status(invocationPin(invocation)));
     },
   });
 }

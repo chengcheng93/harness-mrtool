@@ -804,9 +804,10 @@ export class SkillManager {
     return this.statusFor(normalized);
   }
 
-  async stage(release: SkillRelease): Promise<SkillStageResult> {
+  async stage(release: SkillRelease, pin?: SkillInvocationPin): Promise<SkillStageResult> {
     await this.ensureReady();
     const verifier = this.requireReleaseVerifier();
+    const normalizedPin = pin === undefined ? undefined : this.pinInvocation(pin);
     try {
       await verifier.verify(release);
     } catch {
@@ -821,7 +822,7 @@ export class SkillManager {
           canonicalizeJson(normalized.manifest as unknown as JsonValue)) {
         fail("UPDATE_SECURITY_ERROR", "Skill release metadata is invalid");
       }
-      const status = await this.statusFor(undefined);
+      const status = await this.statusFor(normalizedPin);
       return Object.freeze({ ...status, stagedPath: existing.root });
     }
     const temporary = resolve(this.stagingPath, `${TEMP_PREFIX}${randomSuffix()}`);
@@ -842,7 +843,7 @@ export class SkillManager {
       if (error instanceof ToolError) throw error;
       fail("INTERNAL_ERROR", "Skill staging failed");
     }
-    const status = await this.statusFor(undefined);
+    const status = await this.statusFor(normalizedPin);
     return Object.freeze({ ...status, stagedPath: target });
   }
 
