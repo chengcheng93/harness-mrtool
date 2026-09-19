@@ -350,6 +350,10 @@ function launch(value: unknown): InstallationLaunchEvidence {
   }
   return result;
 }
+export function validateInstallationLaunchEvidence(value: unknown): InstallationLaunchEvidence {
+  try { return launch(value); } catch { return fail(); }
+}
+
 function inner(value: unknown): InstallationInnerEvidence {
   const item = record(value, ["attemptId", "transactionId", "roots", "previousTupleSha256", "nextTupleSha256", "previousNativeSha256",
     "nextNativeSha256", "slot", "identity", "sha256", "size"]);
