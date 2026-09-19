@@ -155,19 +155,25 @@ function lazyDefaultSkillCommandServices(
   });
 }
 
+function createDefaultInstallationService(
+  channelDefaults: ProductionChannelCommandDefaults = {},
+): ProductionInstallationService {
+  return createProductionInstallationService({
+    ...channelDefaults,
+    stateDirectory: channelDefaults.stateDirectory ?? defaultStateDirectory(),
+    // In a packaged SEA, process.execPath is the installed native binary.
+    // Development invocations therefore fail closed at the canonical
+    // installation verification gate instead of mutating the Node runtime.
+    installationDirectory: dirname(resolve(process.execPath)),
+  });
+}
+
 function lazyDefaultInstallationCommandServices(
   channelDefaults: ProductionChannelCommandDefaults = {},
 ): Pick<ProductionCommandServices, "selfUpdateRepair" | "selfUpdateApply" | "selfUpdateRollback"> {
   let resolved: ReturnType<typeof createInstallationCommandServices> | undefined;
   function service(): ReturnType<typeof createInstallationCommandServices> {
-    resolved ??= createInstallationCommandServices(createProductionInstallationService({
-      ...channelDefaults,
-      stateDirectory: channelDefaults.stateDirectory ?? defaultStateDirectory(),
-      // In a packaged SEA, process.execPath is the installed native binary.
-      // Development invocations therefore fail closed at the canonical
-      // installation verification gate instead of mutating the Node runtime.
-      installationDirectory: dirname(resolve(process.execPath)),
-    }));
+    resolved ??= createInstallationCommandServices(createDefaultInstallationService(channelDefaults));
     return resolved;
   }
   return Object.freeze({
@@ -374,6 +380,21 @@ async function executeCliText(
   }
 }
 
+async function recoverInstallationBeforePublicInvocation(
+  dependencies: ProductionMainDependencies,
+  commandKind: Awaited<ReturnType<typeof parseCliInvocation>>["command"]["kind"],
+): Promise<void> {
+  // The explicit repair command owns its single recovery call. All other
+  // public commands must recover a durable handoff before ordinary work.
+  if (commandKind === "self-update.repair") return;
+  const service = dependencies.installationService ?? (
+    typeof __HARNESS_MRTOOL_VERSION__ === "string"
+      ? createDefaultInstallationService(dependencies.updateChannelDefaults)
+      : undefined
+  );
+  await service?.recover();
+}
+
 export async function runProductionMain(
   arguments_: readonly string[],
   dependencies: ProductionMainDependencies = {},
@@ -431,6 +452,19 @@ export async function runProductionMain(
       }
       return textFailure(error, stderr);
     }
+  }
+
+  try {
+    const parsed = parseCliInvocation(sanitizedArguments);
+    await recoverInstallationBeforePublicInvocation(dependencies, parsed.command.kind);
+  } catch (error) {
+    if (requestsJsonOutput(sanitizedArguments)) {
+      return (await new CliJsonOutput(
+        { cliVersion },
+        jsonOutputSink(stdout),
+      ).failure(error)).exitCode;
+    }
+    return textFailure(error, stderr);
   }
 
   let handlers: CliCommandHandlers;
