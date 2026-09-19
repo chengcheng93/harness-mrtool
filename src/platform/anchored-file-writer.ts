@@ -150,7 +150,7 @@ async function runHelper(executable: string, args: string[], env: NodeJS.Process
       if (ok) done();
       else {
         const diagnostic = /^ERR:[a-z-]{1,32}$/u.exec(output.trim())?.[0];
-        reject(failure(diagnostic === undefined ? 'anchored write failed' : `windows-helper:${diagnostic.slice(4)}`));
+        reject(failure(diagnostic === undefined ? 'windows-helper:unavailable' : `windows-helper:${diagnostic.slice(4)}`));
       }
     }
     function abort() {
