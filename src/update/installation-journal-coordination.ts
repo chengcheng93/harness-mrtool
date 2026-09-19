@@ -1,5 +1,7 @@
 import { randomBytes } from "node:crypto";
 
+import { ToolError } from "../contracts/errors.ts";
+
 import { canonicalizeJson } from "../contracts/jcs.ts";
 import { sha256Utf8 } from "../contracts/jcs.ts";
 import { advanceInstallationJournal } from "./installation-journal-transition.ts";
@@ -13,6 +15,15 @@ import {
 
 function randomId(): string {
   return randomBytes(16).toString("hex");
+}
+
+function failure(actual: string): ToolError<"UPDATE_SECURITY_ERROR"> {
+  return new ToolError("UPDATE_SECURITY_ERROR", "installation journal transition is unsafe", {
+    field: "installationJournal",
+    expected: "a contiguous phase transition with a settled Windows handoff",
+    actual,
+    safeNextStep: "Preserve the installation journal and run self-update repair.",
+  });
 }
 
 function terminalDigest(journal: InstallationJournal): string {
@@ -56,6 +67,22 @@ export function advanceInstallationJournalPhase(
   const journal = validateInstallationJournal(current);
   const revision = journal.revision + 1;
   const operation = createInstallationOperationEvidence(journal, revision, journal.control.authorityEpoch + 1);
+  const currentLaunch = journal.windows?.launch ?? null;
+  if (currentLaunch !== null &&
+      ["publish-intent", "canonical-published", "marker-published", "commit-intent", "committed"].includes(phase) &&
+      (currentLaunch.state !== "completed" || currentLaunch.settlement.state !== "settled")) {
+    throw failure("windows persistence launch is not settled");
+  }
+  const windows = journal.windows === null || currentLaunch === null
+    ? journal.windows
+    : Object.freeze({
+        ...journal.windows,
+        launch: Object.freeze({
+          ...currentLaunch,
+          authorityEpoch: operation.authorityEpoch,
+          expectedRevision: revision,
+        }),
+      });
   const candidate: InstallationJournal = {
     ...journal,
     revision,
@@ -66,6 +93,7 @@ export function advanceInstallationJournalPhase(
       authorityEpoch: operation.authorityEpoch,
       operations: Object.freeze([...journal.control.operations, operation]),
     }),
+    windows,
     terminalEvidenceSha256: null,
   };
   const withTerminal = ["committed", "aborted", "retention-transfer"].includes(phase)

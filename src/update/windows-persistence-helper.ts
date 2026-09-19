@@ -32,10 +32,7 @@ import {
   writeWindowsPersistenceDescriptor,
   WINDOWS_LAUNCH_DESCRIPTOR_FILENAME,
 } from "./windows-persistence-handoff.ts";
-import type {
-  InstallationJournal,
-  InstallationProcessIdentity,
-} from "./installation-journal.ts";
+import { validateInstallationJournal, type InstallationJournal, type InstallationProcessIdentity } from "./installation-journal.ts";
 import {
   publishManagedWindowsCandidate,
   rehydrateAuthenticatedManagedWindowsCandidate,
@@ -76,6 +73,61 @@ function helperPath(installationDirectory: string, launchId: string): string {
   const root = absolute(installationDirectory, "installation");
   if (!/^[a-f0-9]{32}$/u.test(launchId)) throw failure("launch-id-invalid");
   return resolve(root, `${HELPER_PREFIX}${launchId}.exe`);
+}
+
+export type WindowsPersistenceRecoveryAction =
+  | "settle-admitted"
+  | "resume-publication"
+  | "resume-commit"
+  | "cleanup-committed";
+
+function recoveryFailure(actual: string): ToolError<"UPDATE_SECURITY_ERROR"> {
+  return new ToolError("UPDATE_SECURITY_ERROR", "windows persistence recovery is unsafe", {
+    field: "update.windowsHelper.recovery",
+    expected: "a bounded, contiguous recovery phase for one admitted Windows handoff",
+    actual,
+    safeNextStep: "Preserve the installation journal and run self-update repair.",
+  });
+}
+
+/**
+ * Classify only durable, already-validated handoff states. This is a pure
+ * decision point: it performs no I/O and grants no mutation authority. The
+ * caller must still re-observe every bound before taking the returned step.
+ */
+export function classifyWindowsPersistenceRecovery(
+  value: unknown,
+): WindowsPersistenceRecoveryAction {
+  try {
+    const journal = validateInstallationJournal(value);
+    if (journal.platform !== "windows-x64" || journal.windows === null || journal.windows.launch === null) {
+      throw recoveryFailure("not-windows-handoff");
+    }
+    const launch = journal.windows.launch;
+    if (journal.phase === "execution-pending") {
+      if (launch.state === "admitted" && launch.settlement.state === "unsettled") return "settle-admitted";
+      if (launch.state === "completed" && launch.settlement.state === "settled") return "resume-publication";
+      throw recoveryFailure("execution-pending-launch-state");
+    }
+    if (["publish-intent", "canonical-published", "marker-published"].includes(journal.phase)) {
+      if (launch.state !== "completed" || launch.settlement.state !== "settled") throw recoveryFailure("publication-launch-state");
+      return "resume-publication";
+    }
+    if (journal.phase === "commit-intent") {
+      if (launch.state !== "completed" || launch.settlement.state !== "settled") throw recoveryFailure("commit-launch-state");
+      return "resume-commit";
+    }
+    if (journal.phase === "committed") {
+      if (launch.state !== "completed" || launch.settlement.state !== "settled" || journal.outcome !== "next") {
+        throw recoveryFailure("committed-launch-state");
+      }
+      return "cleanup-committed";
+    }
+    throw recoveryFailure(`phase:${journal.phase}`);
+  } catch (error) {
+    if (error instanceof ToolError) throw error;
+    throw recoveryFailure("malformed-journal");
+  }
 }
 
 function childLaunchEvidence(
@@ -240,6 +292,10 @@ function sameIdentity(left: { readonly dev: string; readonly ino: string }, righ
   return left.dev === right.dev && left.ino === right.ino;
 }
 
+function sameProcessIdentity(left: InstallationProcessIdentity, right: InstallationProcessIdentity): boolean {
+  return left.pid === right.pid && left.startKey === right.startKey && left.launchNonce === right.launchNonce;
+}
+
 interface WindowsPersistenceSettlementInput {
   readonly stateDirectory: string;
   readonly installationDirectory: string;
@@ -252,68 +308,105 @@ async function settleWindowsPersistence(input: WindowsPersistenceSettlementInput
   const { stateDirectory, installationDirectory, descriptor, decoded, child } = input;
   await withUpdateLock(stateDirectory, async (lease) => {
     const store = createInstallationJournalStore(stateDirectory);
-    const journal = await store.read();
+    let journal = await store.read();
     if (journal === null) throw failure("helper-journal-missing");
+    const action = classifyWindowsPersistenceRecovery(journal);
     const launch = journal.windows?.launch;
     const slot = journal.slots.find((item) => item.name === "launch-descriptor");
-    if (journal.platform !== "windows-x64" || journal.phase !== "execution-pending" ||
-        launch === null || launch === undefined || launch.state !== "admitted" ||
-        slot === undefined || slot.state !== "created" || launch.launchId !== decoded.launchId ||
-        launch.reservationId !== decoded.reservationId || launch.attemptId !== decoded.attemptId ||
-        launch.transactionId !== decoded.transactionId || launch.expectedRevision !== journal.revision ||
-        launch.parent.pid !== decoded.parent.pid || launch.parent.startKey !== decoded.parent.startKey ||
-        launch.parent.launchNonce !== decoded.parent.launchNonce || launch.child === null ||
+    if (launch === null || launch === undefined || slot === undefined || slot.state !== "created" ||
+        launch.launchId !== decoded.launchId || launch.reservationId !== decoded.reservationId ||
+        launch.attemptId !== decoded.attemptId || launch.transactionId !== decoded.transactionId ||
+        launch.expectedRevision !== journal.revision || launch.parent.pid !== decoded.parent.pid ||
+        launch.parent.startKey !== decoded.parent.startKey || launch.parent.launchNonce !== decoded.parent.launchNonce ||
         launch.descriptorSha256 !== descriptor.sha256 || !sameIdentity(slot.identity, descriptor.identity) ||
-        launch.child.pid !== child.pid || launch.child.startKey !== child.startKey ||
-        launch.child.launchNonce !== child.launchNonce) throw failure("helper-journal-mismatch");
+        launch.child === null || !sameProcessIdentity(launch.child, child)) {
+      throw failure("helper-journal-mismatch");
+    }
     const roots = await validateWindowsInstallationRoot(installationDirectory);
-    if (String(roots.dev) !== journal.roots.installation.dev || String(roots.ino) !== journal.roots.installation.ino) throw failure("helper-root-mismatch");
+    if (String(roots.dev) !== journal.roots.installation.dev || String(roots.ino) !== journal.roots.installation.ino) {
+      throw failure("helper-root-mismatch");
+    }
 
     const verifier = createReleaseSetSnapshotVerifier({ platform: "windows-x64" });
     const cache = new UpdateCache({ stateDirectory, verifySnapshot: verifier });
     const staged = await cache.loadStagedReleaseSet(journal.next, lease);
     if (staged === null) throw failure("helper-staged-release-missing");
-    const stage = await rehydrateAuthenticatedManagedWindowsCandidate({
-      installationDirectory,
-      snapshot: staged,
-      platform: "windows-x64",
-    });
-    await verifyManagedWindowsStage(stage);
-    const completedLaunch = Object.freeze({
-      ...launch,
-      authorityEpoch: journal.control.authorityEpoch + 1,
-      expectedRevision: journal.revision + 1,
-      child: Object.freeze({ ...child }),
-      state: "completed" as const,
-      exitCode: 0,
-      settlement: sealInstallationSettlement({
-        state: "settled",
-        launchId: launch.launchId,
-        reservationId: launch.reservationId,
-        descriptorSha256: launch.descriptorSha256,
-        targetIdentity: launch.targetIdentity,
-        parent: launch.parent,
-        child,
-      }),
-    });
-    let next = advanceWindowsLaunchInJournal(journal, completedLaunch);
-    await store.write(next);
-    next = advanceInstallationJournalPhase(next, "publish-intent", null);
-    await store.write(next);
-    await publishManagedWindowsCandidate(stage);
-    next = advanceInstallationJournalPhase(next, "canonical-published", null);
-    await store.write(next);
-    next = advanceInstallationJournalPhase(next, "marker-published", null);
-    await store.write(next);
-    next = advanceInstallationJournalPhase(next, "commit-intent", null);
-    await store.write(next);
-    const committed = await cache.commitStagedReleaseSet(staged.record, lease);
-    if (committed === null) throw failure("helper-cache-commit-missing");
-    const observed = await verifyInstalledRelease(staged, { stateDirectory, installationDirectory, platform: "windows-x64" }, lease);
-    if (observed.releaseSetId !== staged.record.releaseSetId || observed.cliVersion !== staged.record.cliVersion) throw failure("helper-installed-observation-mismatch");
-    next = advanceInstallationJournalPhase(next, "committed", "next");
-    await store.write(next);
-    await store.remove();
+
+    if (action === "settle-admitted") {
+      const stage = await rehydrateAuthenticatedManagedWindowsCandidate({
+        installationDirectory,
+        snapshot: staged,
+        platform: "windows-x64",
+        repairMissingStage: true,
+      });
+      await verifyManagedWindowsStage(stage);
+      const completedLaunch = Object.freeze({
+        ...launch,
+        authorityEpoch: journal.control.authorityEpoch + 1,
+        expectedRevision: journal.revision + 1,
+        child: Object.freeze({ ...child }),
+        state: "completed" as const,
+        exitCode: 0,
+        settlement: sealInstallationSettlement({
+          state: "settled",
+          launchId: launch.launchId,
+          reservationId: launch.reservationId,
+          descriptorSha256: launch.descriptorSha256,
+          targetIdentity: launch.targetIdentity,
+          parent: launch.parent,
+          child,
+        }),
+      });
+      journal = advanceWindowsLaunchInJournal(journal, completedLaunch);
+      await store.write(journal);
+    }
+
+    if (journal.phase === "execution-pending") {
+      journal = advanceInstallationJournalPhase(journal, "publish-intent", null);
+      await store.write(journal);
+    }
+
+    if (["publish-intent", "canonical-published", "marker-published"].includes(journal.phase)) {
+      const stage = await rehydrateAuthenticatedManagedWindowsCandidate({
+        installationDirectory,
+        snapshot: staged,
+        platform: "windows-x64",
+        repairMissingStage: true,
+      });
+      await verifyManagedWindowsStage(stage);
+      await publishManagedWindowsCandidate(stage);
+      if (journal.phase === "publish-intent") {
+        journal = advanceInstallationJournalPhase(journal, "canonical-published", null);
+        await store.write(journal);
+      }
+      if (journal.phase === "canonical-published") {
+        journal = advanceInstallationJournalPhase(journal, "marker-published", null);
+        await store.write(journal);
+      }
+      if (journal.phase === "marker-published") {
+        journal = advanceInstallationJournalPhase(journal, "commit-intent", null);
+        await store.write(journal);
+      }
+    }
+
+    if (journal.phase === "commit-intent") {
+      const committed = await cache.commitStagedReleaseSet(staged.record, lease);
+      if (committed === null) throw failure("helper-cache-commit-missing");
+      const observed = await verifyInstalledRelease(staged, { stateDirectory, installationDirectory, platform: "windows-x64" }, lease);
+      if (observed.releaseSetId !== staged.record.releaseSetId || observed.cliVersion !== staged.record.cliVersion) {
+        throw failure("helper-installed-observation-mismatch");
+      }
+      journal = advanceInstallationJournalPhase(journal, "committed", "next");
+      await store.write(journal);
+    }
+
+    if (journal.phase === "committed") {
+      const observed = await verifyInstalledRelease(staged, { stateDirectory, installationDirectory, platform: "windows-x64" }, lease);
+      if (observed.releaseSetId !== staged.record.releaseSetId || observed.cliVersion !== staged.record.cliVersion) {
+        throw failure("helper-committed-observation-mismatch");
+      }
+      await store.remove();
+    }
   });
 }
 
@@ -376,9 +469,14 @@ export async function recoverWindowsPersistence(
   const pending = await withUpdateLock(stateDirectory, async (lease) => {
     const store = createInstallationJournalStore(stateDirectory);
     const journal = await store.read();
-    if (journal === null || journal.phase !== "execution-pending" || journal.windows?.launch === null || journal.windows?.launch === undefined) return null;
-    if (journal.windows.launch.launchId !== decoded.launchId || journal.windows.launch.reservationId !== decoded.reservationId) throw failure("repair-descriptor-mismatch");
-    return Object.freeze({ child: journal.windows.launch.child });
+    if (journal === null) return null;
+    classifyWindowsPersistenceRecovery(journal);
+    const launch = journal.windows?.launch;
+    if (launch === null || launch === undefined || launch.launchId !== decoded.launchId ||
+        launch.reservationId !== decoded.reservationId || launch.child === null) {
+      throw failure("repair-descriptor-mismatch");
+    }
+    return Object.freeze({ child: launch.child });
   });
   if (pending === null || pending.child === null) throw failure("repair-launch-missing");
   const parent = await systemProcessIdentityProvider.inspect(decoded.parent.pid);

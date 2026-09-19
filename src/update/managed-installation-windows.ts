@@ -177,6 +177,9 @@ export interface AuthenticatedManagedWindowsStageInput extends ReleaseSnapshotOp
   readonly installationDirectory: string;
   readonly snapshot: ReleaseSetSnapshot;
   readonly windowsAclVerifier?: WindowsAclVerifier;
+  /** Repair only missing private stage slots after a process restart. Existing
+   * unexpected entries are never replaced or deleted by this option. */
+  readonly repairMissingStage?: boolean;
 }
 
 export interface ManagedWindowsStage {
@@ -211,6 +214,30 @@ async function assertStage(stage: ManagedWindowsStage): Promise<WindowsStageStat
   await fileIdentity(stage.stagedExecutablePath, state.stagedExecutableIdentity);
   await fileIdentity(stage.stagedMarkerPath, state.stagedMarkerIdentity);
   return state;
+}
+
+async function pathIsMissing(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return false;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
+    throw error;
+  }
+}
+
+async function createMissingStageSlot(
+  root: string,
+  rootIdentity: FileIdentity,
+  name: "harness-mrtool.exe.new" | ".harness-mrtool-install.json.new",
+  bytes: Uint8Array,
+): Promise<void> {
+  await writeAnchoredFile({
+    directory: root,
+    expectedIdentity: { dev: rootIdentity.dev, ino: rootIdentity.ino },
+    name,
+    bytes,
+  });
 }
 
 export async function stageAuthenticatedManagedWindowsCandidate(
@@ -271,8 +298,18 @@ export async function rehydrateAuthenticatedManagedWindowsCandidate(
     const markerSha256 = createHash("sha256").update(marker).digest("hex");
     await ensurePrivateStateDirectory(root, input.windowsAclVerifier === undefined ? {} : { windowsAclVerifier: input.windowsAclVerifier });
     const rootIdentity = await directoryIdentity(root);
-    const stagedExecutableIdentity = await fileIdentity(resolve(root, STAGED_EXECUTABLE_NAME));
-    const stagedMarkerIdentity = await fileIdentity(resolve(root, STAGED_MARKER_NAME));
+    const stagedExecutablePath = resolve(root, STAGED_EXECUTABLE_NAME);
+    const stagedMarkerPath = resolve(root, STAGED_MARKER_NAME);
+    if (input.repairMissingStage === true) {
+      if (await pathIsMissing(stagedExecutablePath)) {
+        await createMissingStageSlot(root, rootIdentity, STAGED_EXECUTABLE_NAME, authenticated.executableBytes);
+      }
+      if (await pathIsMissing(stagedMarkerPath)) {
+        await createMissingStageSlot(root, rootIdentity, STAGED_MARKER_NAME, marker);
+      }
+    }
+    const stagedExecutableIdentity = await fileIdentity(stagedExecutablePath);
+    const stagedMarkerIdentity = await fileIdentity(stagedMarkerPath);
     const publicValue = Object.freeze({
       installationDirectory: root,
       executablePath: resolve(root, EXECUTABLE_NAME),
