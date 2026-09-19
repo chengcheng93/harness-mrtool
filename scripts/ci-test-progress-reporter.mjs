@@ -1,3 +1,4 @@
+import {createHash} from 'node:crypto';
 import {readdirSync} from 'node:fs';
 import {resolve,relative,sep} from 'node:path';
 
@@ -19,7 +20,9 @@ const ERROR_CODES = new Set([
 ]);
 
 // Only source-controlled-shaped test paths discovered in this checkout may be
-// emitted. Never include test titles, messages, stacks, stdout or stderr.
+// emitted. Never include test titles, messages, stacks, stdout or stderr. A
+// bounded digest of a non-sensitive test title is diagnostic-only and cannot
+// reconstruct assertion data or filesystem content.
 function testPaths(root) {
   const result = new Map();
   let scanned = 0;
@@ -46,6 +49,16 @@ function counts(data) {
   if (c === null || typeof c !== 'object' || fields.some(key =>
     !Number.isSafeInteger(c[key]) || c[key] < 0 || c[key] > MAX_COUNT)) return null;
   return fields.map(key => `${key}=${c[key]}`).join(' ');
+}
+
+function safeTestDigest(data) {
+  const name = ownValue(data, 'name');
+  if (typeof name !== 'string' ||
+      !/^[A-Za-z0-9][A-Za-z0-9 .,:()_/'-]{0,191}$/u.test(name) ||
+      /(?:secret|token|password|credential|authorization|private|path|home|userprofile|environment|env|key)/iu.test(name)) {
+    return '';
+  }
+  return ` testDigest=${createHash('sha256').update(name, 'utf8').digest('hex').slice(0, 16)}`;
 }
 
 // Error metadata is untrusted: do not invoke getters or coerce values.
@@ -105,7 +118,7 @@ export function createProgressReporter(root = ROOT) {
       } else if (event?.type === 'test:fail' && path !== undefined && !failed.has(path)) {
         failed.add(path);
         const line = Number.isSafeInteger(data.line) && data.line > 0 && data.line <= MAX_LINE ? ` line=${data.line}` : '';
-        yield `::error::Native suite FAIL ${path}${line}${failureDetails(data)}\n`;
+        yield `::error::Native suite FAIL ${path}${line}${safeTestDigest(data)}${failureDetails(data)}\n`;
       } else if (event?.type === 'test:summary') {
         const summary = counts(data);
         if (summary === null) continue;

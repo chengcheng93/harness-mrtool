@@ -169,9 +169,9 @@ test('native CI reporter reads only own data properties without invoking accesso
 
 test('native CI reporter emits one failure per file and keeps diagnostic summaries independent',async()=>{
  const text=await collect([
-  {type:'test:fail',data:{file:knownFile,line:12,details:{error:{failureType:'testTimeoutFailure',code:'ERR_TEST_FAILURE'}}}},
+  {type:'test:fail',data:{file:knownFile,line:12,name:'safe failure name',details:{error:{failureType:'testTimeoutFailure',code:'ERR_TEST_FAILURE'}}}},
   ...Array.from({length:50},()=>({type:'test:fail',data:{file:knownFile,name:'SECRET-TITLE',details:{error:{code:'ERR_ASSERTION'}}}})),
   {type:'test:summary',data:{counts:{tests:51,passed:0,failed:51,cancelled:0,skipped:0}}},
  ]);
- assert.equal(text,failPrefix+' line=12 failureType=testTimeoutFailure code=ERR_TEST_FAILURE\n'+'::notice::Native suite TOTAL tests=51 passed=0 failed=51 cancelled=0 skipped=0\n');
+ assert.equal(text,failPrefix+' line=12 testDigest=f3ffdf8cfb4246fb failureType=testTimeoutFailure code=ERR_TEST_FAILURE\n'+'::notice::Native suite TOTAL tests=51 passed=0 failed=51 cancelled=0 skipped=0\n');
 });
