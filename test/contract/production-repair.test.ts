@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import test from "node:test";
 
 import { parseCliInvocation } from "../../src/cli/program.ts";
@@ -22,4 +24,11 @@ test("self-update repair invokes the installation recovery authority", async () 
   assert.equal(recovered, 1);
   assert.equal(result.output?.data && "command" in result.output.data ? result.output.data.command : undefined, "self-update.repair");
   assert.equal(result.output?.data && "status" in result.output.data ? result.output.data.status : undefined, "repaired");
+});
+
+
+test("production default composition exposes the managed repair route", async () => {
+  const source = await readFile(resolve(import.meta.dirname, "../../src/production-main.ts"), "utf8");
+  assert.match(source, /Pick<ProductionCommandServices, "selfUpdateRepair" \| "selfUpdateApply" \| "selfUpdateRollback">/u);
+  assert.match(source, /selfUpdateRepair:\s*\(invocation\) => service\(\)\.selfUpdateRepair\(invocation\)/u);
 });
