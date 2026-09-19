@@ -23,10 +23,12 @@ try {
   } catch (error) {
     const codes = [];
     const diagnostics = [];
+    const shapes = [];
     const seen = new Set();
     let current = error;
     for (let depth = 0; depth < 8 && current && typeof current === "object" && !seen.has(current); depth += 1) {
       seen.add(current);
+      shapes.push(Object.getOwnPropertyNames(current).filter((key) => /^[A-Za-z][A-Za-z0-9]*$/u.test(key)).sort().join("|"));
       if (typeof current.code === "string" && /^[A-Z0-9_]{2,48}$/u.test(current.code)) codes.push(current.code);
       const actual = current.details && typeof current.details.actual === "string"
         ? current.details.actual
@@ -34,7 +36,7 @@ try {
       if (actual !== undefined && SAFE.test(actual) && !diagnostics.includes(actual)) diagnostics.push(actual);
       current = current.cause;
     }
-    process.stdout.write(`::notice::Native store probe code=${codes.join(",") || "unknown"}${diagnostics.length > 0 ? ` diagnostics=${diagnostics.join(",")}` : ""}\n`);
+    process.stdout.write(`::notice::Native store probe code=${codes.join(",") || "unknown"}${diagnostics.length > 0 ? ` diagnostics=${diagnostics.join(",")}` : ""} shape=${shapes.join("/")}\n`);
   }
 } finally {
   await rm(root, { recursive: true, force: true }).catch(() => undefined);
