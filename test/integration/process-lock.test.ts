@@ -12,7 +12,29 @@ import { ProcessLockError, systemProcessLockProvider as locks } from "../../src/
 async function fixture(t: TestContext): Promise<string> {
   // macOS /var is a symlink; exercise the real security checks with a physical path.
   const directory = await mkdtemp(join(await realpath(tmpdir()), "process-lock-"));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  if (process.platform !== "win32") {
+    t.after(() => rm(directory, { recursive: true, force: true }));
+  } else {
+    // Node test after hooks run in registration order. The fixture hook is
+    // registered before a test can register lease/child cleanup hooks, while
+    // Windows refuses to remove a directory containing a still-open helper
+    // handle. Retry asynchronously so later hooks can release those handles.
+    t.after(() => {
+      void (async () => {
+        const deadline = Date.now() + 10_000;
+        while (Date.now() < deadline) {
+          try {
+            await rm(directory, { recursive: true, force: true });
+            return;
+          } catch (error) {
+            const code = (error as NodeJS.ErrnoException).code;
+            if (code !== "EBUSY" && code !== "EPERM") return;
+            await delay(50);
+          }
+        }
+      })();
+    });
+  }
   return join(directory, "receipt lock ' $;.lock");
 }
 
@@ -106,9 +128,17 @@ for (const signal of [null, "SIGKILL"] as const) {
     const child = await owner(t, path);
     const before = await lstat(path, { bigint: true });
     const exited = once(child, "exit");
-    if (signal === null) child.send("exit");
-    else child.kill(signal);
-    await exited;
+    if (signal === null) {
+      child.send("exit");
+      await exited;
+    } else if (process.platform === "win32") {
+      // Windows does not provide POSIX signal semantics for child.kill().
+      // Kill the owner and its PowerShell lock helper as one process tree.
+      await terminateTree(child);
+    } else {
+      child.kill(signal);
+      await exited;
+    }
     const lease = await locks.acquire(path, 3000);
     t.after(() => lease.release());
     lease.assertHeld();
