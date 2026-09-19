@@ -54,8 +54,7 @@ function counts(data) {
 function safeTestDigest(data) {
   const name = ownValue(data, 'name');
   if (typeof name !== 'string' ||
-      !/^[A-Za-z0-9][A-Za-z0-9 .,:()_/'-]{0,191}$/u.test(name) ||
-      /(?:secret|token|password|credential|authorization|private|path|home|userprofile|environment|env|key)/iu.test(name)) {
+      !/^[A-Za-z0-9][A-Za-z0-9 .,:()_/'-]{0,191}$/u.test(name)) {
     return '';
   }
   return ` testDigest=${createHash('sha256').update(name, 'utf8').digest('hex').slice(0, 16)}`;

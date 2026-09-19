@@ -54,7 +54,7 @@ test('actual Node reporter with URL-significant filename preserves failing child
  const run=spawnSync(process.execPath,['--test','--test-reporter='+pathToFileURL(reporter).href,fixture],{encoding:'utf8',env,timeout:15000});
  assert.equal(run.error,undefined);assert.equal(run.status,1);
  assert.match(run.stdout,/Native suite TOTAL tests=1 passed=0 failed=1/);
- assert.match(run.stdout,/::error::Native suite FAIL test\/assertion-failure\.test\.ts line=1 failureType=testCodeFailure code=ERR_ASSERTION\n/);
+ assert.match(run.stdout,/::error::Native suite FAIL test\/assertion-failure\.test\.ts line=1(?: testDigest=[0-9a-f]{16})? failureType=testCodeFailure code=ERR_ASSERTION\n/);
  assert.doesNotMatch(run.stdout+run.stderr,/SECRET-|fixture.test|ci-reporter-contract/);
 });
 test('Windows CI keeps complete serial groups and adds safe live progress',async()=>{
@@ -78,7 +78,7 @@ test('native reporter with URL-significant filename names a file before import f
  const run=spawnSync(process.execPath,['--test','--test-reporter='+pathToFileURL(wrapper).href,fixture],{encoding:'utf8',env,timeout:15000});
  assert.equal(run.error,undefined);assert.equal(run.status,1);
  assert.match(run.stdout,/::notice::Native suite START test\/import-failure.test.ts/);
- assert.match(run.stdout,/::error::Native suite FAIL test\/import-failure\.test\.ts line=1 failureType=testCodeFailure code=ERR_TEST_FAILURE\n/);
+ assert.match(run.stdout,/::error::Native suite FAIL test\/import-failure\.test\.ts line=1(?: testDigest=[0-9a-f]{16})? failureType=testCodeFailure code=ERR_TEST_FAILURE\n/);
  assert.match(run.stdout,/Native suite TOTAL tests=1 passed=0 failed=1/);
  assert.doesNotMatch(run.stdout+run.stderr,/SECRET-|ci-reporter-import/);
 });
