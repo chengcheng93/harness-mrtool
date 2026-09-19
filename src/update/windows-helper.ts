@@ -3,6 +3,8 @@ import { constants, type BigIntStats } from "node:fs";
 import { chmod, lstat, open, realpath, rename, rm } from "node:fs/promises";
 import { dirname, isAbsolute, resolve } from "node:path";
 
+import { waitForProcessExit, type ProcessIdentity } from "../platform/process-identity.ts";
+
 
 import { canonicalizeJson } from "../contracts/jcs.ts";
 import { parseStrictJson } from "../input/strict-json.ts";
@@ -18,6 +20,10 @@ export interface WindowsPersistenceResult {
 
 export interface WindowsPersistenceOptions {
   readonly parentExit: () => Promise<number>;
+  /** When supplied, the helper proves this exact parent instance has exited before mutation. */
+  readonly parentIdentity?: ProcessIdentity;
+  /** Test/native seam for the exact parent-instance wait; production defaults to process identity inspection. */
+  readonly waitForParentExit?: (identity: ProcessIdentity) => Promise<void>;
   readonly rotate: () => Promise<void>;
   readonly commit: () => Promise<void>;
   readonly isRecoverable: (error: unknown) => boolean;
@@ -32,6 +38,9 @@ export interface WindowsPersistenceOptions {
 export async function runWindowsPersistence(
   options: WindowsPersistenceOptions,
 ): Promise<WindowsPersistenceResult> {
+  if (options.parentIdentity !== undefined) {
+    await (options.waitForParentExit ?? ((identity: ProcessIdentity) => waitForProcessExit(identity)))(options.parentIdentity);
+  }
   const businessExit = await options.parentExit();
   try {
     await options.rotate();
