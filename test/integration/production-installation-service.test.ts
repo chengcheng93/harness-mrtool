@@ -1,3 +1,4 @@
+import {createHash} from "node:crypto";
 import assert from "node:assert/strict";
 import {chmod, lstat, mkdir, mkdtemp, readdir, realpath, rm} from "node:fs/promises";
 import test from "node:test";
@@ -95,4 +96,59 @@ test("recovery is a no-op before the first managed release is installed", darwin
 
   await service.recover();
   assert.equal(await lstat(resolve(root, "state", "installation-journal.json")).then(() => true, () => false), false);
+});
+
+test("production rollback installs exact previously released bytes only through a later signed sequence", darwin, async (t) => {
+  const origin = await exactReleaseFixture();
+  const family = nativeReleaseFixtureFamily(origin);
+  const previous = await family("darwin-arm64", {sequence: 43, cliVersion: "0.1.6", variantByte: 1, releaseSetId: "stable-0.1.6"});
+  const rollback = await family("darwin-arm64", {sequence: 44, cliVersion: "0.1.6", variantByte: 1, releaseSetId: "stable-0.1.6-rollback"});
+  const previousSnapshot = await createAuthenticatedReleaseSnapshot(previous.options);
+  const root = await mkdtemp(resolve(await realpath(tmpdir()), "production-installation-rollback-"));
+  const stateDirectory = resolve(root, "state");
+  const installationDirectory = resolve(root, "installation");
+  await mkdir(installationDirectory, {mode: 0o700});
+
+  try {
+    const verifier = createReleaseSetSnapshotVerifier({platform: "darwin-arm64", trustConfig: origin.trustConfig});
+    const cache = new UpdateCache({stateDirectory, verifySnapshot: verifier});
+    await cache.storeVerifiedReleaseSet(previousSnapshot);
+    const previousStage = await stageAuthenticatedManagedPosixCandidate({
+      installationDirectory,
+      snapshot: previousSnapshot,
+      platform: "darwin-arm64",
+      trustConfig: origin.trustConfig,
+    });
+    await publishManagedPosixCandidate({stage: previousStage, attemptId: "b".repeat(32), previous: {executable: null, marker: null}});
+
+    const channelEnvelope = signedEnvelope(canonicalPayload(rollback.payload), [origin.signingKey]);
+    const service = createProductionInstallationService({
+      stateDirectory,
+      installationDirectory,
+      platform: "darwin-arm64",
+      trustConfig: origin.trustConfig,
+      channelUrl: "https://fixture.example.test/stable.envelope.json",
+      transport: {async request() { return {status: 200, headers: {}, body: Buffer.from(channelEnvelope)}; }},
+      fetch: async (url) => {
+        const value = String(url);
+        const bytes = value.endsWith("harness-mr-templates.zip")
+          ? rollback.options.templateArchive
+          : value.endsWith("bundle-receipt.envelope.json")
+            ? rollback.options.templateReceipt
+            : rollback.options.cliArchive;
+        return new Response(Buffer.from(bytes));
+      },
+    });
+
+    const installed = await service.rollback("0.1.6");
+    assert.equal(installed.status, "installed");
+    if (installed.status !== "installed") return;
+    assert.equal(installed.active.cliVersion, "0.1.6");
+    assert.equal(installed.active.releaseSetId, "stable-0.1.6-rollback");
+    assert.equal(installed.active.manifestSequence, 44);
+    assert.equal(installed.observed.executableSha256, createHash("sha256").update(rollback.native).digest("hex"));
+    assert.equal(await lstat(resolve(stateDirectory, "installation-journal.json")).then(() => true, () => false), false);
+  } finally {
+    await removeTree(root);
+  }
 });
