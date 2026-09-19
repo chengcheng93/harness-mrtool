@@ -33,7 +33,7 @@ const JOURNAL_NAME = ".harness-skill-activation.json";
 const VERSIONS_NAME = "versions";
 const TEMP_PREFIX = ".harness-skill-tmp-";
 const BACKUP_PREFIX = ".harness-skill-old-";
-const READ_ONLY_FLAGS = constants.O_RDONLY | ((constants as { readonly O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0);
+const READ_ONLY_FLAGS = constants.O_RDONLY | (process.platform === "win32" ? 0 : ((constants as { readonly O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0));
 
 export type SkillReleaseComponent = SkillComponent;
 

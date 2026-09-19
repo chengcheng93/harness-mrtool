@@ -127,7 +127,7 @@ const SHA256 = /^[a-f0-9]{64}$/u;
 const DECIMAL = /^(?:0|[1-9][0-9]*)$/u;
 const SIGNED_DECIMAL = /^-?(?:0|[1-9][0-9]*)$/u;
 const READ_ONLY_FLAGS = constants.O_RDONLY |
-  ((constants as { readonly O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0);
+  (process.platform === "win32" ? 0 : ((constants as { readonly O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0));
 
 
 function windowsPathKey(path: string): string {

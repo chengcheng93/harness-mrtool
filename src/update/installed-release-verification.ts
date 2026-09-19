@@ -25,7 +25,7 @@ export interface InstalledReleaseObservation {
  readonly executableIdentity:{readonly dev:string;readonly ino:string;readonly size:string;readonly mtimeNs:string;readonly ctimeNs:string};
 }
 const MAX_MARKER_BYTES=8192;
-const FLAGS=constants.O_RDONLY|(constants.O_NOFOLLOW??0)|(constants.O_NONBLOCK??0);
+const FLAGS=constants.O_RDONLY|(process.platform==='win32'?0:((constants.O_NOFOLLOW??0)|(constants.O_NONBLOCK??0)));
 const MARKER='.harness-mrtool-install.json';
 function fail():never {throw new ToolError('UPDATE_SECURITY_ERROR','Installed release verification failed',{
  field:'update.installation',expected:'a plain managed executable matching the authenticated release archive',

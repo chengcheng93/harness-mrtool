@@ -395,7 +395,7 @@ export class CandidateContextStore {
     let handle: FileHandle | undefined;
     let result: LockOwnerRead = { kind: "unsafe" };
     try {
-      handle = await open(ownerPath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+      handle = await open(ownerPath, constants.O_RDONLY | (process.platform === "win32" ? 0 : (constants.O_NOFOLLOW ?? 0)));
       await this.faultInjector?.hit("after-lock-owner-open");
       const before = await handle.stat({ bigint: true });
       if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n ||

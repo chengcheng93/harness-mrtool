@@ -80,7 +80,7 @@ const SNAPSHOT_FIELDS = ["record", "cliBytes", "templateBytes", "receiptBytes"] 
 const RELEASE_FILES = [CLI_NAME, TEMPLATE_NAME, RECEIPT_NAME] as const;
 const SORTED_RELEASE_FILES = [...RELEASE_FILES].sort();
 const MAX_POLICY_ITEMS = 1_024;
-const READ_ONLY_FLAGS = constants.O_RDONLY | ((constants as { readonly O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0);
+const READ_ONLY_FLAGS = constants.O_RDONLY | (process.platform === "win32" ? 0 : ((constants as { readonly O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0));
 const verifiedSecurityViews = new WeakSet<object>();
 
 

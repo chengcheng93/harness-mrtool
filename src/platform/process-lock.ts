@@ -34,7 +34,7 @@ interface LockFileIdentity {
 }
 
 
-const NOFOLLOW = (constants as { readonly O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
+const NOFOLLOW = process.platform === "win32" ? 0 : ((constants as { readonly O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0);
 const DIRECTORY = (constants as { readonly O_DIRECTORY?: number }).O_DIRECTORY ?? 0;
 
 

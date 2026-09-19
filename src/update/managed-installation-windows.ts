@@ -28,7 +28,7 @@ const STAGED_MARKER_NAME = ".harness-mrtool-install.json.new" as const;
 const OLD_MARKER_NAME = ".harness-mrtool-install.json.old" as const;
 const MAX_EXECUTABLE_BYTES = 256 * 1024 * 1024;
 const MAX_MARKER_BYTES = 8 * 1024;
-const READ_FLAGS = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
+const READ_FLAGS = constants.O_RDONLY; // Windows has no fs.open FILE_FLAG_OPEN_REPARSE_POINT equivalent.
 
 interface FileIdentity {
   readonly dev: bigint;

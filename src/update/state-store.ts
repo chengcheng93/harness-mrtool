@@ -47,7 +47,7 @@ export const MAX_UPDATE_STATE_DIRECTORY_ENTRIES_SCANNED = 4_096;
 const STATE_VERSION = 1;
 const STATE_NAME = "update-state.json";
 const SHA256 = /^[a-f0-9]{64}$/u;
-const NOFOLLOW = (constants as { readonly O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
+const NOFOLLOW = process.platform === "win32" ? 0 : ((constants as { readonly O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0);
 const TEMP_NAME = /^update-state\.json\.tmp\.[a-f0-9]{24}$/u;
 const RECORD_FIELDS = new Set([
   "stateVersion",

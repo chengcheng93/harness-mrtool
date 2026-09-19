@@ -469,7 +469,7 @@ export class VerificationReceiptStore implements VerificationReceiptWriter, Veri
     let failure: unknown;
     try {
       lease.assertHeld();
-      handle = await open(pendingPath, constants.O_RDWR | (constants.O_NOFOLLOW ?? 0));
+      handle = await open(pendingPath, constants.O_RDWR | (process.platform === "win32" ? 0 : (constants.O_NOFOLLOW ?? 0)));
       await this.requireExactLinkedIdentity(handle, [pendingPath, finalPath], expectedBytes, 2n, lease);
       await handle.sync();
       await this.faultInjector?.hit("after-idempotent-file-sync");
@@ -498,7 +498,7 @@ export class VerificationReceiptStore implements VerificationReceiptWriter, Veri
     let failure: unknown;
     try {
       await this.requirePathAbsent(pendingPath, lease);
-      handle = await open(finalPath, constants.O_RDWR | (constants.O_NOFOLLOW ?? 0));
+      handle = await open(finalPath, constants.O_RDWR | (process.platform === "win32" ? 0 : (constants.O_NOFOLLOW ?? 0)));
       await this.requireExactLinkedIdentity(
         handle,
         [finalPath],
@@ -562,7 +562,7 @@ export class VerificationReceiptStore implements VerificationReceiptWriter, Veri
           !sameMovedFile(priorIdentity, pathBefore)) {
         throw securityFailure();
       }
-      handle = await open(path, constants.O_RDWR | (constants.O_NOFOLLOW ?? 0));
+      handle = await open(path, constants.O_RDWR | (process.platform === "win32" ? 0 : (constants.O_NOFOLLOW ?? 0)));
       await this.requireExactLinkedIdentity(handle, [path], expected, 1n, lease);
       await this.requirePathAbsent(absentPath, lease);
       return handle;
@@ -586,7 +586,7 @@ export class VerificationReceiptStore implements VerificationReceiptWriter, Veri
       try {
         handle = await open(
           path,
-          constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | (constants.O_NOFOLLOW ?? 0),
+          constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | (process.platform === "win32" ? 0 : (constants.O_NOFOLLOW ?? 0)),
           0o600,
         );
         created = true;
@@ -599,7 +599,7 @@ export class VerificationReceiptStore implements VerificationReceiptWriter, Veri
               pathBefore.size > BigInt(expected.length)) {
             throw securityFailure();
           }
-          handle = await open(path, constants.O_RDWR | (constants.O_NOFOLLOW ?? 0));
+          handle = await open(path, constants.O_RDWR | (process.platform === "win32" ? 0 : (constants.O_NOFOLLOW ?? 0)));
           const opened = await handle.stat({ bigint: true });
           if (!sameIdentity(pathBefore, opened)) throw securityFailure();
         } catch (openError) {
@@ -835,7 +835,7 @@ export class VerificationReceiptStore implements VerificationReceiptWriter, Veri
     let failure: unknown;
     let result: VerificationReceiptRecord | undefined;
     try {
-      handle = await open(finalPath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+      handle = await open(finalPath, constants.O_RDONLY | (process.platform === "win32" ? 0 : (constants.O_NOFOLLOW ?? 0)));
       await this.faultInjector?.hit("after-read-open");
       lease.assertHeld();
       const before = await handle.stat({ bigint: true });

@@ -19,7 +19,7 @@ import { writeBoundedCanonicalFile } from "./journal.ts";
 
 export const INSTALLATION_JOURNAL_FILE_NAME = "installation-journal.json";
 
-const NOFOLLOW = (constants as { readonly O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
+const NOFOLLOW = process.platform === "win32" ? 0 : ((constants as { readonly O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0);
 const MAX_IDENTITY = (1n << 64n) - 1n;
 
 type JournalStat = Awaited<ReturnType<typeof lstat>> & {

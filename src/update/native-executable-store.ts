@@ -22,7 +22,7 @@ export interface MaterializedNativeExecutable {
  readonly cliVersion:string;
  readonly releaseSetId:string;
 }
-const READ_FLAGS=constants.O_RDONLY|((constants as {O_NOFOLLOW?:number}).O_NOFOLLOW??0);
+const READ_FLAGS=constants.O_RDONLY|(process.platform==='win32'?0:((constants as {O_NOFOLLOW?:number}).O_NOFOLLOW??0));
 function fail(actual='native-store:operation'):never{throw new ToolError('UPDATE_SECURITY_ERROR','Native executable materialization is unsafe',{
  field:'update.executable',expected:'a private, sealed executable matching authenticated release bytes',actual,
  safeNextStep:'Keep the installed release; inspect the private native staging directory before retrying.'});}
