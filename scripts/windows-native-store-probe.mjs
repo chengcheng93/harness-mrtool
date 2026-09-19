@@ -23,6 +23,7 @@ try {
   } catch (error) {
     const codes = [];
     const diagnostics = [];
+    const reasons = [];
     const shapes = [];
     const seen = new Set();
     let current = error;
@@ -33,10 +34,12 @@ try {
       const actual = current.details && typeof current.details.actual === "string"
         ? current.details.actual
         : typeof current.diagnostic === "string" ? current.diagnostic : undefined;
+      const safeReason = new Set(["envelope is invalid", "envelope exceeds the size limit", "manifest sequence is not monotonic", "signature validation failed", "signed bundle receipt is missing", "trusted key state is invalid"]);
+      if (actual !== undefined && safeReason.has(actual) && !reasons.includes(actual)) reasons.push(actual);
       if (actual !== undefined && SAFE.test(actual) && !diagnostics.includes(actual)) diagnostics.push(actual);
       current = current.cause;
     }
-    process.stdout.write(`::notice::Native store probe code=${codes.join(",") || "unknown"}${diagnostics.length > 0 ? ` diagnostics=${diagnostics.join(",")}` : ""} shape=${shapes.join("/")}\n`);
+    process.stdout.write(`::notice::Native store probe code=${codes.join(",") || "unknown"}${reasons.length > 0 ? ` reasons=${reasons.join(",")}` : ""}${diagnostics.length > 0 ? ` diagnostics=${diagnostics.join(",")}` : ""} shape=${shapes.join("/")}\n`);
   }
 } finally {
   await rm(root, { recursive: true, force: true }).catch(() => undefined);
