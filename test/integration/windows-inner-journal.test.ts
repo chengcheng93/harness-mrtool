@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { tmpdir } from "node:os";
 import test from "node:test";
 
 import { openNativeMutationExecutor } from "../../src/platform/native-mutation-executor.ts";
 import { observeWindowsInnerJournal } from "../../src/update/windows-inner-journal.ts";
 import { admitWindowsMutationPlan } from "../../src/update/windows-mutation-authority.ts";
 
-const darwin = { skip: process.platform !== "darwin" };
+const native = { skip: !(process.platform === "darwin" || (process.platform === "win32" && process.arch === "x64")) };
 
 const plan = Object.freeze({
   schemaVersion: 1 as const,
@@ -22,8 +23,8 @@ const plan = Object.freeze({
   next: Object.freeze({ executableSha256: "1".repeat(64), executableSize: 102, markerSha256: "2".repeat(64), markerSize: 202 }),
 });
 
-test("observes the fixed Windows inner journal only after exact canonical plan verification", darwin, async (t) => {
-  const root = await mkdtemp(resolve("/private/var/tmp", "windows-inner-journal-"));
+test("observes the fixed Windows inner journal only after exact canonical plan verification", native, async (t) => {
+  const root = await mkdtemp(resolve(await realpath(tmpdir()), "windows-inner-journal-"));
   await chmod(root, 0o700);
   t.after(() => rm(root, { recursive: true, force: true }));
   const executor = await openNativeMutationExecutor(root);
@@ -36,8 +37,8 @@ test("observes the fixed Windows inner journal only after exact canonical plan v
   await executor.close();
 });
 
-test("inner journal observation rejects a link or mismatched plan", darwin, async (t) => {
-  const root = await mkdtemp(resolve("/private/var/tmp", "windows-inner-journal-"));
+test("inner journal observation rejects a link or mismatched plan", native, async (t) => {
+  const root = await mkdtemp(resolve(await realpath(tmpdir()), "windows-inner-journal-"));
   await chmod(root, 0o700);
   t.after(() => rm(root, { recursive: true, force: true }));
   await symlink(resolve(root, "outside"), resolve(root, "installation-transaction.json"));

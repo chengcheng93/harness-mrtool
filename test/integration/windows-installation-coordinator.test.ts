@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
-import { chmod, lstat, mkdtemp, rm } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, realpath, rm } from "node:fs/promises";
 import { resolve } from "node:path";
+import { tmpdir } from "node:os";
 import test from "node:test";
 
 import { openNativeMutationExecutor } from "../../src/platform/native-mutation-executor.ts";
@@ -8,7 +9,7 @@ import { coordinateWindowsInnerJournal } from "../../src/update/windows-installa
 import { validateInstallationJournal } from "../../src/update/installation-journal.ts";
 import { digest, journalFixture } from "../helpers/installation-journal-fixture.ts";
 
-const darwin = { skip: process.platform !== "darwin" };
+const native = { skip: !(process.platform === "darwin" || (process.platform === "win32" && process.arch === "x64")) };
 
 function preparedWithoutInner() {
   const fixture = journalFixture("windows-x64", "prepared");
@@ -52,8 +53,8 @@ function planFor(journal: ReturnType<typeof preparedWithoutInner>) {
   });
 }
 
-test("coordinates native fixed-slot admission into one outer Windows inner-journal binding", darwin, async (t) => {
-  const root = await mkdtemp(resolve("/private/var/tmp", "windows-installation-coordinator-"));
+test("coordinates native fixed-slot admission into one outer Windows inner-journal binding", native, async (t) => {
+  const root = await mkdtemp(resolve(await realpath(tmpdir()), "windows-installation-coordinator-"));
   await chmod(root, 0o700);
   t.after(() => rm(root, { recursive: true, force: true }));
   const executor = await openNativeMutationExecutor(root);
@@ -119,7 +120,7 @@ test("rejects an invalid installation root before native admission", async () =>
 });
 
 test("rejects a native root whose identity is not bound to the outer journal", async () => {
-  const root = await mkdtemp(resolve("/private/var/tmp", "windows-coordinator-root-mismatch-"));
+  const root = await mkdtemp(resolve(await realpath(tmpdir()), "windows-coordinator-root-mismatch-"));
   await chmod(root, 0o700);
   try {
     const current = preparedWithoutInner();
