@@ -95,10 +95,13 @@ async function fileIdentity(path: string, expected?: FileIdentity): Promise<File
     const before = await lstat(path, { bigint: true }) as BigIntStats;
     const physical = await realpath(path);
     const after = await lstat(path, { bigint: true }) as BigIntStats;
-    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n || !samePath(physical, path) ||
-        before.dev !== after.dev || before.ino !== after.ino) throw failure("managed-installation:file");
+    if (!before.isFile()) throw failure("managed-installation:file-stat");
+    if (before.isSymbolicLink()) throw failure("managed-installation:file-link");
+    if (before.nlink !== 1n) throw failure("managed-installation:file-links");
+    if (!samePath(physical, path)) throw failure("managed-installation:file-realpath");
+    if (before.dev !== after.dev || before.ino !== after.ino) throw failure("managed-installation:file-race");
     const result = copyIdentity(before);
-    if (expected !== undefined && !sameIdentity(result, expected)) throw failure("managed-installation:file");
+    if (expected !== undefined && !sameIdentity(result, expected)) throw failure("managed-installation:file-expected");
     return result;
   } catch (error) {
     throw error instanceof ToolError ? error : failure("managed-installation:file");
@@ -110,9 +113,10 @@ async function readDigest(path: string, expected: FileIdentity, maximum: number)
   const handle = await open(path, READ_FLAGS);
   try {
     const opened = await handle.stat({ bigint: true }) as BigIntStats;
-    if (!opened.isFile() || opened.isSymbolicLink() || opened.nlink !== 1n || !sameIdentity(copyIdentity(opened), expected)) {
-      throw failure("managed-installation:digest");
-    }
+    if (!opened.isFile()) throw failure("managed-installation:digest-stat");
+    if (opened.isSymbolicLink()) throw failure("managed-installation:digest-link");
+    if (opened.nlink !== 1n) throw failure("managed-installation:digest-links");
+    if (!sameIdentity(copyIdentity(opened), expected)) throw failure("managed-installation:digest-identity");
     const hash = createHash("sha256");
     const buffer = Buffer.alloc(Math.min(64 * 1024, Number(expected.size)));
     let offset = 0;
@@ -122,10 +126,11 @@ async function readDigest(path: string, expected: FileIdentity, maximum: number)
       hash.update(buffer.subarray(0, result.bytesRead));
       offset += result.bytesRead;
     }
-    if ((await handle.read(Buffer.alloc(1), 0, 1, Number(expected.size))).bytesRead !== 0) throw failure("managed-installation:digest");
+    if ((await handle.read(Buffer.alloc(1), 0, 1, Number(expected.size))).bytesRead !== 0) throw failure("managed-installation:digest-extra");
     const after = await handle.stat({ bigint: true }) as BigIntStats;
     const named = await lstat(path, { bigint: true }) as BigIntStats;
-    if (!sameIdentity(copyIdentity(after), expected) || !sameIdentity(copyIdentity(named), expected)) throw failure("managed-installation:digest");
+    if (!sameIdentity(copyIdentity(after), expected)) throw failure("managed-installation:digest-after");
+    if (!sameIdentity(copyIdentity(named), expected)) throw failure("managed-installation:digest-name");
     return hash.digest("hex");
   } finally {
     await handle.close().catch(() => undefined);
@@ -249,7 +254,8 @@ export async function verifyManagedWindowsStage(stage: ManagedWindowsStage): Pro
     const marker = await fileIdentity(stage.stagedMarkerPath, state.stagedMarkerIdentity);
     const executableSha256 = await readDigest(stage.stagedExecutablePath, executable, MAX_EXECUTABLE_BYTES);
     const markerSha256 = await readDigest(stage.stagedMarkerPath, marker, MAX_MARKER_BYTES);
-    if (executableSha256 !== stage.executableSha256 || markerSha256 !== stage.markerSha256) throw failure();
+    if (executableSha256 !== stage.executableSha256) throw failure("managed-installation:verify-executable");
+    if (markerSha256 !== stage.markerSha256) throw failure("managed-installation:verify-marker");
     return Object.freeze({
       executableSha256,
       markerSha256,
@@ -270,8 +276,8 @@ export async function publishManagedWindowsCandidate(stage: ManagedWindowsStage)
     await rotateWindowsExecutable(markerPaths(stage.installationDirectory), { canonicalMode: 0o600 });
     const executable = await fileIdentity(stage.executablePath);
     const marker = await fileIdentity(stage.markerPath);
-    if (await readDigest(stage.executablePath, executable, MAX_EXECUTABLE_BYTES) !== stage.executableSha256 ||
-        await readDigest(stage.markerPath, marker, MAX_MARKER_BYTES) !== stage.markerSha256) throw failure();
+    if (await readDigest(stage.executablePath, executable, MAX_EXECUTABLE_BYTES) !== stage.executableSha256) throw failure("managed-installation:publish-executable");
+    if (await readDigest(stage.markerPath, marker, MAX_MARKER_BYTES) !== stage.markerSha256) throw failure("managed-installation:publish-marker");
     return Object.freeze({
       executablePath: stage.executablePath,
       markerPath: stage.markerPath,

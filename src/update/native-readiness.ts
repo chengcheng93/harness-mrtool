@@ -24,19 +24,19 @@ interface ReadinessControls {
 }
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_OUTPUT_BYTES = 64 * 1024;
-function rejected(): ToolError<'UPDATE_SECURITY_ERROR'> {
+function rejected(actual = 'native-readiness:operation'): ToolError<'UPDATE_SECURITY_ERROR'> {
   return new ToolError('UPDATE_SECURITY_ERROR', 'Native candidate readiness verification failed', {
     field: 'update.executable', expected: 'authenticated native SEA and embedded Bundle passing bounded readonly probes',
-    actual: 'native candidate rejected', safeNextStep: 'Keep the installed release; rebuild or restore the candidate before retrying.',
+    actual, safeNextStep: 'Keep the installed release; rebuild or restore the candidate before retrying.',
   });
 }
 function remaining(deadline: number): number {
   const value = Math.floor(deadline - performance.now());
-  if (value < 1) throw rejected();
+  if (value < 1) throw rejected('native-readiness:deadline');
   return value;
 }
 function boundedInteger(value: number, maximum: number): number {
-  if (!Number.isSafeInteger(value) || value < 1 || value > maximum) throw rejected();
+  if (!Number.isSafeInteger(value) || value < 1 || value > maximum) throw rejected('native-readiness:bounds');
   return value;
 }
 function hostMatches(platform: NativeExecutableStoreOptions['platform']): boolean {
@@ -53,7 +53,7 @@ async function probe(
   const timeout = remaining(deadline);
   return new Promise((resolveResult, reject) => {
     let child: ChildProcess;
-    try {child = run(executable, args, options);} catch {reject(rejected()); return;}
+    try {child = run(executable, args, options);} catch {reject(rejected('native-readiness:spawn')); return;}
     let failed = false;
     let bytes = 0;
     const output: Buffer[] = [];
@@ -77,9 +77,9 @@ async function probe(
     child.stderr?.on('data', () => {terminate();}); // Exact contract: stderr must be empty.
     child.once('close', (code, signal) => {
       clearTimeout(timer);
-      if (failed || code !== 0 || signal !== null || performance.now() >= deadline) {reject(rejected()); return;}
+      if (failed || code !== 0 || signal !== null || performance.now() >= deadline) {reject(rejected('native-readiness:probe')); return;}
       try {resolveResult(new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(Buffer.concat(output)));}
-      catch {reject(rejected());}
+      catch {reject(rejected('native-readiness:output'));}
     });
     if (!child.stdout || !child.stderr) terminate();
   });
@@ -118,7 +118,7 @@ export async function verifyNativeReadiness(
       templateBytes: snapshot.templateBytes, receiptBytes: snapshot.receiptBytes});
     const authenticated = await authenticateReleaseSnapshot(owned, options);
     remaining(deadline);
-    if (!hostMatches(options.platform)) throw rejected();
+    if (!hostMatches(options.platform)) throw rejected('native-readiness:host');
     const cliVersion = authenticated.verified.manifest.components.cli.version;
     const manifest = authenticated.bundle.manifest;
     const bundleManifestHash = sha256Utf8(canonicalizeJson(manifest) + '\n');
@@ -146,7 +146,7 @@ export async function verifyNativeReadiness(
         held.assertHeld(); remaining(deadline);
         const executable = await store.verify(owned, held);
         remaining(deadline);
-        if (!hostMatches(options.platform)) throw rejected();
+        if (!hostMatches(options.platform)) throw rejected('native-readiness:host');
         let stdout: string;
         try {stdout = await probe(executable.path, args, spawnOptions, run, deadline, maxOutputBytes);}
         finally {
@@ -180,7 +180,7 @@ export async function verifyNativeReadiness(
     return lease === undefined
       ? await withUpdateLock(options.stateDirectory, verify, {timeoutMs: remaining(deadline)})
       : await verify(lease);
-  } catch {throw rejected();}
+  } catch (error) {throw error instanceof ToolError && error.code === 'UPDATE_SECURITY_ERROR' ? error : rejected();}
   finally {
     if (isolation !== undefined) {
       try {await rm(isolation, {recursive: true, force: true});} catch {throw rejected();}

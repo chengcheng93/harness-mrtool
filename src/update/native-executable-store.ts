@@ -95,8 +95,8 @@ export function createNativeExecutableStore(input:NativeExecutableStoreOptions){
     if(!same(identity,await directory(releaseDirectory,0o700)))fail();await stableParents();
     const file=await open(executablePath,READ_FLAGS);
     try{
-     const before=await file.stat({bigint:true});if(!before.isFile()||before.nlink!==1n||!owned(before)||before.size!==BigInt(bytes.length))fail();
-     const named=await lstat(executablePath,{bigint:true});if(named.isSymbolicLink()||!same(before,named)||named.nlink!==1n)fail();
+     const before=await file.stat({bigint:true});if(!before.isFile())fail('native-store:materialized-file-stat');if(before.nlink!==1n)fail('native-store:materialized-file-links');if(!owned(before))fail('native-store:materialized-file-owner');if(before.size!==BigInt(bytes.length))fail('native-store:materialized-file-size');
+     const named=await lstat(executablePath,{bigint:true});if(named.isSymbolicLink())fail('native-store:materialized-name-link');if(!same(before,named))fail('native-store:materialized-name-identity');if(named.nlink!==1n)fail('native-store:materialized-name-links');
      if(!same(identity,await directory(releaseDirectory,0o700)))fail();await stableParents();
      if(process.platform!=='win32')await file.chmod(0o500);else await acl.verify(executablePath);
      // Windows content durability was already established by the writer's
@@ -125,12 +125,11 @@ export function createNativeExecutableStore(input:NativeExecutableStoreOptions){
     !pathEqual(await realpath(executablePath),executablePath)||(process.platform!=='win32'&&(Number(before.mode)&0o7777)!==0o500))fail();
    const file=await open(executablePath,READ_FLAGS);
    try{
-    const opened=await file.stat({bigint:true});if(!same(before,opened)||!sealedFile(opened,bytes.length)||opened.mode!==before.mode||(process.platform!=='win32'&&opened.ctimeNs!==before.ctimeNs))fail();
+    const opened=await file.stat({bigint:true});if(!same(before,opened))fail('native-store:verify-open-identity');if(!sealedFile(opened,bytes.length))fail('native-store:verify-open-sealed');if(process.platform!=='win32'&&opened.mode!==before.mode)fail('native-store:verify-open-mode');if(process.platform!=='win32'&&opened.ctimeNs!==before.ctimeNs)fail('native-store:verify-open-ctime');
     const hash=createHash('sha256');const buffer=Buffer.alloc(Math.min(64*1024,bytes.length));let offset=0;
     while(offset<bytes.length){const read=await file.read(buffer,0,Math.min(buffer.length,bytes.length-offset),offset);if(read.bytesRead===0)fail();hash.update(buffer.subarray(0,read.bytesRead));offset+=read.bytesRead;}
     const after=await file.stat({bigint:true});const named=await lstat(executablePath,{bigint:true});
-    if(hash.digest('hex')!==digest||!same(opened,after)||!same(opened,named)||!sealedFile(after,bytes.length)||!sealedFile(named,bytes.length)||
-     after.size!==opened.size||(process.platform!=='win32'&&(after.mtimeNs!==opened.mtimeNs||after.ctimeNs!==opened.ctimeNs))||named.mode!==after.mode)fail();
+    if(hash.digest('hex')!==digest)fail('native-store:verify-digest');if(!same(opened,after))fail('native-store:verify-after-identity');if(!same(opened,named))fail('native-store:verify-name-identity');if(!sealedFile(after,bytes.length)||!sealedFile(named,bytes.length))fail('native-store:verify-after-sealed');if(after.size!==opened.size)fail('native-store:verify-after-size');if(process.platform!=='win32'&&(after.mtimeNs!==opened.mtimeNs||after.ctimeNs!==opened.ctimeNs))fail('native-store:verify-after-time');if(process.platform!=='win32'&&named.mode!==after.mode)fail('native-store:verify-name-mode');
    }finally{await file.close();}
    if(!same(releaseIdentity,await directory(releaseDirectory,0o500)))fail();await stableParents();return result;
   });
