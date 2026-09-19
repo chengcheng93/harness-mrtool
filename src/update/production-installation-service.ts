@@ -2,7 +2,7 @@ import {createHash, randomBytes} from "node:crypto";
 import {lstat} from "node:fs/promises";
 import {isAbsolute, resolve} from "node:path";
 
-import {canonicalizeJson, sha256Utf8} from "../contracts/jcs.ts";
+import {canonicalizeJson} from "../contracts/jcs.ts";
 import {ToolError} from "../contracts/errors.ts";
 import {withUpdateLock} from "../platform/lock.ts";
 import type {ProcessLockLease} from "../platform/process-lock.ts";
@@ -34,12 +34,16 @@ import {
   advanceInstallationJournal,
 } from "./installation-journal-transition.ts";
 import {
+  advanceInstallationJournalPhase as transition,
+  createInstallationOperationEvidence,
+} from "./installation-journal-coordination.ts";
+import {
   validateInstallationJournal,
   type InstallationFileIdentity,
   type InstallationJournal,
   type InstallationReleaseEvidence,
-  type InstallationSlot,
   type InstallationOperationEvidence,
+  type InstallationSlot,
 } from "./installation-journal.ts";
 import {tupleDigest} from "./journal.ts";
 import {
@@ -136,45 +140,6 @@ function releaseEvidence(snapshot: ReleaseSetSnapshot, authenticated: Authentica
   });
 }
 
-function operationEvidence(journal: Pick<InstallationJournal, "attemptId" | "transactionId" | "previousEvidence" | "nextEvidence">, revision: number, epoch: number): InstallationOperationEvidence {
-  const binding = {
-    authorityEpoch: epoch,
-    workerId: randomId(),
-    operationId: randomId(),
-    attemptId: journal.attemptId,
-    transactionId: journal.transactionId,
-    expectedRevision: revision,
-    previousTupleSha256: journal.previousEvidence.tupleSha256,
-    nextTupleSha256: journal.nextEvidence.tupleSha256,
-    admittedSlots: ["staged-executable", "staged-marker", "previous-executable", "previous-marker", "canonical-executable", "canonical-marker", "active-pointer", "installation-journal"] as const,
-    status: "drained" as const,
-  };
-  return Object.freeze({...binding, receiptSha256: sha256Utf8(canonicalizeJson(binding))});
-}
-
-function terminalDigest(journal: InstallationJournal): string {
-  const {phase: _phase, revision: _revision, terminalEvidenceSha256: _digest, ...evidence} = journal;
-  return sha256Utf8(canonicalizeJson(evidence));
-}
-
-function transition(current: InstallationJournal, phase: InstallationJournal["phase"], outcome: InstallationJournal["outcome"], slots: readonly InstallationSlot[]): InstallationJournal {
-  const revision = current.revision + 1;
-  const operation = operationEvidence(current, revision, current.control.authorityEpoch + 1);
-  const candidate: InstallationJournal = {
-    ...current,
-    revision,
-    phase,
-    outcome,
-    slots: Object.freeze([...slots]),
-    control: Object.freeze({authorityEpoch: operation.authorityEpoch, operations: Object.freeze([...current.control.operations, operation])}),
-    terminalEvidenceSha256: null,
-  };
-  const withTerminal = ["committed", "aborted", "retention-transfer"].includes(phase)
-    ? {...candidate, terminalEvidenceSha256: terminalDigest(candidate)}
-    : candidate;
-  return validateInstallationJournal(advanceInstallationJournal(current, withTerminal));
-}
-
 function stableId(seed: string): string {
   return digest(seed).slice(0, 32);
 }
@@ -224,7 +189,7 @@ function initialJournal(
     windows: platform === "windows-x64" ? {inner: null, launch: null} : null,
     terminalEvidenceSha256: null,
   } satisfies InstallationJournal;
-  const op = operationEvidence(record, 1, 1);
+  const op = createInstallationOperationEvidence(record, 1, 1);
   return validateInstallationJournal({...record, control: {authorityEpoch: 1, operations: [op]}});
 }
 
