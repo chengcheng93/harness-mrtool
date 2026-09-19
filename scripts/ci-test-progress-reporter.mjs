@@ -65,9 +65,13 @@ function failureDetails(data) {
     const candidate = ownValue(error, 'code');
     // Prefer the first specific cause code over Node's generic failure wrapper.
     if (ERROR_CODES.has(candidate) && (code === undefined || code === 'ERR_TEST_FAILURE')) code = candidate;
-    const actual = ownValue(ownValue(error, 'details'), 'actual');
+    const nestedDetails = ownValue(error, 'details');
+    const directActual = ownValue(nestedDetails, 'actual');
+    const assertedActual = ownValue(error, 'actual');
+    const assertedDetails = ownValue(assertedActual, 'details');
+    const actual = typeof directActual === 'string' ? directActual : ownValue(assertedDetails, 'actual');
     const reason = ownValue(error, 'reason');
-    const helperDiagnostic = ownValue(error, 'diagnostic');
+    const helperDiagnostic = ownValue(error, 'diagnostic') ?? ownValue(assertedActual, 'diagnostic');
     if (diagnostic === undefined && typeof actual === 'string' && /^(?:windows-helper|native-store|managed-installation|update-state|installation-journal):[a-z-]{1,32}$/u.test(actual)) {
       diagnostic = actual;
     }
