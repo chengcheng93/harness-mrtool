@@ -173,7 +173,11 @@ for (const failure of ['nonzero', 'signal', 'stderr', 'garbage', 'bom', 'sea-fal
       assert.equal(error.code, 'UPDATE_SECURITY_ERROR', diagnostic('error-code')); assert.ok(!JSON.stringify(error).includes('secret-child-output'), diagnostic('diagnostic-redaction')); return true;
     });
     assert.ok(performance.now() - start < 7000, diagnostic('failure-timeout'));
-    assert.equal(children.length > 0, failure !== 'spawn-throw', diagnostic('child-count'));
+    // Windows may synchronously throw for a missing executable before it can
+    // return a ChildProcess; POSIX emits the asynchronous error on a child.
+    const expectsChild = failure !== 'spawn-throw' &&
+      !(failure === 'spawn-error' && process.platform === 'win32');
+    assert.equal(children.length > 0, expectsChild, diagnostic('child-count'));
     assert.ok(closed.every(Boolean), diagnostic('child-close'));
     for (const child of children) if (child.pid) assert.throws(() => process.kill(child.pid!, 0));
     await assert.rejects(access(cwd), {code: 'ENOENT'});
