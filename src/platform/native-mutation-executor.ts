@@ -6,6 +6,7 @@ import { isAbsolute, resolve, win32 } from "node:path";
 
 import { samePhysicalPath } from "./windows-path.ts";
 import { resolveWindowsPowerShellPath } from "./state-path.ts";
+import { parseNativeStoreDiagnostic } from "./native-diagnostic.ts";
 
 import { ToolError } from "../contracts/errors.ts";
 
@@ -65,11 +66,11 @@ interface EpochState {
 const preparedStates = new WeakMap<object, PreparedState>();
 const epochStates = new WeakMap<object, EpochState>();
 
-function securityFailure(): ToolError<"UPDATE_SECURITY_ERROR"> {
+function securityFailure(actual = "native mutation authority rejected or became unavailable"): ToolError<"UPDATE_SECURITY_ERROR"> {
   return new ToolError("UPDATE_SECURITY_ERROR", "Native mutation authority is unavailable", {
     field: "update.nativeMutation",
     expected: "a live native executor with an authenticated fixed-slot protocol",
-    actual: "native mutation authority rejected or became unavailable",
+    actual,
     safeNextStep: "Keep the installed release and inspect the private update state before retrying.",
   });
 }
@@ -561,42 +562,50 @@ async function startNativeExecutor(
 
 const WINDOWS_NATIVE_EXECUTOR = String.raw`
 $ErrorActionPreference='Stop'
+$stage='startup'
 $root=$env:HMRTOOL_NATIVE_EXECUTOR_ROOT
 $epoch=$env:HMRTOOL_NATIVE_EXECUTOR_EPOCH
-if([string]::IsNullOrEmpty($root) -or [string]::IsNullOrEmpty($epoch)) { exit 31 }
-if([IO.Path]::GetFullPath($root) -ne $root -or $epoch -notmatch '^[0-9a-f-]{36}$') { exit 31 }
-$rootInfo=Get-Item -LiteralPath $root -Force
-if(!$rootInfo.PSIsContainer -or (($rootInfo.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) { exit 31 }
-$lockPath=[IO.Path]::Combine($root,'.update.lock')
-$targetPath=[IO.Path]::Combine($root,'installation-transaction.json')
 $lock=$null
 try {
+  $stage='environment'
+  if([string]::IsNullOrEmpty($root) -or [string]::IsNullOrEmpty($epoch)) { throw 'rejected' }
+  if([IO.Path]::GetFullPath($root) -ne $root -or $epoch -notmatch '^[0-9a-f-]{36}$') { throw 'rejected' }
+  $stage='root'
+  $rootInfo=Get-Item -LiteralPath $root -Force
+  if(!$rootInfo.PSIsContainer -or (($rootInfo.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) { throw 'rejected' }
+  $lockPath=[IO.Path]::Combine($root,'.update.lock')
+  $targetPath=[IO.Path]::Combine($root,'installation-transaction.json')
+  $stage='lock-open'
   $lock=[IO.File]::Open($lockPath,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None,4096,[IO.FileOptions]::WriteThrough)
   $lockInfo=Get-Item -LiteralPath $lockPath -Force
-  if($lockInfo.PSIsContainer -or (($lockInfo.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) { exit 31 }
+  if($lockInfo.PSIsContainer -or (($lockInfo.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) { throw 'rejected' }
+  $stage='ready'
   [Console]::Out.WriteLine(('READY' + [char]9 + $epoch)); [Console]::Out.Flush()
   $reserved=$null
   $admitted=$false
   while($true) {
+    $stage='read'
     $line=[Console]::In.ReadLine()
-    if($null -eq $line) { exit 31 }
-    if($line.Length -gt 600000) { exit 31 }
+    if($null -eq $line) { throw 'rejected' }
+    if($line.Length -gt 600000) { throw 'rejected' }
     $parts=$line.Split([char]9,[StringSplitOptions]::None)
     $command=$parts[0]
     if($command -eq 'RESERVE' -and $parts.Count -eq 6) {
+      $stage='reserve'
       $receivedEpoch=$parts[1]; $sequence=$parts[2]; $operation=$parts[3]; $length=$parts[4]; $sha=$parts[5]
-      if($receivedEpoch -ne $epoch -or $sequence -notmatch '^[1-9][0-9]*$' -or $operation -notmatch '^[0-9a-f-]{36}$' -or $length -notmatch '^[1-9][0-9]*$' -or [int64]$length -gt 262144 -or $sha -notmatch '^[0-9a-f]{64}$' -or $null -ne $reserved -or $admitted) { exit 31 }
+      if($receivedEpoch -ne $epoch -or $sequence -notmatch '^[1-9][0-9]*$' -or $operation -notmatch '^[0-9a-f-]{36}$' -or $length -notmatch '^[1-9][0-9]*$' -or [int64]$length -gt 262144 -or $sha -notmatch '^[0-9a-f]{64}$' -or $null -ne $reserved -or $admitted) { throw 'rejected' }
       $reserved=@($receivedEpoch,[int64]$sequence,$operation,[int64]$length,$sha)
       [Console]::Out.WriteLine(('OK' + [char]9 + 'RESERVE' + [char]9 + $sequence + [char]9 + $operation)); [Console]::Out.Flush(); continue
     }
     if($command -eq 'ADMIT' -and $parts.Count -eq 7) {
+      $stage='admit'
       $receivedEpoch=$parts[1]; $sequence=$parts[2]; $operation=$parts[3]; $length=$parts[4]; $sha=$parts[5]; $hex=$parts[6]
-      if($null -eq $reserved -or $admitted -or $receivedEpoch -ne $reserved[0] -or [int64]$sequence -ne $reserved[1] -or $operation -ne $reserved[2] -or [int64]$length -ne $reserved[3] -or $sha -ne $reserved[4] -or $hex -notmatch '^[0-9a-f]*$' -or $hex.Length -ne 2 * [int64]$length) { exit 31 }
+      if($null -eq $reserved -or $admitted -or $receivedEpoch -ne $reserved[0] -or [int64]$sequence -ne $reserved[1] -or $operation -ne $reserved[2] -or [int64]$length -ne $reserved[3] -or $sha -ne $reserved[4] -or $hex -notmatch '^[0-9a-f]*$' -or $hex.Length -ne 2 * [int64]$length) { throw 'rejected' }
       $bytes=New-Object byte[] ([int64]$length)
       for($index=0; $index -lt $bytes.Length; $index++) { $bytes[$index]=[Convert]::ToByte($hex.Substring($index * 2,2),16) }
       $shaProvider=[Security.Cryptography.SHA256]::Create()
       try { $actual=([BitConverter]::ToString($shaProvider.ComputeHash($bytes))).Replace('-','').ToLowerInvariant() } finally { $shaProvider.Dispose() }
-      if($actual -ne $sha -or (Test-Path -LiteralPath $targetPath -PathType Any)) { exit 31 }
+      if($actual -ne $sha -or (Test-Path -LiteralPath $targetPath -PathType Any)) { throw 'rejected' }
       $output=$null
       try {
         $output=[IO.File]::Open($targetPath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None,4096,[IO.FileOptions]::WriteThrough)
@@ -608,18 +617,21 @@ try {
       [Console]::Out.WriteLine(('OK' + [char]9 + 'ADMIT' + [char]9 + $sequence + [char]9 + $operation + [char]9 + $sha)); [Console]::Out.Flush(); continue
     }
     if($command -eq 'REVOKE' -and $parts.Count -eq 4) {
+      $stage='revoke'
       $receivedEpoch=$parts[1]; $sequence=$parts[2]; $operation=$parts[3]
-      if($null -eq $reserved -or $admitted -or $receivedEpoch -ne $reserved[0] -or [int64]$sequence -ne $reserved[1] -or $operation -ne $reserved[2]) { exit 31 }
+      if($null -eq $reserved -or $admitted -or $receivedEpoch -ne $reserved[0] -or [int64]$sequence -ne $reserved[1] -or $operation -ne $reserved[2]) { throw 'rejected' }
       $reserved=$null
       [Console]::Out.WriteLine(('OK' + [char]9 + 'REVOKE' + [char]9 + $sequence + [char]9 + $operation)); [Console]::Out.Flush(); continue
     }
     if($command -eq 'CLOSE' -and $parts.Count -eq 1) {
+      $stage='close'
       $lock.Dispose(); $lock=$null
       [Console]::Out.WriteLine(('OK' + [char]9 + 'CLOSE')); [Console]::Out.Flush(); exit 0
     }
-    exit 31
+    $stage='protocol'
+    throw 'rejected'
   }
-} catch { exit 31 } finally { if($null -ne $lock) { $lock.Dispose() } }
+} catch { try { [Console]::Error.WriteLine(('ERR:' + $stage)) } catch {}; exit 31 } finally { if($null -ne $lock) { $lock.Dispose() } }
 `;
 
 class WindowsNativeMutationExecutor extends DarwinNativeMutationExecutor {}
@@ -655,6 +667,7 @@ async function startWindowsNativeExecutor(directory: string): Promise<NativeMuta
   await validateWindowsRoot(directory);
   let child: ChildProcessWithoutNullStreams | undefined;
   let childClose: Promise<CloseObservation> | undefined;
+  let stderr = "";
   try {
     const epochId = randomUUID();
     child = spawn(
@@ -672,6 +685,10 @@ async function startWindowsNativeExecutor(directory: string): Promise<NativeMuta
       },
     ) as ChildProcessWithoutNullStreams;
     childClose = closeObservation(child);
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      if (stderr.length < 128) stderr += chunk.slice(0, 128 - stderr.length);
+    });
     child.stderr.resume();
     const protocol = new LineProtocol(child);
     const ready = await protocol.nextLine(STARTUP_TIMEOUT_MS);
@@ -696,6 +713,8 @@ async function startWindowsNativeExecutor(directory: string): Promise<NativeMuta
       if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
       await childClose?.catch(() => undefined);
     }
+    const diagnostic = parseNativeStoreDiagnostic(stderr);
+    if (diagnostic !== undefined) throw securityFailure(diagnostic);
     throw error instanceof ToolError ? error : securityFailure();
   }
 }
