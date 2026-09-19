@@ -9,7 +9,7 @@ import { resolveWindowsPowerShellPath } from './state-path.ts';
 export interface AnchoredFileWriteOptions {
   readonly directory: string;
   readonly expectedIdentity: { readonly dev: bigint; readonly ino: bigint };
-  readonly name: 'harness-mrtool' | 'harness-mrtool.exe' | 'harness-mrtool.exe.new' | '.harness-mrtool-install.json' | '.harness-mrtool-install.json.new';
+  readonly name: 'harness-mrtool' | 'harness-mrtool.exe' | 'harness-mrtool.exe.new' | '.harness-mrtool-install.json' | '.harness-mrtool-install.json.new' | '.harness-mrtool-launch.json';
   readonly bytes: Uint8Array;
 }
 
@@ -32,7 +32,7 @@ $Config{d_fchdir} eq 'define' or die 'unsupported';
 my ($dev,$ino,$name,$length)=@ARGV;
 $dev =~ /\A([0-9]+)\z/ or die 'identity'; $dev=$1;
 $ino =~ /\A([0-9]+)\z/ or die 'identity'; $ino=$1;
-$name =~ /\A(harness-mrtool(?:\.exe)?(?:\.new)?|\.harness-mrtool-install\.json(?:\.new)?)\z/ or die 'name'; $name=$1;
+$name =~ /\A(harness-mrtool(?:\.exe)?(?:\.new)?|\.harness-mrtool-install\.json(?:\.new)?|\.harness-mrtool-launch\.json)\z/ or die 'name'; $name=$1;
 $length =~ /\A([0-9]+)\z/ or die 'length'; $length=0+$1;
 $length > 0 && $length <= 268435456 or die 'length';
 open(my $dir,'<&=3') or die 'descriptor';
@@ -89,7 +89,7 @@ public static class AnchoredNativeWriter {
    stage="identity-parse";
    if(devText==null || !UInt64.TryParse(devText,out dev) || inoText==null || !UInt64.TryParse(inoText,out ino) || lengthText==null || !Int64.TryParse(lengthText,out length)) throw new IOException();
    stage="input";
-   if(length<1 || length>268435456 || (name!="harness-mrtool" && name!="harness-mrtool.exe" && name!="harness-mrtool.exe.new" && name!=".harness-mrtool-install.json" && name!=".harness-mrtool-install.json.new")) throw new IOException();
+   if(length<1 || length>268435456 || (name!="harness-mrtool" && name!="harness-mrtool.exe" && name!="harness-mrtool.exe.new" && name!=".harness-mrtool-install.json" && name!=".harness-mrtool-install.json.new" && name!=".harness-mrtool-launch.json")) throw new IOException();
    stage="path-root";
    string root=Path.GetPathRoot(directory);
    if(root==null) throw new IOException();
@@ -213,7 +213,7 @@ export async function writeAnchoredFile(options: AnchoredFileWriteOptions): Prom
     const directory = options.directory, name = options.name;
     const { dev, ino } = options.expectedIdentity;
     if (typeof directory !== 'string' || !isAbsolute(directory) || resolve(directory) !== directory || directory.includes('\0') ||
-        (name !== 'harness-mrtool' && name !== 'harness-mrtool.exe' && name !== 'harness-mrtool.exe.new' && name !== '.harness-mrtool-install.json' && name !== '.harness-mrtool-install.json.new') ||
+        (name !== 'harness-mrtool' && name !== 'harness-mrtool.exe' && name !== 'harness-mrtool.exe.new' && name !== '.harness-mrtool-install.json' && name !== '.harness-mrtool-install.json.new' && name !== '.harness-mrtool-launch.json') ||
         typeof dev !== 'bigint' || typeof ino !== 'bigint' || dev < 0n || ino < 1n || dev > MAX_IDENTITY || ino > MAX_IDENTITY ||
         !(options.bytes instanceof Uint8Array) || options.bytes.length < 1 || options.bytes.length > MAX_BYTES) throw failure();
     const bytes = Uint8Array.from(options.bytes);
