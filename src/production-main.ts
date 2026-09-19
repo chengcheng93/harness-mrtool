@@ -250,7 +250,9 @@ function createDefaultInstallationService(
     // In a packaged SEA, process.execPath is the installed native binary.
     // Development invocations therefore fail closed at the canonical
     // installation verification gate instead of mutating the Node runtime.
-    installationDirectory: dirname(resolve(process.execPath)),
+    // The explicit path is an in-process composition/test seam only; it is
+    // never sourced from CLI arguments or environment variables.
+    installationDirectory: channelDefaults.installationDirectory ?? dirname(resolve(process.execPath)),
   });
 }
 
