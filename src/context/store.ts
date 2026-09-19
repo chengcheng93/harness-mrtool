@@ -377,7 +377,8 @@ export class CandidateContextStore {
   }
 
   private sameFileIdentity(left: BigIntStats, right: BigIntStats): boolean {
-    return left.dev === right.dev && left.ino === right.ino;
+    return left.ino > 0n && right.ino > 0n && left.ino === right.ino &&
+      (process.platform === "win32" || left.dev === right.dev);
   }
 
   private async readLockOwnerAt(lockPath: string): Promise<LockOwnerRead> {
@@ -414,7 +415,7 @@ export class CandidateContextStore {
         const after = await handle.stat({ bigint: true });
         const pathAfter = await lstat(ownerPath, { bigint: true });
         if (offset !== expectedSize || after.size !== before.size || after.nlink !== 1n ||
-            after.mtimeNs !== before.mtimeNs || after.ctimeNs !== before.ctimeNs ||
+            (process.platform !== "win32" && (after.mtimeNs !== before.mtimeNs || after.ctimeNs !== before.ctimeNs)) ||
             !this.sameFileIdentity(before, after) || pathAfter.isSymbolicLink() ||
             pathAfter.nlink !== 1n || !this.sameFileIdentity(before, pathAfter)) {
           result = { kind: "unsafe" };
