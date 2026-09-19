@@ -193,7 +193,9 @@ export function createProductionSkillCommandService(
 
   async function prepareDefaultActiveParent(): Promise<void> {
     await mkdir(dirname(activeDefault), { recursive: true, mode: 0o700 });
-    await ensurePrivateStateDirectory(dirname(activeDefault));
+    await ensurePrivateStateDirectory(dirname(activeDefault), options.windowsAclVerifier === undefined
+      ? {}
+      : { windowsAclVerifier: options.windowsAclVerifier });
   }
 
   function managerFor(path: string): SkillManager {
