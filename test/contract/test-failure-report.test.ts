@@ -18,7 +18,12 @@ function report(log: string, status = "1") {
   try {
     const path = join(directory, "spec.log");
     writeFileSync(path, log);
-    return runProcess(process.execPath, [reporter, path, status], { cwd: root });
+    const result = runProcess(process.execPath, [reporter, path, status], { cwd: root });
+    return {
+      ...result,
+      stdout: result.stdout.replaceAll("\r\n", "\n"),
+      stderr: result.stderr.replaceAll("\r\n", "\n"),
+    };
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
