@@ -6,6 +6,7 @@ import {canonicalizeJson} from "../contracts/jcs.ts";
 import {ToolError} from "../contracts/errors.ts";
 import {withUpdateLock} from "../platform/lock.ts";
 import type {ProcessLockLease} from "../platform/process-lock.ts";
+import {openNativeMutationExecutor, type NativeMutationExecutor} from "../platform/native-mutation-executor.ts";
 import type {AnchoredMoveFileIdentity} from "../platform/anchored-file-mover.ts";
 import {
   UpdateCache,
@@ -46,6 +47,9 @@ import {
   type InstallationSlot,
 } from "./installation-journal.ts";
 import {tupleDigest} from "./journal.ts";
+import {coordinateWindowsInnerJournal} from "./windows-installation-coordinator.ts";
+import {createWindowsMutationPlan} from "./windows-persistence-handoff.ts";
+import {launchWindowsPersistenceHelper} from "./windows-persistence-helper.ts";
 import {
   verifyInstalledRelease,
   type InstalledReleaseObservation,
@@ -261,10 +265,6 @@ export function createProductionInstallationService(options: ProductionInstallat
         return Object.freeze({status: "unchanged" as const, active: previous.record, observed});
       }
       if (candidate.snapshot.record.manifestSequence <= previous.record.manifestSequence) throw failure("candidate-sequence-is-not-newer", "UPDATE_REQUIRED");
-      // The current Windows adapter is still a physical rotation primitive. It
-      // does not yet provide the required claimed-launch/persistence-pending
-      // settlement protocol, so never expose it as an installed result.
-      if (platform === "windows-x64") throw failure("windows-persistence-settlement-unavailable");
       const finalChannel = await channel.check(false, lease);
       if (!finalChannel.latestVersionConfirmed || finalChannel.verified.payloadSha256 !== candidateAuth.verified.payloadSha256) throw failure("candidate-channel-payload-changed", "CONCURRENT_UPDATE");
       const stagedCache = await cache.stageVerifiedReleaseSet(candidate.snapshot, lease);
@@ -277,6 +277,8 @@ export function createProductionInstallationService(options: ProductionInstallat
       await store.write(journal);
 
       let stage: ManagedPosixStage | ManagedWindowsStage | undefined;
+      let windowsExecutor: NativeMutationExecutor | undefined;
+      let windowsHandedOff = false;
       try {
         if (platform === "darwin-arm64") {
           const posixStage = await stageAuthenticatedManagedPosixCandidate({installationDirectory, snapshot: candidate.snapshot, platform, ...(trustConfig === undefined ? {} : {trustConfig})});
@@ -298,11 +300,28 @@ export function createProductionInstallationService(options: ProductionInstallat
           const observation = await verifyManagedWindowsStage(windowsStage);
           const prepared = transition(journal, "prepared", null, slotsWithCreatedIdentities(journal, identityFromObserved(observation.executableIdentity), identityFromObserved(observation.markerIdentity), fileIdentity(current.executable), fileIdentity(current.marker)));
           await store.write(prepared);
-          const publishIntent = transition(prepared, "publish-intent", null, prepared.slots);
-          await store.write(publishIntent);
-          await publishManagedWindowsCandidate(windowsStage);
-          await store.write(transition(publishIntent, "canonical-published", null, publishIntent.slots));
-          await store.write(transition(await store.read() as InstallationJournal, "marker-published", null, publishIntent.slots));
+          windowsExecutor = await openNativeMutationExecutor(installationDirectory);
+          const coordinated = await coordinateWindowsInnerJournal({
+            current: prepared,
+            installationDirectory,
+            executor: windowsExecutor,
+            plan: createWindowsMutationPlan(prepared),
+          });
+          await store.write(coordinated.journal);
+          const handoff = await launchWindowsPersistenceHelper({
+            stateDirectory,
+            installationDirectory,
+            current: coordinated.journal,
+            persist: async (next) => { await store.write(next); },
+          });
+          windowsHandedOff = true;
+          await windowsExecutor.close();
+          windowsExecutor = undefined;
+          return Object.freeze({
+            status: "persistence-pending" as const,
+            executing: candidate.snapshot.record,
+            persistencePending: true as const,
+          });
         }
         const markerPublished = await store.read();
         if (markerPublished === null) throw failure("journal-disappeared");
@@ -318,7 +337,8 @@ export function createProductionInstallationService(options: ProductionInstallat
       } catch (error) {
         throw error instanceof ToolError ? error : failure("installation-mutation-failed");
       } finally {
-        if (stage !== undefined) {
+        await windowsExecutor?.close().catch(() => undefined);
+        if (stage !== undefined && !(platform === "windows-x64" && windowsHandedOff)) {
           if (platform === "darwin-arm64") await removeManagedPosixStage(stage as ManagedPosixStage).catch(() => undefined);
           else await removeManagedWindowsStage(stage as ManagedWindowsStage).catch(() => undefined);
         }

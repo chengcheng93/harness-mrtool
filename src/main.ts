@@ -34,6 +34,7 @@ import {
   mergeCliCommandHandlers,
 } from "./cli/commands/production.ts";
 import { writeProjectTemplate } from "./cli/projection-writer.ts";
+import { runWindowsPersistenceHelper } from "./update/windows-persistence-helper.ts";
 
 declare const __HARNESS_MRTOOL_VERSION__: string;
 declare const __HARNESS_MRTOOL_BOOTSTRAP_BUNDLE__: unknown;
@@ -396,6 +397,29 @@ async function runBundleValidation(bundleDirectory: string): Promise<void> {
   }
 }
 
+async function runInternalWindowsPersistence(arguments_: readonly string[]): Promise<void> {
+  const stateDirectory = arguments_[2];
+  const installationDirectory = arguments_[3];
+  const helperPath = arguments_[4];
+  if (arguments_.length !== 5 || arguments_[0] !== "internal" || arguments_[1] !== "windows-persist" ||
+      stateDirectory === undefined || installationDirectory === undefined || helperPath === undefined) {
+    process.exitCode = 2;
+    return;
+  }
+  try {
+    await runWindowsPersistenceHelper({
+      stateDirectory,
+      installationDirectory,
+      helperPath,
+    });
+  } catch {
+    // The detached helper has already handed off its READY record to the
+    // parent. Never emit a second protocol or a business result after that
+    // boundary; leave the journal and native evidence for bounded repair.
+    process.exitCode = 1;
+  }
+}
+
 async function runInternalApplyUpdate(): Promise<void> {
   try {
     const bytes = await consumeInvocationStdin((async function* (): AsyncIterable<Uint8Array> {
@@ -445,6 +469,10 @@ async function main(arguments_: readonly string[]): Promise<void> {
   const command = arguments_[0];
 
   if (command === "internal") {
+    if (arguments_.length === 5 && arguments_[1] === "windows-persist") {
+      await runInternalWindowsPersistence(arguments_);
+      return;
+    }
     if (arguments_.length === 2 && arguments_[1] === "apply-update") {
       await runInternalApplyUpdate();
       return;

@@ -252,6 +252,43 @@ export async function stageAuthenticatedManagedWindowsCandidate(
   }
 }
 
+/** Rebind a staged candidate after a process restart without trusting an in-memory stage token. */
+export async function rehydrateAuthenticatedManagedWindowsCandidate(
+  input: AuthenticatedManagedWindowsStageInput,
+): Promise<ManagedWindowsStage> {
+  if (process.platform !== "win32") throw failure();
+  try {
+    const root = absoluteRoot(input.installationDirectory);
+    const owned = validateReleaseSetSnapshot({
+      record: input.snapshot.record,
+      cliBytes: input.snapshot.cliBytes,
+      templateBytes: input.snapshot.templateBytes,
+      receiptBytes: input.snapshot.receiptBytes,
+    });
+    const authenticated = await authenticateReleaseSnapshot(owned, input);
+    const executableSha256 = createHash("sha256").update(authenticated.executableBytes).digest("hex");
+    const marker = markerBytes(owned, authenticated, executableSha256);
+    const markerSha256 = createHash("sha256").update(marker).digest("hex");
+    await ensurePrivateStateDirectory(root, input.windowsAclVerifier === undefined ? {} : { windowsAclVerifier: input.windowsAclVerifier });
+    const rootIdentity = await directoryIdentity(root);
+    const stagedExecutableIdentity = await fileIdentity(resolve(root, STAGED_EXECUTABLE_NAME));
+    const stagedMarkerIdentity = await fileIdentity(resolve(root, STAGED_MARKER_NAME));
+    const publicValue = Object.freeze({
+      installationDirectory: root,
+      executablePath: resolve(root, EXECUTABLE_NAME),
+      stagedExecutablePath: resolve(root, STAGED_EXECUTABLE_NAME),
+      markerPath: resolve(root, MARKER_NAME),
+      stagedMarkerPath: resolve(root, STAGED_MARKER_NAME),
+      executableSha256,
+      markerSha256,
+    });
+    stageStates.set(publicValue, Object.freeze({ publicValue, rootIdentity, stagedExecutableIdentity, stagedMarkerIdentity }));
+    return publicValue;
+  } catch (error) {
+    throw error instanceof ToolError ? error : failure("managed-installation:rehydrate");
+  }
+}
+
 export async function verifyManagedWindowsStage(stage: ManagedWindowsStage): Promise<ManagedWindowsStageObservation> {
   try {
     const state = await assertStage(stage);
