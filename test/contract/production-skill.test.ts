@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { resolve } from "node:path";
 import test from "node:test";
 
 import { parseCliInvocation } from "../../src/cli/program.ts";
@@ -143,4 +146,38 @@ test("production main uses the injected Skill service for status", async () => {
   assert.equal(exitCode, 0);
   assert.equal(calls, 1);
   assert.equal(JSON.parse(chunks.join("")).data.command, "skill.status");
+});
+
+test("production main forwards the loaded Skill invocation pin to its default service", async (t) => {
+  const home = await mkdtemp(resolve(await realpath(tmpdir()), "production-skill-default-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const previousHome = process.env.HOME;
+  const previousUserProfile = process.env.USERPROFILE;
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  t.after(() => {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = previousUserProfile;
+  });
+
+  const chunks: string[] = [];
+  const output = { write: (chunk: string) => { chunks.push(chunk); return true; } };
+  const exitCode = await runProductionMain(
+    [
+      "skill", "status", "--client", "codex-skill", "--client-version", "0.1.6",
+      "--skill-protocol", "1", "--output", "json",
+    ],
+    {
+      updateChannelDefaults: { stateDirectory: resolve(home, "state") },
+      updatePreflight: { run: async () => undefined },
+      stdout: output,
+      stderr: output,
+    },
+  );
+  assert.equal(exitCode, 0);
+  const data = JSON.parse(chunks.join("")) as { data: { loadedSkillVersion: string | null; loadedSkillProtocol: number | null } };
+  assert.equal(data.data.loadedSkillVersion, "0.1.6");
+  assert.equal(data.data.loadedSkillProtocol, 1);
 });

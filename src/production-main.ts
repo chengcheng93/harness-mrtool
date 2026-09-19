@@ -149,9 +149,9 @@ function lazyDefaultSkillCommandServices(
     return resolved;
   }
   return createSkillCommandServices({
-    install: (path) => service().install(path),
-    activate: (version, path) => service().activate(version, path),
-    status: () => service().status(),
+    install: (path, pin) => service().install(path, pin),
+    activate: (version, path, pin) => service().activate(version, path, pin),
+    status: (pin) => service().status(pin),
   });
 }
 
