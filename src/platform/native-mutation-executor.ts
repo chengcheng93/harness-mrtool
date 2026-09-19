@@ -278,6 +278,10 @@ while (my $line = <STDIN>) {
     my $bytes = pack('H*', $hex);
     length($bytes) == $length && sha256_hex($bytes) eq $sha or fail();
     chdir($root) or die 'fchdir';
+    if (-e 'installation-transaction.json' || -l 'installation-transaction.json') {
+      print STDOUT "ERR\tadmit\n" or die 'response';
+      next;
+    }
     umask(0077);
     sysopen(my $out, 'installation-transaction.json', O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600) or die 'create';
     binmode($out) or die 'output';
@@ -431,11 +435,15 @@ class DarwinNativeMutationExecutor implements NativeMutationExecutor {
   }
 
   private async request(line: string): Promise<string[]> {
-    await writeLine(this.child, line);
-    const response = await this.protocol.nextLine(COMMAND_TIMEOUT_MS);
-    const fields = response.split("\t");
-    if (fields[0] !== "OK") throw securityFailure();
-    return fields;
+    try {
+      await writeLine(this.child, line);
+      const response = await this.protocol.nextLine(COMMAND_TIMEOUT_MS);
+      const fields = response.split("\t");
+      if (fields[0] !== "OK") throw securityFailure();
+      return fields;
+    } catch (error) {
+      throw error instanceof ToolError ? error : securityFailure();
+    }
   }
 
   async reserve(mutation: PreparedMutation): Promise<void> {
@@ -605,7 +613,9 @@ try {
       for($index=0; $index -lt $bytes.Length; $index++) { $bytes[$index]=[Convert]::ToByte($hex.Substring($index * 2,2),16) }
       $shaProvider=[Security.Cryptography.SHA256]::Create()
       try { $actual=([BitConverter]::ToString($shaProvider.ComputeHash($bytes))).Replace('-','').ToLowerInvariant() } finally { $shaProvider.Dispose() }
-      if($actual -ne $sha -or (Test-Path -LiteralPath $targetPath -PathType Any)) { throw 'rejected' }
+      if($actual -ne $sha -or (Test-Path -LiteralPath $targetPath -PathType Any)) {
+        [Console]::Out.WriteLine(('ERR' + [char]9 + 'admit')); [Console]::Out.Flush(); continue
+      }
       $output=$null
       try {
         $output=[IO.File]::Open($targetPath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None,4096,[IO.FileOptions]::WriteThrough)

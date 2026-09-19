@@ -13,6 +13,7 @@ import {
   rm,
   stat,
   symlink,
+  writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
@@ -93,6 +94,16 @@ test("Windows native executor owns the fixed slot and preserves epoch fencing", 
   await successor.reserve(next);
   await assert.rejects(successor.admit(next), { code: "UPDATE_SECURITY_ERROR" });
   await successor.close();
+});
+
+test("a nonmutating fixed-slot admission refusal leaves the executor closable", darwin, async (t) => {
+  const root = await temporaryInstallation(t);
+  await writeFile(target(root), Buffer.from([99]));
+  const mutation = prepareMutation(Uint8Array.from([1, 2, 3]));
+  const executor = await openNativeMutationExecutor(root);
+  await executor.reserve(mutation);
+  await assert.rejects(executor.admit(mutation), { code: "UPDATE_SECURITY_ERROR" });
+  await executor.close();
 });
 
 test("prepared bytes are copied before asynchronous execution", darwin, async (t) => {
