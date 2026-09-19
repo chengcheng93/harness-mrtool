@@ -24,6 +24,10 @@ const control: InstallationControl = Object.freeze({
   installationId: "f".repeat(32),
   enrollmentId: "1".repeat(32),
   authorityEpoch: 7,
+  roots: Object.freeze({
+    installation: Object.freeze({ dev: "2", ino: "100" }),
+    state: Object.freeze({ dev: "3", ino: "101" }),
+  }),
   current: operation,
   queued: [],
 });
@@ -46,6 +50,10 @@ test("installation control encodes and decodes a bounded canonical operation rec
     enrollmentId: "1".repeat(32),
     installationId: "f".repeat(32),
     queued: [],
+    roots: {
+      installation: { dev: "2", ino: "100" },
+      state: { dev: "3", ino: "101" },
+    },
     schemaVersion: 1,
   })}\n`);
   assert.deepEqual(decodeInstallationControl(bytes), control);
@@ -57,6 +65,7 @@ test("installation control rejects paths, business payload, stale status, and qu
     {...parsed, path: "C:\\\\secret"},
     {...parsed, token: "secret"},
     {...parsed, authorityEpoch: 0},
+    {...parsed, roots: { installation: { dev: "2", ino: "100" }, state: { dev: "2", ino: "100" } }},
     {...parsed, queued: [operation, {...operation, operationId: "0".repeat(31) + "1"}]},
   ]) {
     assert.throws(() => decodeInstallationControl(new TextEncoder().encode(JSON.stringify(value))), /installation control is invalid/u);

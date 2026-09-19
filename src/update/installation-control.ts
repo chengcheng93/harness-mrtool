@@ -24,6 +24,11 @@ const MUTATION_SLOTS = new Set([
   "active-pointer", "installation-journal", "installation-control", "retention-catalog",
 ]);
 
+export interface InstallationControlRootIdentity {
+  readonly dev: string;
+  readonly ino: string;
+}
+
 export type InstallationControlOperationName = "apply" | "rollback" | "recover";
 export type InstallationControlWorkerStatus = "scheduled" | "running" | "drained" | "revoked";
 export type InstallationControlMutationSlot =
@@ -48,6 +53,7 @@ export interface InstallationControl {
   readonly installationId: string;
   readonly enrollmentId: string;
   readonly authorityEpoch: number;
+  readonly roots: { readonly installation: InstallationControlRootIdentity; readonly state: InstallationControlRootIdentity };
   readonly current: InstallationControlOperation | null;
   readonly queued: readonly InstallationControlOperation[];
 }
@@ -103,6 +109,22 @@ function operationName(value: unknown): InstallationControlOperationName {
   return value;
 }
 
+function rootIdentity(value: unknown): InstallationControlRootIdentity {
+  const item = exactRecord(value, ["dev", "ino"]);
+  const dev = text(item.dev, /^(?:0|[1-9][0-9]{0,19})$/u, 20);
+  const ino = text(item.ino, /^[1-9][0-9]{0,19}$/u, 20);
+  if (BigInt(dev) > 0xffffffffffffffffn || BigInt(ino) > 0xffffffffffffffffn) invalid();
+  return Object.freeze({ dev, ino });
+}
+
+function roots(value: unknown): { readonly installation: InstallationControlRootIdentity; readonly state: InstallationControlRootIdentity } {
+  const item = exactRecord(value, ["installation", "state"]);
+  const installation = rootIdentity(item.installation);
+  const state = rootIdentity(item.state);
+  if (installation.dev === state.dev && installation.ino === state.ino) invalid();
+  return Object.freeze({ installation, state });
+}
+
 function status(value: unknown): InstallationControlWorkerStatus {
   if (value !== "scheduled" && value !== "running" && value !== "drained" && value !== "revoked") invalid();
   return value;
@@ -137,7 +159,7 @@ function readOperation(value: unknown): InstallationControlOperation {
 }
 
 function readControl(value: unknown): InstallationControl {
-  const item = exactRecord(value, ["schemaVersion", "installationId", "enrollmentId", "authorityEpoch", "current", "queued"]);
+  const item = exactRecord(value, ["schemaVersion", "installationId", "enrollmentId", "authorityEpoch", "roots", "current", "queued"]);
   if (item.schemaVersion !== 1) invalid();
   const current = item.current === null ? null : readOperation(item.current);
   const queuedSource = exactArray(item.queued);
@@ -163,6 +185,7 @@ function readControl(value: unknown): InstallationControl {
     installationId: text(item.installationId, ID, 32),
     enrollmentId: text(item.enrollmentId, ID, 32),
     authorityEpoch: integer(item.authorityEpoch),
+    roots: roots(item.roots),
     current,
     queued,
   });
