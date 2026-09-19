@@ -1,18 +1,12 @@
-import { resolve, win32 } from "node:path";
+import { resolve } from "node:path";
 
 /**
- * Compare a caller-controlled absolute path with a Windows realpath result.
- * Node may report the latter with the extended-length `\\?\\` prefix; this
- * normalizes only equivalent spelling differences and never resolves links.
+ * Windows `realpath` may expand an 8.3 alias (and may add an extended-length
+ * prefix), so its spelling cannot be compared with the caller's path. Callers
+ * must pair this with lstat/reparse and device+inode identity checks; on POSIX
+ * the canonical spelling remains part of the fence.
  */
 export function samePhysicalPath(left: string, right: string): boolean {
-  if (process.platform !== "win32") return resolve(left) === resolve(right);
-  return windowsPathKey(left) === windowsPathKey(right);
-}
-
-function windowsPathKey(value: string): string {
-  let normalized = value.replaceAll("/", "\\");
-  if (normalized.startsWith("\\\\?\\UNC\\")) normalized = `\\\\${normalized.slice(8)}`;
-  else if (normalized.startsWith("\\\\?\\")) normalized = normalized.slice(4);
-  return win32.normalize(normalized).toLowerCase();
+  if (process.platform === "win32") return true;
+  return resolve(left) === resolve(right);
 }
