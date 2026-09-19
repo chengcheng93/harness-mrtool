@@ -49,8 +49,8 @@ jobs:
           gh release view "$CLI_TAG" --json isDraft,isImmutable
           test "$(gh release view "$CLI_TAG" --json isDraft --jq .isDraft)" = false
           test "$(gh release view "$CLI_TAG" --json isImmutable --jq .isImmutable)" = true
-          gh release download "$CLI_TAG" --dir cli-release --pattern 'harness-mrtool-windows-x64.zip' --pattern 'bundle-receipt.envelope.json'
-          node --input-type=module -e "import {readFile} from 'node:fs/promises'; import {unzipSync} from 'fflate'; import {validateReleaseArchiveAndReceipt} from './scripts/package-portable.mjs'; validateReleaseArchiveAndReceipt(unzipSync(await readFile('cli-release/harness-mrtool-windows-x64.zip')), await readFile('cli-release/bundle-receipt.envelope.json'));"
+          gh release download "$CLI_TAG" --dir cli-release --pattern 'harness-mrtool-windows-x64.zip' --pattern 'harness-mrtool-darwin-arm64.zip' --pattern 'bundle-receipt.envelope.json'
+          node --input-type=module -e "import {readFile} from 'node:fs/promises'; import {unzipSync} from 'fflate'; import {validateReleaseArchiveAndReceipt} from './scripts/package-portable.mjs'; const receipt = await readFile('cli-release/bundle-receipt.envelope.json'); validateReleaseArchiveAndReceipt(unzipSync(await readFile('cli-release/harness-mrtool-windows-x64.zip')), receipt); validateReleaseArchiveAndReceipt(unzipSync(await readFile('cli-release/harness-mrtool-darwin-arm64.zip')), receipt, { platform: 'darwin-arm64' });"
   verify-template:
     runs-on: ubuntu-latest
     steps:

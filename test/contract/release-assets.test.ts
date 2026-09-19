@@ -130,6 +130,8 @@ test("component and channel workflows refuse unsigned or unverified publication"
   assert.match(skill, /cmp --silent "\$SKILL_DIST\/skill-bundle\/SHA256SUMS" draft-skill\/SHA256SUMS/u);
   assert.match(skill, /package-skill-archive\.mjs/u);
   assert.match(channel, /harness-mr-skill\.zip/u);
+  assert.match(channel, /harness-mrtool-darwin-arm64\.zip/u);
+  assert.match(channel, /platform:\s*'darwin-arm64'/u);
   assert.match(channel, /--target[\s\S]*GITHUB_SHA/u);
   assert.match(channel, /cmp --silent dist\/channel\/stable\.envelope\.json draft-channel\/stable\.envelope\.json/u);
   assert.match(template, /TEMPLATE_DIST/u);
