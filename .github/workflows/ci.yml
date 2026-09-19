@@ -94,6 +94,15 @@ jobs:
           node scripts/report-safe-spec-diagnostics.mjs $log
           Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
           exit 0
+      - name: Probe safe Windows group-3 stages
+        if: failure() && matrix.group == 3
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP "windows-group3-safe-spec.log"
+          & node scripts/test.mjs --test-concurrency=1 --test-reporter=spec test/contract/gitlab-client.test.ts *> $log
+          node scripts/report-safe-spec-diagnostics.mjs $log
+          Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+          exit 0
       - name: Check PowerShell installer syntax
         if: matrix.group == 0
         shell: pwsh
