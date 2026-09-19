@@ -28,6 +28,7 @@ test("default Skill service exposes private status without activating a user pat
     defaultActivePath: resolve(f.root, "user", "harness-mr"),
     trustConfig: f.trustConfig,
     channelUrl: "https://fixture.example.test/stable.envelope.json",
+    windowsAclVerifier: { verify: async () => undefined },
     transport: { request: async () => { throw new Error("network unavailable"); } },
   });
   const status = await service.status();
