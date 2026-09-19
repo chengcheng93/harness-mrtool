@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 
+import { ToolError } from "../../src/contracts/errors.ts";
+
 
 import { build } from "esbuild";
 
@@ -19,6 +21,17 @@ import bundleManifest from "../../template-bundle/bundle-manifest.json" with { t
 
 const repositoryRoot = resolve(import.meta.dirname, "../..");
 const templateBundlePath = resolve(repositoryRoot, "template-bundle");
+
+function assertApplicationBundleProcess(result: ReturnType<typeof runProcess>, operation: string): void {
+  if (result.error !== undefined || result.status !== 0 || result.stderr !== "") {
+    throw new ToolError("INTERNAL_ERROR", "Application bundle command failed", {
+      field: "runtime",
+      expected: "the source-built application bundle command to exit cleanly",
+      actual: `application-bundle:${operation}`,
+      safeNextStep: "Rebuild the application bundle and inspect the bounded command failure diagnostic.",
+    });
+  }
+}
 
 
 test("application bundle executes Bundle validation without external modules", async (context) => {
@@ -113,6 +126,7 @@ for (const [arguments_, expectedCommand] of [
       cwd: outputDirectory,
     });
     const diagnostic = JSON.stringify(result, undefined, 2);
+    assertApplicationBundleProcess(result, expectedCommand);
     assert.equal(result.status, 0, diagnostic);
     assert.equal(result.stderr, "", diagnostic);
     const envelope = JSON.parse(result.stdout) as {
@@ -143,6 +157,7 @@ test("application bundle exposes atomic template export", async (context) => {
     "json",
   ], { cwd: outputDirectory });
   const diagnostic = JSON.stringify(exported, undefined, 2);
+  assertApplicationBundleProcess(exported, "export");
   assert.equal(exported.status, 0, diagnostic);
   assert.equal(exported.stderr, "", diagnostic);
   assert.equal(existsSync(destination), true, diagnostic);
