@@ -89,8 +89,8 @@ test("application bundle executes Bundle validation without external modules", a
 });
 
 
-test("application bundle exposes verified local commands and atomic template export", async (context) => {
-  const outputDirectory = mkdtempSync(join(tmpdir(), "harness-app-commands-"));
+async function buildApplicationBundle(context: test.TestContext, prefix: string) {
+  const outputDirectory = mkdtempSync(join(tmpdir(), prefix));
   context.after(() => rmSync(outputDirectory, { recursive: true, force: true }));
   const outputPath = resolve(outputDirectory, "main.cjs");
   await build({
@@ -98,14 +98,17 @@ test("application bundle exposes verified local commands and atomic template exp
     outfile: outputPath,
     logLevel: "silent",
   });
+  return { outputDirectory, outputPath };
+}
 
-
-  for (const [arguments_, expectedCommand] of [
-    [["version", "--no-update", "--output", "json"], "version"],
-    [["profiles", "list", "--no-update", "--output", "json"], "profiles.list"],
-    [["schema", "show", "--no-update", "--output", "json"], "schema.show"],
-    [["template", "show", "--no-update", "--output", "json"], "template.show"],
-  ] as const) {
+for (const [arguments_, expectedCommand] of [
+  [["version", "--no-update", "--output", "json"], "version"],
+  [["profiles", "list", "--no-update", "--output", "json"], "profiles.list"],
+  [["schema", "show", "--no-update", "--output", "json"], "schema.show"],
+  [["template", "show", "--no-update", "--output", "json"], "template.show"],
+] as const) {
+  test(`application bundle exposes ${expectedCommand}`, async (context) => {
+    const { outputDirectory, outputPath } = await buildApplicationBundle(context, "harness-app-command-");
     const result = runProcess(process.execPath, [outputPath, ...arguments_], {
       cwd: outputDirectory,
     });
@@ -121,9 +124,11 @@ test("application bundle exposes verified local commands and atomic template exp
     assert.equal(envelope.versions.templateVersion, bundleManifest.version, diagnostic);
     assert.equal(envelope.data.command, expectedCommand, diagnostic);
     assert.equal(result.stdout.trimEnd().split(/\r?\n/u).length, 1, diagnostic);
-  }
+  });
+}
 
-
+test("application bundle exposes atomic template export", async (context) => {
+  const { outputDirectory, outputPath } = await buildApplicationBundle(context, "harness-app-export-");
   const destination = resolve(outputDirectory, "Docs.md");
   const exported = runProcess(process.execPath, [
     outputPath,
@@ -142,7 +147,6 @@ test("application bundle exposes verified local commands and atomic template exp
   assert.equal(exported.stderr, "", diagnostic);
   assert.equal(existsSync(destination), true, diagnostic);
   assert.match(readFileSync(destination, "utf8"), /^## 1\. Changes$/mu);
-
 
   const noOverwrite = runProcess(process.execPath, [
     outputPath,
