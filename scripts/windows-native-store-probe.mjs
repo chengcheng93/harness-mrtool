@@ -21,11 +21,20 @@ try {
     await store.materialize(snapshot);
     process.stdout.write("::notice::Native store probe succeeded\n");
   } catch (error) {
-    const code = error && typeof error === "object" && typeof error.code === "string" ? error.code : "unknown";
-    const actual = error && typeof error === "object" && error.details && typeof error.details.actual === "string"
-      ? error.details.actual
-      : error && typeof error === "object" && typeof error.diagnostic === "string" ? error.diagnostic : undefined;
-    process.stdout.write(`::notice::Native store probe code=${code}${actual !== undefined && SAFE.test(actual) ? ` diagnostic=${actual}` : ""}\n`);
+    const codes = [];
+    const diagnostics = [];
+    const seen = new Set();
+    let current = error;
+    for (let depth = 0; depth < 8 && current && typeof current === "object" && !seen.has(current); depth += 1) {
+      seen.add(current);
+      if (typeof current.code === "string" && /^[A-Z0-9_]{2,48}$/u.test(current.code)) codes.push(current.code);
+      const actual = current.details && typeof current.details.actual === "string"
+        ? current.details.actual
+        : typeof current.diagnostic === "string" ? current.diagnostic : undefined;
+      if (actual !== undefined && SAFE.test(actual) && !diagnostics.includes(actual)) diagnostics.push(actual);
+      current = current.cause;
+    }
+    process.stdout.write(`::notice::Native store probe code=${codes.join(",") || "unknown"}${diagnostics.length > 0 ? ` diagnostics=${diagnostics.join(",")}` : ""}\n`);
   }
 } finally {
   await rm(root, { recursive: true, force: true }).catch(() => undefined);
