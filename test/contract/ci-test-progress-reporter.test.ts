@@ -67,6 +67,15 @@ test('Windows CI keeps complete serial groups and adds safe live progress',async
 });
 
 
+test('portable CI runs the bounded native reporter for failure diagnostics',async()=>{
+ const workflow=parse(await readFile(resolve(root,'.github/workflows/ci.yml'),'utf8'));
+ const steps=workflow.jobs.portable.steps as {run?:string}[];
+ const full=steps.filter(s=>s.run?.includes('find test -name'));
+ assert.equal(full.length,1);
+ assert.match(full[0]!.run!,/--test-reporter=\.\/scripts\/ci-test-progress-reporter\.mjs/u);
+});
+
+
 test('native reporter with URL-significant filename names a file before import failure',async(t)=>{
  const dir=await mkdtemp(resolve(tmpdir(),'ci-reporter-import-'));t.after(()=>rm(dir,{recursive:true,force:true}));
  await mkdir(resolve(dir,'test'));
