@@ -3,7 +3,6 @@ set -euo pipefail
 
 readonly REPOSITORY="chengcheng93/harness-mrtool"
 readonly RELEASE_HOST="github.com"
-readonly ASSET_NAME="harness-mrtool-windows-x64.zip"
 readonly MAX_ARCHIVE_BYTES=$((256 * 1024 * 1024))
 readonly MAX_ENTRY_BYTES=$((256 * 1024 * 1024))
 readonly MAX_EXPANDED_BYTES=$((512 * 1024 * 1024))
@@ -12,7 +11,25 @@ readonly MARKER_NAME=".harness-mrtool-install.json"
 die() { printf '%s\n' "harness-mrtool install failed: $1" >&2; exit 1; }
 usage() { printf 'usage: %s --tag cli-vX.Y.Z --sha256 HEX [--destination DIR]\n' "$0" >&2; exit 2; }
 
-tag= sha256_expected= destination="${XDG_DATA_HOME:-$HOME/.local/share}/harness-mrtool"
+platform_name=$(uname -s 2>/dev/null || true)
+platform_arch=$(uname -m 2>/dev/null || true)
+case "$platform_name:$platform_arch" in
+  Darwin:arm64|Darwin:aarch64)
+    target_platform="darwin-arm64"
+    asset_name="harness-mrtool-darwin-arm64.zip"
+    executable_name="harness-mrtool"
+    default_destination="${XDG_DATA_HOME:-$HOME/Library/Application Support}/harness-mrtool"
+    ;;
+  MINGW*:x86_64|MINGW*:amd64|MSYS*:x86_64|MSYS*:amd64|CYGWIN*:x86_64|CYGWIN*:amd64)
+    target_platform="windows-x64"
+    asset_name="harness-mrtool-windows-x64.zip"
+    executable_name="harness-mrtool.exe"
+    default_destination="${XDG_DATA_HOME:-$HOME/.local/share}/harness-mrtool"
+    ;;
+  *) die "unsupported platform; use the Windows installer on Windows or Darwin ARM64" ;;
+esac
+
+tag= sha256_expected= destination="$default_destination"
 while (($#)); do
   case "$1" in
     --tag) (($# >= 2)) || usage; tag=$2; shift 2 ;;
@@ -40,12 +57,12 @@ parent=$(dirname -- "$destination")
 mkdir -p "$parent"
 destination=$(cd "$parent" && pwd -P)/$(basename -- "$destination")
 parent=$(dirname "$destination")
-[[ -e "$destination" ]] && die "destination exists; replacement requires the verified Windows installer"
+[[ -e "$destination" ]] && die "destination exists; use the managed updater or repair command"
 tmpdir=$(mktemp -d "${parent%/}/.harness-mrtool-install.XXXXXX")
 cleanup() { rm -rf -- "$tmpdir"; }
 trap cleanup EXIT INT TERM
 archive="$tmpdir/release.zip"
-url="https://${RELEASE_HOST}/${REPOSITORY}/releases/download/${tag}/${ASSET_NAME}"
+url="https://${RELEASE_HOST}/${REPOSITORY}/releases/download/${tag}/${asset_name}"
 effective_url_file="$tmpdir/effective-url"
 curl --fail --location --max-redirs 4 --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 120 --max-filesize "$MAX_ARCHIVE_BYTES" --silent --show-error --output "$archive" --write-out '%{url_effective}' "$url" > "$effective_url_file" || die "release download failed"
 effective_url=$(cat "$effective_url_file")
@@ -62,7 +79,7 @@ expected_lower=$(printf '%s' "$sha256_expected" | tr '[:upper:]' '[:lower:]')
 [[ "$actual_lower" == "$expected_lower" ]] || die "release hash mismatch"
 
 list=$(unzip -Z1 "$archive") || die "release archive cannot be inspected"
-expected=$'THIRD_PARTY_NOTICES.md\nbundle-receipt.envelope.json\nharness-mrtool.exe\nlicenses/Node.txt\nSHA256SUMS'
+expected=$(printf '%s\n' THIRD_PARTY_NOTICES.md bundle-receipt.envelope.json "$executable_name" licenses/Node.txt SHA256SUMS)
 [[ "$(printf '%s\n' "$list" | LC_ALL=C sort)" == "$(printf '%s\n' "$expected" | LC_ALL=C sort)" ]] || die "release archive tree is not exact"
 while IFS= read -r name; do
   [[ "$name" != /* && "$name" != *'..'* && "$name" != *'\\'* && "$name" != *:* ]] || die "unsafe archive path"
@@ -86,7 +103,7 @@ done < <(unzip -l "$archive")
 (( entry_count == 5 )) || die "release entry sizes could not be determined"
 mkdir -p "$tmpdir/tree/licenses"
 extracted_total_bytes=0
-for required in THIRD_PARTY_NOTICES.md bundle-receipt.envelope.json harness-mrtool.exe licenses/Node.txt SHA256SUMS; do
+for required in THIRD_PARTY_NOTICES.md bundle-receipt.envelope.json "$executable_name" licenses/Node.txt SHA256SUMS; do
   unzip -p "$archive" "$required" | head -c "$((MAX_ENTRY_BYTES + 1))" > "$tmpdir/tree/$required" || die "release extraction failed"
   actual_entry_bytes=$(wc -c < "$tmpdir/tree/$required")
   if (( actual_entry_bytes < 1 || actual_entry_bytes > MAX_ENTRY_BYTES )); then
@@ -97,7 +114,7 @@ for required in THIRD_PARTY_NOTICES.md bundle-receipt.envelope.json harness-mrto
   fi
   extracted_total_bytes=$((extracted_total_bytes + actual_entry_bytes))
 done
-for required in THIRD_PARTY_NOTICES.md bundle-receipt.envelope.json harness-mrtool.exe licenses/Node.txt SHA256SUMS; do
+for required in THIRD_PARTY_NOTICES.md bundle-receipt.envelope.json "$executable_name" licenses/Node.txt SHA256SUMS; do
   [[ -f "$tmpdir/tree/$required" && ! -L "$tmpdir/tree/$required" ]] || die "release entry is not a regular file"
 done
 seen_checksums=$'\n'
@@ -107,7 +124,7 @@ while IFS= read -r checksum_line; do
   digest=${BASH_REMATCH[1]}; path=${BASH_REMATCH[2]}
   [[ "$path" != SHA256SUMS ]] || die "self checksum is forbidden"
   case "$path" in
-    THIRD_PARTY_NOTICES.md|bundle-receipt.envelope.json|harness-mrtool.exe|licenses/Node.txt) ;;
+    THIRD_PARTY_NOTICES.md|bundle-receipt.envelope.json|$executable_name|licenses/Node.txt) ;;
     *) die "invalid SHA256SUMS entry" ;;
   esac
   case "$seen_checksums" in *$'\n'"$path"$'\n'*) die "duplicate SHA256SUMS entry" ;; esac
@@ -119,11 +136,11 @@ done < "$tmpdir/tree/SHA256SUMS"
 (( checksum_count == 4 )) || die "SHA256SUMS is incomplete"
 
 chmod 700 "$tmpdir/tree"
-chmod 755 "$tmpdir/tree/harness-mrtool.exe"
-"$tmpdir/tree/harness-mrtool.exe" self-test --output json >/dev/null || die "self-test failed"
-executable_sha256=$(hash_file "$tmpdir/tree/harness-mrtool.exe")
+chmod 755 "$tmpdir/tree/$executable_name"
+"$tmpdir/tree/$executable_name" self-test --output json >/dev/null || die "self-test failed"
+executable_sha256=$(hash_file "$tmpdir/tree/$executable_name")
 printf '{"archiveSha256":"%s","executableSha256":"%s","repository":"%s","schemaVersion":1,"tag":"%s"}\n' \
   "$actual" "$executable_sha256" "$REPOSITORY" "$tag" > "$tmpdir/tree/$MARKER_NAME"
 chmod 600 "$tmpdir/tree/$MARKER_NAME"
-mv --no-clobber "$tmpdir/tree" "$destination" || die "destination publication failed"
+mv -n "$tmpdir/tree" "$destination" || die "destination publication failed"
 [[ ! -e "$tmpdir/tree" ]] || die "destination publication raced"

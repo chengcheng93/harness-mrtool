@@ -44,6 +44,16 @@ test("installers pin the repository and enforce bounded verified extraction", as
   assert.doesNotMatch(portable, /\$\{[^}]*,,/u, "POSIX installer must not require Bash 4 case conversion");
 });
 
+test("POSIX installer selects a native Darwin ARM64 asset and executable", async () => {
+  const portable = await readFile(join(scripts, "install.sh"), "utf8");
+  assert.match(portable, /uname\s+-s/u);
+  assert.match(portable, /Darwin[\s\S]*darwin-arm64/u);
+  assert.match(portable, /harness-mrtool-darwin-arm64\.zip/u);
+  assert.match(portable, /harness-mrtool(?:[\s\S]*?)harness-mrtool\.exe/u);
+  assert.doesNotMatch(portable, /mv --no-clobber/u);
+  assert.match(portable, /mv\s+-n/u);
+});
+
 test("POSIX installer creates a missing parent before canonicalizing the destination", async () => {
   const portable = await readFile(join(scripts, "install.sh"), "utf8");
   const createParent = portable.indexOf('mkdir -p "$parent"');
