@@ -15,6 +15,7 @@ export interface AnchoredFileWriteOptions {
 
 const MAX_BYTES = 256 * 1024 * 1024;
 const HELPER_TIMEOUT_MS = 60_000;
+const MAX_HELPER_OUTPUT_BYTES = 512;
 const MAX_IDENTITY = (1n << 64n) - 1n;
 function failure(actual = 'windows-helper:anchored-write'): ToolError<'UPDATE_SECURITY_ERROR'> {
   return new ToolError('UPDATE_SECURITY_ERROR', 'Anchored executable write rejected', {
@@ -134,7 +135,7 @@ public static class AnchoredNativeWriter {
 [AnchoredNativeWriter]::Write($env:HMR_ANCHOR_DIRECTORY,[ulong]$env:HMR_ANCHOR_DEV,[ulong]$env:HMR_ANCHOR_INO,$env:HMR_ANCHOR_NAME,[long]$env:HMR_ANCHOR_LENGTH)
 [Console]::Out.Write("OK"+[char]10)
 exit 0
-} catch { exit 1 }
+} catch { [Console]::Out.Write("ERR:powershell"+[char]10); exit 1 }
 `;
 
 async function runHelper(executable: string, args: string[], env: NodeJS.ProcessEnv, bytes: Uint8Array, fd?: number): Promise<void> {
@@ -143,19 +144,20 @@ async function runHelper(executable: string, args: string[], env: NodeJS.Process
     let settled = false;
     let failed = false;
     let output = '';
-    const timer = setTimeout(abort, HELPER_TIMEOUT_MS);
+    let failureDiagnostic: string | undefined;
+    const timer = setTimeout(() => abort('timeout'), HELPER_TIMEOUT_MS);
     function settle(ok: boolean) {
       if (settled) return;
       settled = true; clearTimeout(timer);
       if (ok) done();
       else {
         const diagnostic = /^ERR:[a-z-]{1,32}$/u.exec(output.trim())?.[0];
-        reject(failure(diagnostic === undefined ? 'windows-helper:unavailable' : `windows-helper:${diagnostic.slice(4)}`));
+        reject(failure(failureDiagnostic ?? (diagnostic === undefined ? 'windows-helper:unavailable' : `windows-helper:${diagnostic.slice(4)}`)));
       }
     }
-    function abort() {
+    function abort(stage: string = 'unavailable') {
       if (settled || failed) return;
-      failed = true; clearTimeout(timer);
+      failed = true; failureDiagnostic = `windows-helper:${stage}`; clearTimeout(timer);
       child?.stdin?.destroy(); child?.stdout?.destroy();
       child?.kill('SIGKILL');
       // A kill request does not prove the writer has stopped. Only `close`
@@ -167,19 +169,19 @@ async function runHelper(executable: string, args: string[], env: NodeJS.Process
         shell: false, windowsHide: true, env,
         stdio: fd === undefined ? ['pipe', 'pipe', 'ignore'] : ['pipe', 'pipe', 'ignore', fd],
       });
-      child.once('error', abort);
-      child.stdin!.on('error', abort);
-      child.stdout!.on('error', abort);
+      child.once('error', () => abort('spawn'));
+      child.stdin!.on('error', () => abort('stream'));
+      child.stdout!.on('error', () => abort('stream'));
       child.stdout!.on('data', (chunk: Buffer) => {
         if (failed || settled) return;
-        if (chunk.length > 3 - output.length) { abort(); return; }
+        if (chunk.length > MAX_HELPER_OUTPUT_BYTES - output.length) { abort('output'); return; }
         output += chunk.toString('ascii');
       });
       child.once('close', code => settle(!failed && code === 0 && output === 'OK\n'));
       child.stdin!.end(bytes);
     } catch {
       if (child === undefined) settle(false);
-      else abort();
+      else abort('spawn');
     }
   });
 }
