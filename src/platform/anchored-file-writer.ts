@@ -86,8 +86,11 @@ public static class AnchoredNativeWriter {
   string stage="validate";
   try {
    ulong dev,ino; long length;
+   stage="identity-parse";
    if(devText==null || !UInt64.TryParse(devText,out dev) || inoText==null || !UInt64.TryParse(inoText,out ino) || lengthText==null || !Int64.TryParse(lengthText,out length)) throw new IOException();
+   stage="input";
    if(length<1 || length>268435456 || (name!="harness-mrtool" && name!="harness-mrtool.exe" && name!="harness-mrtool.exe.new" && name!=".harness-mrtool-install.json" && name!=".harness-mrtool-install.json.new")) throw new IOException();
+   stage="path";
    string root=Path.GetPathRoot(directory);
    if(root==null || root.Length!=3 || root[1]!=':' || root[2]!='\\' || !String.Equals(Path.GetFullPath(directory),directory,StringComparison.OrdinalIgnoreCase)) throw new IOException();
    var pins=new List<SafeFileHandle>();

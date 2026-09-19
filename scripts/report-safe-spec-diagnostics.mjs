@@ -28,6 +28,7 @@ const safeLocations = [
   [/test[\\/]integration[\\/]update-transaction-lease\.test\.ts:(\d+):\d+/gu, 'assertion:update-lease-line-'],
   [/test[\\/]integration[\\/]production-migration-adapter\.test\.ts:(\d+):\d+/gu, 'assertion:production-migration-line-'],
   [/test[\\/]integration[\\/]native-executable-store\.test\.ts:(\d+):\d+/gu, 'assertion:native-store-line-'],
+  [/test[\\/]integration[\\/]native-readiness\.test\.ts:(\d+):\d+/gu, 'assertion:native-readiness-line-'],
 ];
 for (const [pattern, prefix] of safeLocations) {
   for (const match of text.matchAll(pattern)) {
