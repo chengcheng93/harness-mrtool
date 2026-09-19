@@ -157,7 +157,7 @@ export async function writeBoundedCanonicalFile(
   let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
     handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL |
-      (constants.O_NOFOLLOW ?? 0), 0o600);
+      (process.platform === "win32" ? 0 : (constants.O_NOFOLLOW ?? 0)), 0o600);
     let offset = 0;
     while (offset < owned.byteLength) {
       const result = await handle.write(owned, offset, owned.byteLength - offset, offset);
