@@ -16,7 +16,7 @@ export interface AnchoredFileWriteOptions {
 const MAX_BYTES = 256 * 1024 * 1024;
 const HELPER_TIMEOUT_MS = 60_000;
 const MAX_IDENTITY = (1n << 64n) - 1n;
-function failure(actual = 'anchored write failed'): ToolError<'UPDATE_SECURITY_ERROR'> {
+function failure(actual = 'windows-helper:anchored-write'): ToolError<'UPDATE_SECURITY_ERROR'> {
   return new ToolError('UPDATE_SECURITY_ERROR', 'Anchored executable write rejected', {
     field: 'update.executable', expected: 'exclusive bounded creation in the pinned directory',
     actual, safeNextStep: 'Keep the installed release and inspect the incomplete private native directory.',
