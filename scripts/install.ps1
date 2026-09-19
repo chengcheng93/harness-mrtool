@@ -155,7 +155,7 @@ $destinationFull = Get-SafePath $Destination; $parent = Ensure-Directory (Split-
 if ($Repair) {
   $marker = Read-ManagedMarker $destinationFull; $exe = Join-Path $destinationFull 'harness-mrtool.exe'
   if ((Get-FileHashHex $exe) -cne $marker.executableSha256) { Fail-Safe 'Installed executable does not match its marker.' }
-  Invoke-ExecutableSelfTest $exe; & $exe self-update status --output json *> $null; if ($LASTEXITCODE -ne 0) { Fail-Safe 'Updater recovery did not complete.' }; exit 0
+  Invoke-ExecutableSelfTest $exe; & $exe self-update repair --output json *> $null; if ($LASTEXITCODE -ne 0) { Fail-Safe 'Updater recovery did not complete.' }; exit 0
 }
 if ($Tag -notmatch '^cli-v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$') { Fail-Safe 'Release tag is invalid.' }
 if ($Sha256 -notmatch '^[A-Fa-f0-9]{64}$') { Fail-Safe 'Release hash is invalid.' }

@@ -44,6 +44,27 @@ function requireCommand(
   if (invocation.command.kind !== kind) throw new TypeError("Updater command invocation is invalid");
 }
 
+function repairExecution(): CliCommandExecution {
+  return {
+    context: {
+      update: {
+        checked: true,
+        reachable: null,
+        usingLastKnownGood: false,
+        latestVersionConfirmed: false,
+        warning: null,
+        securityAnomaly: false,
+        activationRequired: false,
+        hostRefreshMayBeRequired: false,
+        persistencePending: false,
+        executedVersion: "unknown",
+        installedVersion: "unknown",
+      },
+    },
+    output: { data: { command: "self-update.repair", status: "repaired" } },
+  };
+}
+
 function installationExecution(command: "self-update.apply" | "self-update.rollback", result: InstallationResult): CliCommandExecution {
   const pending = result.status === "persistence-pending";
   const active = pending ? null : result.active;
@@ -86,9 +107,11 @@ export function createInstallationCommandServices(
 ): {
   readonly selfUpdateApply: ProductionCommandHandler;
   readonly selfUpdateRollback: ProductionCommandHandler;
+  readonly selfUpdateRepair: ProductionCommandHandler;
 } {
   if (service === null || typeof service !== "object" ||
-      typeof service.apply !== "function" || typeof service.rollback !== "function") {
+      typeof service.apply !== "function" || typeof service.rollback !== "function" ||
+      typeof service.recover !== "function") {
     throw new TypeError("Installation service is invalid");
   }
   return Object.freeze({
@@ -99,6 +122,11 @@ export function createInstallationCommandServices(
     selfUpdateRollback: async (invocation: CliInvocation): Promise<CliCommandExecution> => {
       if (invocation.command.kind !== "self-update.rollback") throw new TypeError("Installation command invocation is invalid");
       return installationExecution("self-update.rollback", await service.rollback(invocation.command.version));
+    },
+    selfUpdateRepair: async (invocation: CliInvocation): Promise<CliCommandExecution> => {
+      if (invocation.command.kind !== "self-update.repair") throw new TypeError("Installation command invocation is invalid");
+      await service.recover();
+      return repairExecution();
     },
   });
 }

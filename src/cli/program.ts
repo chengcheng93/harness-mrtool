@@ -35,6 +35,7 @@ export type CliCommand =
   | { readonly kind: "template.export"; readonly profile: ProjectTemplateProfile; readonly destination: string }
   | { readonly kind: "self-update.check"; readonly force: boolean }
   | { readonly kind: "self-update.status" }
+  | { readonly kind: "self-update.repair" }
   | { readonly kind: "self-update.apply"; readonly timeoutSeconds: number | null }
   | { readonly kind: "self-update.rollback"; readonly version: string }
   | { readonly kind: "skill.install"; readonly path: string }
@@ -133,7 +134,7 @@ function route(arguments_: readonly string[]): { readonly kind: CommandKind; rea
     profiles: new Set(["list", "detect"]),
     labels: new Set(["list"]),
     template: new Set(["show", "refresh", "export"]),
-    "self-update": new Set(["check", "status", "apply", "rollback"]),
+    "self-update": new Set(["check", "status", "repair", "apply", "rollback"]),
     skill: new Set(["install", "activate", "status"]),
   };
   const group = groups[first];
@@ -163,7 +164,7 @@ function commonFlagsFor(kind: CommandKind): ReadonlySet<string> {
   }
   if (
     kind === "self-update.check" || kind === "self-update.status" ||
-    kind === "self-update.apply" || kind === "self-update.rollback" ||
+    kind === "self-update.repair" || kind === "self-update.apply" || kind === "self-update.rollback" ||
     kind === "skill.install" || kind === "skill.activate" ||
     kind === "skill.status" || kind === "version"
   ) {
@@ -305,6 +306,9 @@ function commandFor(
     case "self-update.check":
       requireNoPositionals(positionals);
       return Object.freeze({ kind, force: specific.has("--force") });
+    case "self-update.repair":
+      requireNoPositionals(positionals);
+      return Object.freeze({ kind });
     case "self-update.apply": { // eslint-disable-line no-case-declarations
       requireNoPositionals(positionals);
       const raw = specificValue(specific, "--timeout");

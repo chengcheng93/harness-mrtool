@@ -30,6 +30,7 @@ test("parses every V1 command into one closed invocation contract", () => {
     [["template", "export", "--profile", "docs", "--destination", "Docs.md"], "template.export"],
     [["self-update", "check"], "self-update.check"],
     [["self-update", "status"], "self-update.status"],
+    [["self-update", "repair"], "self-update.repair"],
     [["self-update", "apply"], "self-update.apply"],
     [["self-update", "rollback", "--version", "1.2.3"], "self-update.rollback"],
     [["skill", "install", "--path", "C:\\Skills"], "skill.install"],

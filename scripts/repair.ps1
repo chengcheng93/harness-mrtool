@@ -23,5 +23,5 @@ if (($exeItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $exe
 $sha = [Security.Cryptography.SHA256]::Create(); $stream = $null
 try { $stream = [IO.File]::OpenRead($exe); $actual = ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-', '').ToLowerInvariant() } finally { if ($null -ne $stream) { $stream.Dispose() }; $sha.Dispose() }
 if ($actual -cne $marker.executableSha256) { Fail-Safe 'Owned executable does not match its marker.' }
-& $exe self-update status --output json *> $null; if ($LASTEXITCODE -ne 0) { Fail-Safe 'Updater recovery did not complete.' }
+& $exe self-update repair --output json *> $null; if ($LASTEXITCODE -ne 0) { Fail-Safe 'Updater recovery did not complete.' }
 & $exe self-test --output json *> $null; if ($LASTEXITCODE -ne 0) { Fail-Safe 'Installed self-test did not pass.' }

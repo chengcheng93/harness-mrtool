@@ -9,7 +9,7 @@ readonly MAX_EXPANDED_BYTES=$((512 * 1024 * 1024))
 readonly MARKER_NAME=".harness-mrtool-install.json"
 
 die() { printf '%s\n' "harness-mrtool install failed: $1" >&2; exit 1; }
-usage() { printf 'usage: %s --tag cli-vX.Y.Z --sha256 HEX [--destination DIR]\n' "$0" >&2; exit 2; }
+usage() { printf 'usage: %s --tag cli-vX.Y.Z --sha256 HEX [--destination DIR] | %s --update [--destination DIR] | %s --repair [--destination DIR]\n' "$0" "$0" "$0" >&2; exit 2; }
 
 platform_name=$(uname -s 2>/dev/null || true)
 platform_arch=$(uname -m 2>/dev/null || true)
@@ -29,19 +29,18 @@ case "$platform_name:$platform_arch" in
   *) die "unsupported platform; use the Windows installer on Windows or Darwin ARM64" ;;
 esac
 
-tag= sha256_expected= destination="$default_destination"
+tag= sha256_expected= destination="$default_destination" mode=install
 while (($#)); do
   case "$1" in
     --tag) (($# >= 2)) || usage; tag=$2; shift 2 ;;
     --sha256) (($# >= 2)) || usage; sha256_expected=$2; shift 2 ;;
     --destination) (($# >= 2)) || usage; destination=$2; shift 2 ;;
+    --update) [[ "$mode" == install ]] || usage; mode=update; shift ;;
+    --repair) [[ "$mode" == install ]] || usage; mode=repair; shift ;;
     *) usage ;;
   esac
 done
-[[ "$tag" =~ ^cli-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]] || die "invalid release tag"
-[[ "$sha256_expected" =~ ^[A-Fa-f0-9]{64}$ ]] || die "invalid release hash"
 [[ "$destination" != / && "$destination" != "" ]] || die "invalid destination"
-command -v curl >/dev/null 2>&1 || die "curl is required"
 if command -v sha256sum >/dev/null 2>&1; then
   hash_file() { sha256sum "$1" | awk '{print $1}'; }
 elif command -v shasum >/dev/null 2>&1; then
@@ -49,13 +48,36 @@ elif command -v shasum >/dev/null 2>&1; then
 else
   die "sha256sum or shasum is required"
 fi
-command -v unzip >/dev/null 2>&1 || die "unzip is required"
-command -v head >/dev/null 2>&1 || die "head is required"
-command -v mktemp >/dev/null 2>&1 || die "mktemp is required"
 
 parent=$(dirname -- "$destination")
 mkdir -p "$parent"
 destination=$(cd "$parent" && pwd -P)/$(basename -- "$destination")
+
+if [[ "$mode" != install ]]; then
+  [[ -z "$tag" && -z "$sha256_expected" ]] || usage
+  [[ -d "$destination" && ! -L "$destination" ]] || die "managed destination is unavailable"
+  executable_path="$destination/$executable_name"
+  marker_path="$destination/$MARKER_NAME"
+  [[ -f "$marker_path" && ! -L "$marker_path" ]] || die "managed installation marker is missing"
+  [[ -f "$executable_path" && ! -L "$executable_path" && -x "$executable_path" ]] || die "managed executable is unavailable"
+  marker_repository=$(sed -n 's/.*"repository":"\([^"\\]*\)".*/\1/p' "$marker_path")
+  marker_schema=$(sed -n 's/.*"schemaVersion":\([0-9][0-9]*\).*/\1/p' "$marker_path")
+  marker_executable_sha=$(sed -n 's/.*"executableSha256":"\([A-Fa-f0-9]\{64\}\)".*/\1/p' "$marker_path")
+  [[ "$marker_repository" == "$REPOSITORY" && "$marker_schema" == 1 ]] || die "installation marker is not manager-owned"
+  [[ "$(hash_file "$executable_path")" == "$(printf '%s' "$marker_executable_sha" | tr '[:upper:]' '[:lower:]')" ]] || die "managed executable does not match its marker"
+  if [[ "$mode" == repair ]]; then
+    exec "$executable_path" self-update repair --output json
+  fi
+  exec "$executable_path" self-update apply --output json
+fi
+
+[[ "$tag" =~ ^cli-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]] || die "invalid release tag"
+[[ "$sha256_expected" =~ ^[A-Fa-f0-9]{64}$ ]] || die "invalid release hash"
+command -v curl >/dev/null 2>&1 || die "curl is required"
+command -v unzip >/dev/null 2>&1 || die "unzip is required"
+command -v head >/dev/null 2>&1 || die "head is required"
+command -v mktemp >/dev/null 2>&1 || die "mktemp is required"
+
 parent=$(dirname "$destination")
 [[ -e "$destination" ]] && die "destination exists; use the managed updater or repair command"
 tmpdir=$(mktemp -d "${parent%/}/.harness-mrtool-install.XXXXXX")

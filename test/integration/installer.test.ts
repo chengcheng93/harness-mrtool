@@ -98,7 +98,12 @@ test("uninstall and repair require the manager-owned installation marker", async
   assert.match(uninstall, /Assert-PlainTree[\s\S]*ReparsePoint/u);
   assert.match(uninstall, /Assert-PlainTree \$root[\s\S]*if \(-not \$WhatIf\) \{ Remove-PlainTree \$root \}/u);
   assert.doesNotMatch(uninstall, /Remove-Item\s+-LiteralPath\s+\$root\s+-Recurse/u);
-  assert.match(repair, /self-update\s+status/u);
+  assert.match(repair, /self-update\s+repair/u);
+  const portable = await readFile(join(scripts, "install.sh"), "utf8");
+  assert.match(portable, /--repair/u);
+  assert.match(portable, /self-update repair/u);
+  assert.match(portable, /--update/u);
+  assert.match(portable, /self-update apply/u);
 });
 
 test("Windows installer rechecks the archive while holding a no-write handle", async () => {

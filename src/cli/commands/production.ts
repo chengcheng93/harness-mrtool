@@ -33,6 +33,7 @@ export interface ProductionCommandServices {
   readonly templateRefresh?: ProductionCommandHandler;
   readonly selfUpdateCheck?: ProductionCommandHandler;
   readonly selfUpdateStatus?: ProductionCommandHandler;
+  readonly selfUpdateRepair?: ProductionCommandHandler;
   readonly selfUpdateApply?: ProductionCommandHandler;
   readonly selfUpdateRollback?: ProductionCommandHandler;
   readonly skillInstall?: ProductionCommandHandler;
@@ -176,6 +177,7 @@ export function createProductionCommandHandlers(
     "template.refresh": handler(services.templateRefresh, "template.refresh", "UPDATE_REQUIRED"),
     "self-update.check": handler(services.selfUpdateCheck, "self-update.check", "UPDATE_REQUIRED"),
     "self-update.status": handler(services.selfUpdateStatus, "self-update.status", "UPDATE_REQUIRED"),
+    "self-update.repair": handler(services.selfUpdateRepair, "self-update.repair", "UPDATE_REQUIRED"),
     "self-update.apply": handler(services.selfUpdateApply, "self-update.apply", "UPDATE_REQUIRED"),
     "self-update.rollback": handler(services.selfUpdateRollback, "self-update.rollback", "UPDATE_REQUIRED"),
     "skill.install": handler(services.skillInstall, "skill.install", "UPDATE_REQUIRED"),
