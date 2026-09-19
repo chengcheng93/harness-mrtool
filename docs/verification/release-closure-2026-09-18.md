@@ -83,3 +83,42 @@ T14 final evidence audit are not complete.
   unchanged; no release tag is created by this checkpoint.
 - **T01 remains open until native Windows current-commit evidence is available.**
   No installation, release, active-pointer update or GitLab write occurred.
+
+## Current candidate checkpoint — 2026-09-19
+
+The historical sections above are retained as audit history. The following is
+fresh evidence for the current release-closure branch and supersedes earlier
+in-progress counts for the candidate code gates; it does **not** change the
+overall status from not formally released or installed.
+
+- Branch: `codex/release-closure-20260918`; current commit: `850ad97`
+  (`fix: classify native context lock failures`). Exact runtime: Node
+  `v24.16.0`, Darwin ARM64, `TMPDIR=/private/var/tmp`.
+- Fresh current-tree sequence: `npm run build:sea` exit `0` (known esbuild
+  `import.meta`/CJS warnings only); SEA self-test returned
+  `{"ok":true,"code":"OK","sea":true,"version":"0.1.6"}`; serial
+  `npm test -- --test-concurrency=1` returned **2020 tests / 2005 passed /
+  0 failed / 15 skipped**; `git diff --check` exit `0`. The 15 skips are
+  platform-conditional native-Windows gates on this Darwin host and are not
+  counted as passes.
+- Fresh hosted run `35476440174` for SHA
+  `850ad978c4e6650c0a4b60e70671ba40519b3d5d` completed `success` on
+  2026-09-19. Portable, secret scan, macOS ARM64 native, and all four Windows
+  SEA groups succeeded. This is current CI evidence, not formal publication
+  evidence.
+- The prior Windows group-3 failure was localized by the safe test digest to
+  `discovers tokenized live candidates while keeping lifecycle labels derived
+  and snapshots tokenless`, which enters the real `CandidateContextStore`
+  process identity/lock path. The current change preserves only bounded native
+  failure-stage diagnostics; it does not weaken lock, identity, ACL, path, or
+  persistence checks.
+
+The mandatory remaining gates are still external and current-state evidence is
+required before completion: independent current-SHA review; protected signed
+immutable CLI/Template/Skill/Plugin publication; stable channel deployment and
+real Darwin/Windows install, upgrade, rollback, repair, and restart recovery;
+current Mac PATH plus explicit Skill activation and official Plugin host
+installation/refresh/discovery; and an authorized isolated GitLab target for
+context, preview, dry-run, create/update/verify/readback and failure-closed
+label acceptance. No release tag, signed production asset, real installation,
+host activation, or GitLab mutation is claimed by this checkpoint.
