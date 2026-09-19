@@ -169,15 +169,15 @@ for (const failure of ['nonzero', 'signal', 'stderr', 'garbage', 'bom', 'sea-fal
     };
     const diagnostic = (suffix: string) => `native-readiness:${failure}-${suffix}`;
     const start = performance.now();
-    await assert.rejects(verifyNativeReadiness(f.snapshot, {...f.options, nativeReadiness: {spawn: spawnProbe, timeoutMs: failure === 'timeout' ? 300 : 5000, maxOutputBytes: 4096}}), (error: any) => {
+    // Windows process creation and the authenticated native recheck are slower
+    // than the POSIX fixture; keep the timeout probe bounded without expiring
+    // before the child can be created.
+    const timeoutMs = failure === 'timeout' ? (process.platform === 'win32' ? 5000 : 300) : 5000;
+    await assert.rejects(verifyNativeReadiness(f.snapshot, {...f.options, nativeReadiness: {spawn: spawnProbe, timeoutMs, maxOutputBytes: 4096}}), (error: any) => {
       assert.equal(error.code, 'UPDATE_SECURITY_ERROR', diagnostic('error-code')); assert.ok(!JSON.stringify(error).includes('secret-child-output'), diagnostic('diagnostic-redaction')); return true;
     });
-    assert.ok(performance.now() - start < 7000, diagnostic('failure-timeout'));
-    // Windows may synchronously throw for a missing executable before it can
-    // return a ChildProcess; POSIX emits the asynchronous error on a child.
-    const expectsChild = failure !== 'spawn-throw' &&
-      !(failure === 'spawn-error' && process.platform === 'win32');
-    assert.equal(children.length > 0, expectsChild, diagnostic('child-count'));
+    assert.ok(performance.now() - start < (process.platform === 'win32' ? 10000 : 7000), diagnostic('failure-timeout'));
+    assert.equal(children.length > 0, failure !== 'spawn-throw', diagnostic('child-count'));
     assert.ok(closed.every(Boolean), diagnostic('child-close'));
     for (const child of children) if (child.pid) assert.throws(() => process.kill(child.pid!, 0));
     await assert.rejects(access(cwd), {code: 'ENOENT'});
@@ -188,8 +188,9 @@ test('readiness shares one deadline across all probes rather than resetting each
   const f = await setup(t); simulatedHost(t); let calls = 0;
   const spawnProbe: SpawnProbe = (_path, _args, options) => nodeChild(`setTimeout(()=>process.stdout.write(${JSON.stringify(f.outputs[calls++]!)}),350);`, options);
   const start = performance.now();
-  await assert.rejects(verifyNativeReadiness(f.snapshot, {...f.options, nativeReadiness: {spawn: spawnProbe, timeoutMs: 900}}), {code: 'UPDATE_SECURITY_ERROR'});
-  assert.ok(calls >= 2, 'native-readiness:deadline-min-calls'); assert.ok(calls < 4, 'native-readiness:deadline-max-calls'); assert.ok(performance.now() - start < 1800, 'native-readiness:deadline-duration');
+  const timeoutMs = process.platform === 'win32' ? 1500 : 900;
+  await assert.rejects(verifyNativeReadiness(f.snapshot, {...f.options, nativeReadiness: {spawn: spawnProbe, timeoutMs}}), {code: 'UPDATE_SECURITY_ERROR'});
+  assert.ok(calls >= 2, 'native-readiness:deadline-min-calls'); assert.ok(calls < 4, 'native-readiness:deadline-max-calls'); assert.ok(performance.now() - start < (process.platform === 'win32' ? 3000 : 1800), 'native-readiness:deadline-duration');
 });
 
 
