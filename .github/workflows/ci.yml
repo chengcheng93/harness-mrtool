@@ -66,8 +66,15 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build:sea
-      - name: Run Windows durability smoke tests
-        run: npm test -- --test-concurrency=1 --test-name-pattern="Windows publisher flushes once|default Windows ACL adapter secures" test/integration/windows-write-through-move.test.ts test/unit/context-store.test.ts
+      - name: Run Windows durability smoke tests with bounded diagnostics
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP ("harness-mrtool-windows-smoke-{0}-{1}.log" -f $env:GITHUB_RUN_ID, $env:GITHUB_RUN_ATTEMPT)
+          $status = 0
+          npm test -- --test-concurrency=1 --test-name-pattern="Windows publisher flushes once|default Windows ACL adapter secures" test/integration/windows-write-through-move.test.ts test/unit/context-store.test.ts *> $log
+          if ($LASTEXITCODE -ne 0) { $status = $LASTEXITCODE }
+          if ($status -ne 0) { node scripts/report-test-failures.mjs $log $status 2>$null }
+          exit $status
       - name: Run one complete-inventory serial Windows suite group with safe live progress
         run: node scripts/windows-suite-group.mjs --group ${{ matrix.group }} --groups 4
       - name: Check PowerShell installer syntax

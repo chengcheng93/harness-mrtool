@@ -81,4 +81,6 @@ test('CI includes a real Darwin ARM64 build and no-exclusion suite without repla
   assert.match(run, /npm test -- --test-concurrency=1/);
   assert.match(run, /codesign --verify --strict/);
   assert.ok(workflow.jobs['windows-sea']);
+  const windowsRun = workflow.jobs['windows-sea'].steps.map((s: {run?: string}) => s.run ?? '').join('\n');
+  assert.match(windowsRun, /report-test-failures\.mjs/);
 });
