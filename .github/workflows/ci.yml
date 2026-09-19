@@ -70,6 +70,17 @@ jobs:
         run: npm test -- --test-concurrency=1 --test-name-pattern="Windows publisher flushes once|default Windows ACL adapter secures" test/integration/windows-write-through-move.test.ts test/unit/context-store.test.ts
       - name: Run one complete-inventory serial Windows suite group with safe live progress
         run: node scripts/windows-suite-group.mjs --group ${{ matrix.group }} --groups 4
+      - name: Probe safe Windows failure stages
+        if: failure() && matrix.group == 2
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP "native-safe-spec.log"
+          $status = 0
+          & node scripts/test.mjs --test-concurrency=1 --test-reporter=spec test/integration/native-executable-store.test.ts test/integration/update-transaction-lease.test.ts test/integration/production-migration-adapter.test.ts *> $log
+          $status = $LASTEXITCODE
+          node scripts/report-safe-spec-diagnostics.mjs $log
+          Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+          exit 0
       - name: Check PowerShell installer syntax
         if: matrix.group == 0
         shell: pwsh
