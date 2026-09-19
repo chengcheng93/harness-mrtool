@@ -82,6 +82,12 @@ const cliVersion = typeof __HARNESS_MRTOOL_VERSION__ === "string"
 const INSTALL_MARKER_NAME = ".harness-mrtool-install.json";
 
 async function hasManagedInstallationMarker(): Promise<boolean> {
+  // A packaged managed executable is supported only on the two native release
+  // hosts. Unsupported source/application hosts may still run immutable local
+  // commands, but must never opt into the production update/cache path merely
+  // because a same-name marker happens to exist beside the host runtime.
+  if (!((process.platform === "darwin" && process.arch === "arm64") ||
+      (process.platform === "win32" && process.arch === "x64"))) return false;
   try {
     const info = await lstat(resolve(dirname(resolve(process.execPath)), INSTALL_MARKER_NAME));
     if (!info.isFile() || info.isSymbolicLink()) {
@@ -484,17 +490,19 @@ async function recoverInstallationBeforePublicInvocation(
   // The explicit repair command owns its single recovery call. All other
   // public commands must recover a durable handoff before ordinary work.
   if (commandKind === "self-update.repair") return;
+  if (dependencies.installationService === undefined && typeof __HARNESS_MRTOOL_VERSION__ === "string" &&
+      !(await hasManagedInstallationMarker())) {
+    // A packaged application can be executed for its immutable self-test or
+    // local read-only commands before the installer has enrolled its canonical
+    // executable. Do not construct the default installation service (which
+    // resolves the native platform and state root) in that phase.
+    return;
+  }
   const service = dependencies.installationService ?? (
     typeof __HARNESS_MRTOOL_VERSION__ === "string"
       ? createDefaultInstallationService(dependencies.updateChannelDefaults)
       : undefined
   );
-  if (dependencies.installationService === undefined && service !== undefined && !(await hasManagedInstallationMarker())) {
-    // A packaged application can be executed for its immutable self-test or
-    // local read-only commands before the installer has enrolled its canonical
-    // executable. Do not probe the user's default state path in that phase.
-    return;
-  }
   await service?.recover();
 }
 

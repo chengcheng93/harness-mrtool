@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 
 import { ToolError } from "../../src/contracts/errors.ts";
@@ -33,6 +34,26 @@ function assertApplicationBundleProcess(result: ReturnType<typeof runProcess>, o
     });
   }
 }
+
+
+test("application bundle keeps embedded commands on an unsupported host even with an enrollment marker", async (context) => {
+  const { outputDirectory, outputPath } = await buildApplicationBundle(context, "harness-app-unsupported-host-");
+  const fakeExecutablePath = resolve(outputDirectory, "fake-node");
+  writeFileSync(resolve(outputDirectory, ".harness-mrtool-install.json"), "{}\n");
+  const script = `
+    const platform = Object.getOwnPropertyDescriptor(process, "platform");
+    Object.defineProperty(process, "platform", { ...platform, value: "linux" });
+    const executable = Object.getOwnPropertyDescriptor(process, "execPath");
+    Object.defineProperty(process, "execPath", { ...executable, value: ${JSON.stringify(fakeExecutablePath)} });
+    process.argv = [process.execPath, ${JSON.stringify(outputPath)}, "version", "--no-update", "--output", "json"];
+    await import(${JSON.stringify(pathToFileURL(outputPath).href)});
+  `;
+  const result = runProcess(process.execPath, ["--input-type=module", "-e", script], { cwd: outputDirectory });
+  const diagnostic = JSON.stringify(result, undefined, 2);
+  assert.equal(result.status, 0, diagnostic);
+  assert.equal(result.stderr, "", diagnostic);
+  assert.equal((JSON.parse(result.stdout) as { readonly code: string }).code, "OK", diagnostic);
+});
 
 
 test("application bundle executes Bundle validation without external modules", async (context) => {
