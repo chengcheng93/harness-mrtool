@@ -38,6 +38,8 @@ function outputSink(chunks: string[]) {
   return { write(chunk: string): boolean { chunks.push(chunk); return true; } };
 }
 
+const darwin = { skip: process.platform !== "darwin" || process.arch !== "arm64" };
+
 function installationService(recover: () => Promise<void>): ProductionInstallationService {
   return {
     apply: async () => { throw new Error("apply must not run"); },
@@ -79,7 +81,7 @@ test("self-update repair owns recovery and is not double-recovered by startup", 
 });
 
 
-test("default production apply and rollback use the real installation coordinator", async (t) => {
+test("default production apply and rollback use the real installation coordinator", darwin, async (t) => {
   const origin = await exactReleaseFixture();
   const family = nativeReleaseFixtureFamily(origin);
   const previous = await family("darwin-arm64", { sequence: 43, cliVersion: "0.1.6", variantByte: 1, releaseSetId: "stable-0.1.6" });
