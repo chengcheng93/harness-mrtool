@@ -51,6 +51,9 @@ test("attaching an observed Windows inner journal creates one identity-bound slo
   assert.equal(next.revision, journal.revision + 1);
   assert.equal(next.windows?.inner?.sha256, digest("inner"));
   assert.equal(next.slots.filter((slot) => slot.name === "windows-inner-journal").length, 1);
+  assert.equal(next.control.operations.length, journal.control.operations.length + 1);
+  assert.equal(next.control.operations.at(-1)?.authorityEpoch, journal.control.authorityEpoch + 1);
+  assert.deepEqual(next.control.operations.at(-1)?.admittedSlots, ["windows-inner-journal", "installation-journal"]);
 });
 
 test("Windows inner attachment rejects a plan that drifts from the outer journal", () => {
@@ -75,4 +78,7 @@ test("reserving a Windows launch records an unsettled reserved lifecycle and des
   assert.equal(next.windows?.launch?.state, "reserved");
   assert.equal(next.windows?.launch?.settlement.state, "unsettled");
   assert.equal(next.slots.some((slot) => slot.name === "launch-descriptor" && slot.state === "created"), true);
+  assert.equal(next.control.operations.length, withInner.control.operations.length + 1);
+  assert.equal(next.control.operations.at(-1)?.authorityEpoch, withInner.control.authorityEpoch + 1);
+  assert.deepEqual(next.control.operations.at(-1)?.admittedSlots, ["launch-descriptor", "installation-journal"]);
 });

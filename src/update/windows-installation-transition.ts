@@ -1,3 +1,6 @@
+import { randomBytes } from "node:crypto";
+
+import { canonicalizeJson, sha256Utf8 } from "../contracts/jcs.ts";
 import { ToolError } from "../contracts/errors.ts";
 import { advanceInstallationJournal } from "./installation-journal-transition.ts";
 import type {
@@ -6,6 +9,7 @@ import type {
   InstallationInnerEvidence,
   InstallationJournalRoots,
   InstallationProcessIdentity,
+  InstallationMutationSlot,
 } from "./installation-journal.ts";
 import { validateInstallationJournal } from "./installation-journal.ts";
 import type { WindowsMutationPlan } from "./windows-mutation-plan.ts";
@@ -75,17 +79,45 @@ function checkPlan(journal: InstallationJournal, plan: WindowsMutationPlan): voi
   }
 }
 
+function randomId(): string {
+  return randomBytes(16).toString("hex");
+}
+
+function operationEvidence(
+  current: InstallationJournal,
+  expectedRevision: number,
+  authorityEpoch: number,
+  admittedSlots: readonly InstallationMutationSlot[],
+): InstallationJournal["control"]["operations"][number] {
+  const binding = {
+    authorityEpoch,
+    workerId: randomId(),
+    operationId: randomId(),
+    attemptId: current.attemptId,
+    transactionId: current.transactionId,
+    expectedRevision,
+    previousTupleSha256: current.previousEvidence.tupleSha256,
+    nextTupleSha256: current.nextEvidence.tupleSha256,
+    admittedSlots,
+    status: "drained" as const,
+  };
+  return Object.freeze({ ...binding, receiptSha256: sha256Utf8(canonicalizeJson(binding)) });
+}
+
 function candidateWith(
   current: InstallationJournal,
   slots: InstallationJournal["slots"],
   windows: NonNullable<InstallationJournal["windows"]>,
-  controlEpoch = current.control.authorityEpoch,
+  admittedSlots: readonly InstallationMutationSlot[],
+  controlEpoch = current.control.authorityEpoch + 1,
 ): InstallationJournal {
+  const revision = current.revision + 1;
+  const operation = operationEvidence(current, revision, controlEpoch, admittedSlots);
   return advanceInstallationJournal(current, validateInstallationJournal({
     ...current,
-    revision: current.revision + 1,
+    revision,
     slots,
-    control: { authorityEpoch: controlEpoch, operations: current.control.operations },
+    control: { authorityEpoch: controlEpoch, operations: Object.freeze([...current.control.operations, operation]) },
     windows,
     terminalEvidenceSha256: null,
   }));
@@ -127,7 +159,7 @@ export function attachWindowsInnerJournal(
       sha256: observation.sha256,
       size: observation.size,
     });
-    return candidateWith(journal, slots, Object.freeze({ inner, launch: journal.windows!.launch }));
+    return candidateWith(journal, slots, Object.freeze({ inner, launch: journal.windows!.launch }), ["windows-inner-journal", "installation-journal"]);
   } catch (error) {
     if (error instanceof ToolError) throw error;
     throw failure("malformed-inner-transition");
@@ -185,6 +217,7 @@ export function reserveWindowsLaunch(
       journal,
       Object.freeze([...journal.slots, descriptorSlot]),
       Object.freeze({ inner: journal.windows.inner, launch }),
+      ["launch-descriptor", "installation-journal"],
       authorityEpoch,
     );
   } catch (error) {
