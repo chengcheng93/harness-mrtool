@@ -5,7 +5,7 @@ import {
   advanceInstallationJournal,
   type InstallationJournalTransition,
 } from "../../src/update/installation-journal-transition.ts";
-import { journalFixture } from "../helpers/installation-journal-fixture.ts";
+import { journalFixture, withLaunch } from "../helpers/installation-journal-fixture.ts";
 
 type MutableJournal = {
   -readonly [K in keyof InstallationJournalTransition]: InstallationJournalTransition[K]
@@ -48,3 +48,30 @@ test("does not mutate either caller journal", () => {
   assert.deepEqual(current, before);
   assert.notEqual(result, next);
 });
+
+test("integrates the Windows launch lifecycle guard into journal transitions", () => {
+  const current = journalFixture("windows-x64", "prepared");
+  withLaunch(current, "reserved");
+  const next = structuredClone(current) as MutableDeep<InstallationJournalTransition>;
+  next.revision += 1;
+  next.control.authorityEpoch += 1;
+  next.windows!.launch!.authorityEpoch += 1;
+  next.windows!.launch!.expectedRevision += 1;
+  next.windows!.launch!.state = "registered";
+  next.windows!.launch!.child = { pid: 201, startKey: "win:134000000000000001", launchNonce: "1".repeat(32) };
+  assert.equal(advanceInstallationJournal(current, next).windows!.launch!.state, "registered");
+
+  const bypass = structuredClone(current) as MutableDeep<InstallationJournalTransition>;
+  bypass.revision += 1;
+  bypass.control.authorityEpoch += 1;
+  bypass.windows!.launch!.authorityEpoch += 1;
+  bypass.windows!.launch!.expectedRevision += 1;
+  bypass.windows!.launch!.state = "admitted";
+  bypass.windows!.launch!.child = { pid: 201, startKey: "win:134000000000000001", launchNonce: "1".repeat(32) };
+  bypass.windows!.launch!.grantSha256 = "2".repeat(64);
+  assert.throws(() => advanceInstallationJournal(current, bypass), { code: "UPDATE_SECURITY_ERROR" });
+});
+
+
+type MutableDeep<T> = T extends readonly (infer V)[] ? MutableDeep<V>[] :
+  T extends object ? { -readonly [K in keyof T]: MutableDeep<T[K]> } : T;

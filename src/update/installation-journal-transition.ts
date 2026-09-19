@@ -5,6 +5,7 @@ import {
   type InstallationJournal,
   type InstallationJournalPhase,
 } from "./installation-journal.ts";
+import { advanceWindowsLaunchEvidence } from "./windows-launch-transition.ts";
 
 export type InstallationJournalTransition = InstallationJournal;
 
@@ -31,6 +32,20 @@ const nextPhases: Readonly<Record<InstallationJournalPhase, readonly Installatio
   blocked: [],
   "retention-transfer": [],
 });
+
+function checkWindowsLaunchTransition(previous: InstallationJournal, candidate: InstallationJournal): void {
+  const from = previous.windows?.launch ?? null;
+  const to = candidate.windows?.launch ?? null;
+  if (from === null && to === null) return;
+  if (from === null) {
+    if (to === null || to.state !== "reserved" || to.settlement.state !== "unsettled") {
+      throw failure("launch-must-start-reserved");
+    }
+    return;
+  }
+  if (to === null) throw failure("launch-cannot-disappear");
+  advanceWindowsLaunchEvidence(from, to);
+}
 
 function immutableBinding(journal: InstallationJournal): string {
   return canonicalizeJson({
@@ -67,6 +82,7 @@ export function advanceInstallationJournal(current: unknown, next: unknown): Ins
     if (previous.phase === "blocked" || previous.phase === "retention-transfer") {
       throw failure("terminal-journal-cannot-advance");
     }
+    checkWindowsLaunchTransition(previous, candidate);
     return candidate;
   } catch (error) {
     if (error instanceof ToolError) throw error;
