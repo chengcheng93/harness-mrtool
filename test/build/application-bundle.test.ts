@@ -23,11 +23,12 @@ const repositoryRoot = resolve(import.meta.dirname, "../..");
 const templateBundlePath = resolve(repositoryRoot, "template-bundle");
 
 function assertApplicationBundleProcess(result: ReturnType<typeof runProcess>, operation: string): void {
-  if (result.error !== undefined || result.status !== 0 || result.stderr !== "") {
+  const reason = result.error !== undefined ? "error" : result.status !== 0 ? "status" : result.stderr !== "" ? "stderr" : null;
+  if (reason !== null) {
     throw new ToolError("INTERNAL_ERROR", "Application bundle command failed", {
       field: "runtime",
       expected: "the source-built application bundle command to exit cleanly",
-      actual: `application-bundle:${operation}`,
+      actual: `application-bundle:${operation}-${reason}`,
       safeNextStep: "Rebuild the application bundle and inspect the bounded command failure diagnostic.",
     });
   }
