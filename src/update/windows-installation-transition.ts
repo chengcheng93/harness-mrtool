@@ -10,8 +10,10 @@ import type {
   InstallationJournalRoots,
   InstallationProcessIdentity,
   InstallationMutationSlot,
+  InstallationLaunchEvidence,
 } from "./installation-journal.ts";
-import { validateInstallationJournal } from "./installation-journal.ts";
+import { validateInstallationJournal, validateInstallationLaunchEvidence } from "./installation-journal.ts";
+import { advanceWindowsLaunchEvidence } from "./windows-launch-transition.ts";
 import type { WindowsMutationPlan } from "./windows-mutation-plan.ts";
 
 export interface WindowsInnerJournalObservation {
@@ -110,12 +112,16 @@ function candidateWith(
   windows: NonNullable<InstallationJournal["windows"]>,
   admittedSlots: readonly InstallationMutationSlot[],
   controlEpoch = current.control.authorityEpoch + 1,
+  phase: InstallationJournal["phase"] = current.phase,
+  outcome: InstallationJournal["outcome"] = current.outcome,
 ): InstallationJournal {
   const revision = current.revision + 1;
   const operation = operationEvidence(current, revision, controlEpoch, admittedSlots);
   return advanceInstallationJournal(current, validateInstallationJournal({
     ...current,
     revision,
+    phase,
+    outcome,
     slots,
     control: { authorityEpoch: controlEpoch, operations: Object.freeze([...current.control.operations, operation]) },
     windows,
@@ -163,6 +169,68 @@ export function attachWindowsInnerJournal(
   } catch (error) {
     if (error instanceof ToolError) throw error;
     throw failure("malformed-inner-transition");
+  }
+}
+
+/**
+ * Persist one guarded Windows launch lifecycle step in the outer journal.
+ * The caller supplies evidence from the native child/descriptor boundary; this
+ * function only binds it to the current transaction and records a new receipt.
+ */
+export function advanceWindowsLaunchInJournal(
+  current: unknown,
+  nextLaunch: InstallationLaunchEvidence,
+): InstallationJournal {
+  try {
+    const journal = validateInstallationJournal(current);
+    if (journal.platform !== "windows-x64" || journal.windows === null || journal.windows.launch === null) {
+      throw failure("launch-required");
+    }
+    const next = validateInstallationLaunchEvidence(nextLaunch);
+    if (next.authorityEpoch !== journal.control.authorityEpoch + 1 ||
+        next.expectedRevision !== journal.revision + 1) {
+      throw failure("launch-revision-binding-mismatch");
+    }
+    const checked = advanceWindowsLaunchEvidence(journal.windows.launch, next);
+    return candidateWith(
+      journal,
+      journal.slots,
+      Object.freeze({ inner: journal.windows.inner, launch: checked }),
+      ["installation-journal"],
+      next.authorityEpoch,
+    );
+  } catch (error) {
+    if (error instanceof ToolError) throw error;
+    throw failure("malformed-launch-transition");
+  }
+}
+
+/** Enter the Windows deferred-execution phase only after launch admission is durable. */
+export function markWindowsExecutionPending(current: unknown): InstallationJournal {
+  try {
+    const journal = validateInstallationJournal(current);
+    if (journal.platform !== "windows-x64" || journal.windows === null || journal.windows.launch === null ||
+        journal.windows.launch.state !== "admitted" || journal.phase !== "prepared") {
+      throw failure("admitted-launch-and-prepared-journal-required");
+    }
+    const launch = Object.freeze({
+      ...journal.windows.launch,
+      authorityEpoch: journal.control.authorityEpoch + 1,
+      expectedRevision: journal.revision + 1,
+    });
+    const checked = advanceWindowsLaunchEvidence(journal.windows.launch, launch);
+    return candidateWith(
+      journal,
+      journal.slots,
+      Object.freeze({ inner: journal.windows.inner, launch: checked }),
+      ["installation-journal"],
+      launch.authorityEpoch,
+      "execution-pending",
+      null,
+    );
+  } catch (error) {
+    if (error instanceof ToolError) throw error;
+    throw failure("malformed-execution-pending-transition");
   }
 }
 

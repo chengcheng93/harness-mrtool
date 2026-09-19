@@ -4,9 +4,11 @@ import test from "node:test";
 import {
   attachWindowsInnerJournal,
   reserveWindowsLaunch,
+  advanceWindowsLaunchInJournal,
+  markWindowsExecutionPending,
 } from "../../src/update/windows-installation-transition.ts";
 import { validateInstallationJournal } from "../../src/update/installation-journal.ts";
-import { journalFixture, randomId, digest } from "../helpers/installation-journal-fixture.ts";
+import { journalFixture, randomId, digest, withLaunch } from "../helpers/installation-journal-fixture.ts";
 
 function preparedWithoutInner() {
   const fixture = journalFixture("windows-x64", "prepared");
@@ -81,4 +83,30 @@ test("reserving a Windows launch records an unsettled reserved lifecycle and des
   assert.equal(next.control.operations.length, withInner.control.operations.length + 1);
   assert.equal(next.control.operations.at(-1)?.authorityEpoch, withInner.control.authorityEpoch + 1);
   assert.deepEqual(next.control.operations.at(-1)?.admittedSlots, ["launch-descriptor", "installation-journal"]);
+});
+
+
+test("outer journal advances one Windows launch lifecycle step with a new control receipt", () => {
+  const journal = validateInstallationJournal(withLaunch(journalFixture("windows-x64", "prepared"), "reserved"));
+  const current = journal.windows!.launch!;
+  const next = {
+    ...current,
+    authorityEpoch: current.authorityEpoch + 1,
+    expectedRevision: current.expectedRevision + 1,
+    state: "registered" as const,
+    child: { pid: 201, startKey: "win:134000000000000001", launchNonce: randomId(91) },
+  };
+  const advanced = advanceWindowsLaunchInJournal(journal, next);
+  assert.equal(advanced.windows?.launch?.state, "registered");
+  assert.equal(advanced.revision, journal.revision + 1);
+  assert.equal(advanced.control.operations.length, journal.control.operations.length + 1);
+});
+
+test("admitted Windows launch can enter execution-pending only through a durable journal step", () => {
+  const journal = validateInstallationJournal(withLaunch(journalFixture("windows-x64", "prepared"), "admitted"));
+  const pending = markWindowsExecutionPending(journal);
+  assert.equal(pending.phase, "execution-pending");
+  assert.equal(pending.windows?.launch?.state, "admitted");
+  assert.equal(pending.windows?.launch?.settlement.state, "unsettled");
+  assert.equal(pending.control.operations.length, journal.control.operations.length + 1);
 });
