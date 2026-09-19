@@ -1,0 +1,78 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import {
+  attachWindowsInnerJournal,
+  reserveWindowsLaunch,
+} from "../../src/update/windows-installation-transition.ts";
+import { validateInstallationJournal } from "../../src/update/installation-journal.ts";
+import { journalFixture, randomId, digest } from "../helpers/installation-journal-fixture.ts";
+
+function preparedWithoutInner() {
+  const fixture = journalFixture("windows-x64", "prepared");
+  fixture.windows!.inner = null;
+  fixture.slots = fixture.slots.filter((slot) => slot.name !== "windows-inner-journal");
+  return validateInstallationJournal(fixture);
+}
+
+function planFor(journal: ReturnType<typeof preparedWithoutInner>) {
+  return {
+    schemaVersion: 1 as const,
+    operation: journal.operation,
+    installationId: journal.installationId,
+    enrollmentId: journal.enrollmentId,
+    attemptId: journal.attemptId,
+    transactionId: journal.transactionId,
+    journalRevision: journal.revision,
+    authorityEpoch: journal.control.authorityEpoch + 1,
+    previous: {
+      executableSha256: journal.previousEvidence.native.sha256,
+      executableSize: journal.previousEvidence.native.size,
+      markerSha256: journal.previousEvidence.marker.sha256,
+      markerSize: journal.previousEvidence.marker.size,
+    },
+    next: {
+      executableSha256: journal.nextEvidence.native.sha256,
+      executableSize: journal.nextEvidence.native.size,
+      markerSha256: journal.nextEvidence.marker.sha256,
+      markerSize: journal.nextEvidence.marker.size,
+    },
+  } as const;
+}
+
+test("attaching an observed Windows inner journal creates one identity-bound slot", () => {
+  const journal = preparedWithoutInner();
+  const plan = planFor(journal);
+  const next = attachWindowsInnerJournal(journal, plan, {
+    identity: { dev: "2", ino: "105" },
+    sha256: digest("inner"),
+    size: 512,
+  });
+  assert.equal(next.revision, journal.revision + 1);
+  assert.equal(next.windows?.inner?.sha256, digest("inner"));
+  assert.equal(next.slots.filter((slot) => slot.name === "windows-inner-journal").length, 1);
+});
+
+test("Windows inner attachment rejects a plan that drifts from the outer journal", () => {
+  const journal = preparedWithoutInner();
+  const plan = { ...planFor(journal), next: { ...planFor(journal).next, executableSize: 999 } };
+  assert.throws(() => attachWindowsInnerJournal(journal, plan, {
+    identity: { dev: "2", ino: "105" }, sha256: digest("inner"), size: 512,
+  }), /windows installation transition is unsafe/u);
+});
+
+test("reserving a Windows launch records an unsettled reserved lifecycle and descriptor slot", () => {
+  const journal = preparedWithoutInner();
+  const withInner = attachWindowsInnerJournal(journal, planFor(journal), {
+    identity: { dev: "2", ino: "105" }, sha256: digest("inner"), size: 512,
+  });
+  const next = reserveWindowsLaunch(withInner, {
+    launchId: randomId(20),
+    reservationId: randomId(21),
+    descriptor: { identity: { dev: "3", ino: "205" }, sha256: digest("descriptor"), size: 128 },
+    parent: { pid: 200, startKey: "win:134000000000000000", launchNonce: randomId(22) },
+  });
+  assert.equal(next.windows?.launch?.state, "reserved");
+  assert.equal(next.windows?.launch?.settlement.state, "unsettled");
+  assert.equal(next.slots.some((slot) => slot.name === "launch-descriptor" && slot.state === "created"), true);
+});
