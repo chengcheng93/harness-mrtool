@@ -201,13 +201,13 @@ function itemType(value: BigIntStats): string {
 function sameIdentity(left: BigIntStats, right: BigIntStats): boolean {
   return itemType(left) === itemType(right) && left.dev === right.dev && left.ino === right.ino &&
     left.size === right.size && left.nlink === right.nlink &&
-    left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
+    (process.platform === "win32" || (left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs));
 }
 
 function sameMovedFile(left: BigIntStats, right: BigIntStats): boolean {
   return itemType(left) === itemType(right) && left.dev === right.dev && left.ino === right.ino &&
-    left.size === right.size && left.mtimeNs === right.mtimeNs &&
-    left.birthtimeNs === right.birthtimeNs;
+    left.size === right.size && (process.platform === "win32" ||
+      (left.mtimeNs === right.mtimeNs && left.birthtimeNs === right.birthtimeNs));
 }
 
 function serializeRecord(record: VerificationReceiptRecord): string {

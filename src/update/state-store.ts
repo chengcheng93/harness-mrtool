@@ -202,7 +202,7 @@ function samePath(left: string, right: string): boolean {
 
 function sameIdentity(left: BigIntStats, right: BigIntStats): boolean {
   return left.dev === right.dev && left.ino === right.ino && left.size === right.size &&
-    left.nlink === right.nlink && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
+    left.nlink === right.nlink && (process.platform === "win32" || (left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs));
 }
 
 
@@ -210,8 +210,8 @@ function sameIdentity(left: BigIntStats, right: BigIntStats): boolean {
 
 function sameMovedIdentity(left: BigIntStats, right: BigIntStats): boolean {
   return left.dev === right.dev && left.ino === right.ino && left.size === right.size &&
-    left.nlink === right.nlink && left.mtimeNs === right.mtimeNs &&
-    left.birthtimeNs === right.birthtimeNs;
+    left.nlink === right.nlink && (process.platform === "win32" || (left.mtimeNs === right.mtimeNs &&
+    left.birthtimeNs === right.birthtimeNs));
 }
 
 

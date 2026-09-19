@@ -212,7 +212,7 @@ export function validateArchiveEntries(entries: readonly ArchiveEntry[]): readon
 
 function sameIdentity(left: BigIntStats, right: BigIntStats): boolean {
   return left.dev === right.dev && left.ino === right.ino && left.size === right.size &&
-    left.mtimeNs === right.mtimeNs;
+    (process.platform === "win32" || left.mtimeNs === right.mtimeNs);
 }
 
 function filesystemPathKey(path: string): string {

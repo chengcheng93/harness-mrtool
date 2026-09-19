@@ -178,7 +178,7 @@ function sameFile(left: BigIntStats, right: BigIntStats): boolean {
 
 function sameSnapshot(left: BigIntStats, right: BigIntStats): boolean {
   return sameFile(left, right) && left.size === right.size && left.nlink === right.nlink &&
-    left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
+    (process.platform === "win32" || (left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs));
 }
 
 function assertPrivateDirectory(info: BigIntStats): void {
