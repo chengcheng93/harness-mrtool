@@ -584,7 +584,7 @@ try {
   $lockPath=[IO.Path]::Combine($root,'.update.lock')
   $targetPath=[IO.Path]::Combine($root,'installation-transaction.json')
   $stage='lock-open'
-  $lock=[IO.File]::Open($lockPath,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None,4096,[IO.FileOptions]::WriteThrough)
+  $lock=[IO.File]::Open($lockPath,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
   $lockInfo=Get-Item -LiteralPath $lockPath -Force
   if($lockInfo.PSIsContainer -or (($lockInfo.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) { throw 'rejected' }
   $stage='ready'
@@ -618,7 +618,7 @@ try {
       }
       $output=$null
       try {
-        $output=[IO.File]::Open($targetPath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None,4096,[IO.FileOptions]::WriteThrough)
+        $output=[IO.File]::Open($targetPath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
         $output.Write($bytes,0,$bytes.Length)
         $output.Flush($true)
         $output.Dispose(); $output=$null
