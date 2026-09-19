@@ -83,3 +83,16 @@ test("production installation coordinates authenticated staging, journal, cache 
     await removeTree(root);
   }
 });
+
+test("recovery is a no-op before the first managed release is installed", darwin, async (t) => {
+  const root = await mkdtemp(resolve(await realpath(tmpdir()), "production-installation-recovery-empty-"));
+  t.after(() => removeTree(root));
+  const service = createProductionInstallationService({
+    stateDirectory: resolve(root, "state"),
+    installationDirectory: resolve(root, "installation"),
+    platform: "darwin-arm64",
+  });
+
+  await service.recover();
+  assert.equal(await lstat(resolve(root, "state", "installation-journal.json")).then(() => true, () => false), false);
+});

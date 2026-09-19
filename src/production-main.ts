@@ -1,3 +1,4 @@
+import { lstat } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -78,6 +79,26 @@ const cliVersion = typeof __HARNESS_MRTOOL_VERSION__ === "string"
   ? __HARNESS_MRTOOL_VERSION__
   : packageMetadata.version;
 
+const INSTALL_MARKER_NAME = ".harness-mrtool-install.json";
+
+async function hasManagedInstallationMarker(): Promise<boolean> {
+  try {
+    const info = await lstat(resolve(dirname(resolve(process.execPath)), INSTALL_MARKER_NAME));
+    if (!info.isFile() || info.isSymbolicLink()) {
+      throw new ToolError("UPDATE_SECURITY_ERROR", "Managed installation marker is unsafe", {
+        field: "update.installation.marker",
+        expected: "a regular marker file beside the installed executable",
+        actual: "marker is not a regular file",
+        safeNextStep: "Run self-update repair or reinstall a complete verified release.",
+      });
+    }
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
 interface TextOutput {
   readonly write: (chunk: string) => boolean;
 }
@@ -125,9 +146,15 @@ async function activeBundleSelection(
   channelDefaults: ProductionChannelCommandDefaults = {},
 ): Promise<TrustedBundleSelection | null> {
   // Source/test invocations must not probe or create the user's default state
-  // path. Packaged production always authenticates the active cache; an
-  // explicitly supplied in-process state path is the only test seam.
-  if (channelDefaults.stateDirectory === undefined && typeof __HARNESS_MRTOOL_VERSION__ !== "string") return null;
+  // path. An explicit state path is the in-process test seam. For a packaged
+  // binary, the default cache is authoritative only after the executable has
+  // been enrolled by the immutable installer; an arbitrary Node application
+  // bundle must still be able to run its embedded local commands. Startup
+  // recovery has already rejected a malformed active installation before this
+  // selection point.
+  const explicitStateDirectory = channelDefaults.stateDirectory !== undefined;
+  if (!explicitStateDirectory && typeof __HARNESS_MRTOOL_VERSION__ !== "string") return null;
+  if (!explicitStateDirectory && !(await hasManagedInstallationMarker())) return null;
   const platform = channelDefaults.platform ?? currentReleasePlatform();
   const trustConfig = channelDefaults.trustConfig;
   const verifier = createReleaseSetSnapshotVerifier({
@@ -460,6 +487,12 @@ async function recoverInstallationBeforePublicInvocation(
       ? createDefaultInstallationService(dependencies.updateChannelDefaults)
       : undefined
   );
+  if (dependencies.installationService === undefined && service !== undefined && !(await hasManagedInstallationMarker())) {
+    // A packaged application can be executed for its immutable self-test or
+    // local read-only commands before the installer has enrolled its canonical
+    // executable. Do not probe the user's default state path in that phase.
+    return;
+  }
   await service?.recover();
 }
 

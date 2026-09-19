@@ -234,6 +234,18 @@ export function createProductionInstallationService(options: ProductionInstallat
     await store.remove();
   }
 
+  async function recoverExistingInstallation(lease: ProcessLockLease): Promise<void> {
+    // A packaged binary may be running before its first managed installation
+    // has been enrolled (for example, the immutable installer self-test).
+    // Recovery owns only durable state that exists; absence of an active cache
+    // record is not a damaged installation and must not block read-only public
+    // commands. Once an active record exists, use the same canonical-byte and
+    // marker verification as apply/rollback.
+    const active = await cache.loadLastKnownGoodOrNull({}, lease);
+    if (active === null) return;
+    await currentInstalled(lease);
+  }
+
   async function currentInstalled(lease: ProcessLockLease): Promise<{
     readonly active: StoredReleaseSet;
     readonly observed: InstalledReleaseObservation;
@@ -366,7 +378,7 @@ export function createProductionInstallationService(options: ProductionInstallat
       await withUpdateLock(stateDirectory, async lease => {
         const store = createInstallationJournalStore(stateDirectory, {lease, ...(options.windowsAclVerifier === undefined ? {} : {windowsAclVerifier: options.windowsAclVerifier})});
         await recoverTerminal(lease, store);
-        await currentInstalled(lease);
+        await recoverExistingInstallation(lease);
       });
     },
   });
