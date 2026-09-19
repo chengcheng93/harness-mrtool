@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -9,12 +9,13 @@ import { parse } from "yaml";
 import { runProcess } from "../helpers/process.ts";
 
 const root = resolve(import.meta.dirname, "../..");
+const tempRoot = realpathSync(tmpdir());
 const reporter = resolve(root, "scripts/report-test-failures.mjs");
 const knownName = "test runner exits nonzero when a name pattern matches no test cases";
 const otherName = "test runner still accepts a caller reporter without a name filter";
 
 function report(log: string, status = "1") {
-  const directory = mkdtempSync(join(tmpdir(), "test-failure-report-"));
+  const directory = mkdtempSync(join(tempRoot, "test-failure-report-"));
   try {
     const path = join(directory, "spec.log");
     writeFileSync(path, log);
@@ -130,7 +131,7 @@ test("failure reporter never reflects missing log paths or invalid status input"
 });
 
 test("failure reporter reads bounded head and tail without joining partial lines", () => {
-  const directory = mkdtempSync(join(tmpdir(), "test-failure-bound-"));
+  const directory = mkdtempSync(join(tempRoot, "test-failure-bound-"));
   try {
     const path = join(directory, "spec.log");
     // Place a forged header across each read boundary; neither partial line is a record.
@@ -178,7 +179,7 @@ test("failure reporter keeps 100%0A::error:: text on one annotation line", () =>
 });
 
 test("failure reporter accepts actual pinned Node spec output without assertion details", () => {
-  const directory = mkdtempSync(join(tmpdir(), "test-failure-spec-"));
+  const directory = mkdtempSync(join(tempRoot, "test-failure-spec-"));
   try {
     const fixture = join(directory, "fixture.test.mjs");
     writeFileSync(fixture, `import test from "node:test";
