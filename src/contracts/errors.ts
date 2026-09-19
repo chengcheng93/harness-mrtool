@@ -28,6 +28,7 @@ export type ResultCode = "OK" | ErrorCode;
 export type FailureCode = Exclude<ErrorCode, "UPDATE_CHECK_WARNING">;
 
 const toolErrorInstances = new WeakSet<object>();
+const SAFE_DIAGNOSTIC = /^(?:windows-helper|windows-lock-helper|native-store|native-readiness|managed-installation|update-state|installation-journal):[a-z-]{1,32}$/u;
 
 export interface ErrorDetails {
   readonly field: string | null;
@@ -62,6 +63,8 @@ function normalizeDetails(details: ErrorDetails): ErrorDetails {
 export class ToolError<Code extends ErrorCode = ErrorCode> extends Error {
   readonly code: Code;
   readonly details: ErrorDetails;
+  /** Bounded non-sensitive stage metadata for native CI diagnostics only. */
+  readonly diagnostic?: string;
 
   constructor(
     code: Code,
@@ -76,6 +79,9 @@ export class ToolError<Code extends ErrorCode = ErrorCode> extends Error {
     this.name = "ToolError";
     this.code = code;
     this.details = normalizeDetails(details);
+    if (typeof this.details.actual === "string" && SAFE_DIAGNOSTIC.test(this.details.actual)) {
+      Object.defineProperty(this, "diagnostic", { value: this.details.actual, enumerable: false });
+    }
     toolErrorInstances.add(this);
   }
 }
