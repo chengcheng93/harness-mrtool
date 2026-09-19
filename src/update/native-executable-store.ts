@@ -26,7 +26,7 @@ const READ_FLAGS=constants.O_RDONLY|(process.platform==='win32'?0:((constants as
 function fail(actual='native-store:operation'):never{throw new ToolError('UPDATE_SECURITY_ERROR','Native executable materialization is unsafe',{
  field:'update.executable',expected:'a private, sealed executable matching authenticated release bytes',actual,
  safeNextStep:'Keep the installed release; inspect the private native staging directory before retrying.'});}
-function same(a:BigIntStats,b:BigIntStats){return a.dev===b.dev&&a.ino===b.ino;}
+function same(a:BigIntStats,b:BigIntStats){return a.ino>0n&&b.ino>0n&&a.ino===b.ino&&(process.platform==='win32'||a.dev===b.dev);}
 function pathEqual(a:string,b:string){return samePhysicalPath(a,b);}
 function sealedFile(stat:BigIntStats,size:number){return stat.isFile()&&!stat.isSymbolicLink()&&stat.nlink===1n&&owned(stat)&&stat.size===BigInt(size)&&(process.platform==='win32'||(Number(stat.mode)&0o7777)===0o500);}
 function owned(stat:BigIntStats){return process.platform==='win32'||stat.uid===BigInt(process.getuid!());}

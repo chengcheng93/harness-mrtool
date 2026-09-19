@@ -166,8 +166,8 @@ function validatePaths(paths: WindowsExecutablePaths): void {
 
 
 function sameStats(left: BigIntStats, right: BigIntStats): boolean {
-  return left.dev === right.dev && left.ino === right.ino && left.size === right.size &&
-    (process.platform === "win32" || left.mtimeNs === right.mtimeNs);
+  return left.ino > 0n && right.ino > 0n && left.ino === right.ino && left.size === right.size &&
+    (process.platform === "win32" || (left.dev === right.dev && left.mtimeNs === right.mtimeNs));
 }
 
 
@@ -183,8 +183,8 @@ function identity(stats: BigIntStats): FileIdentity {
 
 function identityMatches(stats: BigIntStats, expected: FileIdentity): boolean {
   const actual = identity(stats);
-  return actual.dev === expected.dev && actual.ino === expected.ino &&
-    actual.size === expected.size && (process.platform === "win32" || actual.mtimeNs === expected.mtimeNs);
+  return actual.ino !== "0" && actual.ino === expected.ino && actual.size === expected.size &&
+    (process.platform === "win32" || (actual.dev === expected.dev && actual.mtimeNs === expected.mtimeNs));
 }
 
 

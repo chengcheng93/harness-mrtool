@@ -69,8 +69,13 @@ function copyIdentity(info: BigIntStats): FileIdentity {
   return Object.freeze({ dev: info.dev, ino: info.ino, size: info.size, mtimeNs: info.mtimeNs });
 }
 
+function sameNodeIdentity(left: FileIdentity, right: FileIdentity): boolean {
+  return left.ino > 0n && right.ino > 0n && left.ino === right.ino &&
+    (process.platform === "win32" || left.dev === right.dev);
+}
+
 function sameIdentity(left: FileIdentity, right: FileIdentity): boolean {
-  return left.dev === right.dev && left.ino === right.ino && left.size === right.size &&
+  return sameNodeIdentity(left, right) && left.size === right.size &&
     (process.platform === "win32" || left.mtimeNs === right.mtimeNs);
 }
 
@@ -81,9 +86,9 @@ async function directoryIdentity(path: string, expected?: FileIdentity): Promise
     const after = await lstat(path, { bigint: true }) as BigIntStats;
     if (!before.isDirectory() || before.isSymbolicLink() || !after.isDirectory() || after.isSymbolicLink()) throw failure("managed-installation:directory-stat");
     if (!samePath(physical, path)) throw failure("managed-installation:directory-realpath");
-    if (before.dev !== after.dev || before.ino !== after.ino) throw failure("managed-installation:directory-race");
+    if (!sameNodeIdentity(copyIdentity(before), copyIdentity(after))) throw failure("managed-installation:directory-race");
     const result = copyIdentity(before);
-    if (expected !== undefined && (result.dev !== expected.dev || result.ino !== expected.ino)) throw failure("managed-installation:directory-expected");
+    if (expected !== undefined && !sameNodeIdentity(result, expected)) throw failure("managed-installation:directory-expected");
     return result;
   } catch (error) {
     throw error instanceof ToolError ? error : failure("managed-installation:directory");
@@ -99,7 +104,7 @@ async function fileIdentity(path: string, expected?: FileIdentity): Promise<File
     if (before.isSymbolicLink()) throw failure("managed-installation:file-link");
     if (before.nlink !== 1n) throw failure("managed-installation:file-links");
     if (!samePath(physical, path)) throw failure("managed-installation:file-realpath");
-    if (before.dev !== after.dev || before.ino !== after.ino) throw failure("managed-installation:file-race");
+    if (!sameNodeIdentity(copyIdentity(before), copyIdentity(after))) throw failure("managed-installation:file-race");
     const result = copyIdentity(before);
     if (expected !== undefined && !sameIdentity(result, expected)) throw failure("managed-installation:file-expected");
     return result;
