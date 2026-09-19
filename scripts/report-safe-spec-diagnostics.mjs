@@ -38,3 +38,13 @@ for (const [pattern, prefix] of safeLocations) {
     process.stdout.write(`::notice::Native safe diagnostic ${value}\n`);
   }
 }
+
+const safeCodes = new Set(['OK', 'UPDATE_SECURITY_ERROR', 'INTERNAL_ERROR', 'TEMPLATE_ERROR', 'MANUAL_DESCRIPTION_CHANGE', 'INPUT_ERROR', 'UNMANAGED_MR', 'PARTIAL_DRAFT', 'PARTIAL_REMOTE_STATE']);
+for (const match of text.matchAll(/"code":"([A-Z_]{2,48})"/gu)) {
+  const code = match[1];
+  if (!safeCodes.has(code)) continue;
+  const value = `output-code:${code.toLowerCase().replaceAll('_', '-')}`;
+  if (seen.has(value)) continue;
+  seen.add(value);
+  process.stdout.write(`::notice::Native safe diagnostic ${value}\n`);
+}
