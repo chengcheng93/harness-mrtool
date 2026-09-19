@@ -3,8 +3,15 @@ import { fileURLToPath } from "node:url";
 
 import packageMetadata from "../package.json" with { type: "json" };
 
-import { loadTemplateBundle, type LoadedTemplateBundle } from "./bundle/load.ts";
+import {
+  loadTemplateBundle,
+  type LoadedTemplateBundle,
+  MAX_BUNDLE_MANIFEST_BYTES,
+  MAX_BUNDLE_PAYLOAD_BYTES,
+  MAX_BUNDLE_TOTAL_PAYLOAD_BYTES,
+} from "./bundle/load.ts";
 import { validateTemplateBundle } from "./bundle/validate.ts";
+import { TEMPLATE_BUNDLE_PAYLOAD_PATHS } from "./bundle/types.ts";
 import {
   createLocalCommandHandlers,
   type TrustedBundleSelection,
@@ -54,8 +61,15 @@ import type { UpdateService } from "./update/service.ts";
 import type { ProductionInstallationService } from "./update/managed-installation-types.ts";
 import { defaultStateDirectory } from "./platform/state-path.ts";
 import { createProductionInstallationService } from "./update/production-installation-service.ts";
-import { authenticateReleaseSnapshot } from "./update/release-set-verifier.ts";
+import {
+  authenticateReleaseSnapshot,
+  createReleaseSetSnapshotVerifier,
+} from "./update/release-set-verifier.ts";
 import { currentReleasePlatform } from "./update/production-release-preparation.ts";
+import { UpdateCache } from "./update/cache.ts";
+import { loadTemplateBundleSnapshot } from "./update/historical-bundle-loader.ts";
+import { unpackTemplatePublicationArchive } from "./update/production-historical-source.ts";
+import { MAX_SIGNED_ENVELOPE_BYTES } from "./update/envelope.ts";
 
 declare const __HARNESS_MRTOOL_VERSION__: string;
 declare const __HARNESS_MRTOOL_BOOTSTRAP_BUNDLE__: unknown;
@@ -105,6 +119,51 @@ async function embeddedBundleSelection(): Promise<TrustedBundleSelection> {
     releaseSetId: `embedded:${bundleManifestHash}`,
     releaseTag: `templates-v${bundle.manifest.version}`,
   };
+}
+
+async function activeBundleSelection(
+  channelDefaults: ProductionChannelCommandDefaults = {},
+): Promise<TrustedBundleSelection | null> {
+  // Source/test invocations must not probe or create the user's default state
+  // path. Packaged production always authenticates the active cache; an
+  // explicitly supplied in-process state path is the only test seam.
+  if (channelDefaults.stateDirectory === undefined && typeof __HARNESS_MRTOOL_VERSION__ !== "string") return null;
+  const platform = channelDefaults.platform ?? currentReleasePlatform();
+  const trustConfig = channelDefaults.trustConfig;
+  const verifier = createReleaseSetSnapshotVerifier({
+    platform,
+    ...(trustConfig === undefined ? {} : { trustConfig }),
+  });
+  const cache = new UpdateCache({
+    stateDirectory: channelDefaults.stateDirectory ?? defaultStateDirectory(),
+    verifySnapshot: verifier,
+    ...(channelDefaults.windowsAclVerifier === undefined ? {} : { windowsAclVerifier: channelDefaults.windowsAclVerifier }),
+  });
+  const active = await cache.loadLastKnownGoodOrNull();
+  if (active === null) return null;
+  const files = unpackTemplatePublicationArchive(active.templateBytes, {
+    filePaths: ["bundle-manifest.json", ...TEMPLATE_BUNDLE_PAYLOAD_PATHS],
+    limits: {
+      receiptEnvelopeBytes: MAX_SIGNED_ENVELOPE_BYTES,
+      manifestBytes: MAX_BUNDLE_MANIFEST_BYTES,
+      payloadBytes: MAX_BUNDLE_PAYLOAD_BYTES,
+      totalPayloadBytes: MAX_BUNDLE_TOTAL_PAYLOAD_BYTES,
+    },
+  });
+  const bundle = await loadTemplateBundleSnapshot(files);
+  const bundleManifestHash = sha256Utf8(`${canonicalizeJson(bundle.manifest)}\n`);
+  return Object.freeze({
+    bundle,
+    bundleManifestHash,
+    releaseSetId: active.record.releaseSetId,
+    releaseTag: `templates-v${active.record.templateVersion}`,
+  });
+}
+
+async function defaultBundleSelection(
+  channelDefaults: ProductionChannelCommandDefaults = {},
+): Promise<TrustedBundleSelection> {
+  return await activeBundleSelection(channelDefaults) ?? await embeddedBundleSelection();
 }
 
 function lazyDefaultUpdaterCommandServices(
@@ -189,13 +248,22 @@ function injectedUpdaterCommandServices(
   return createUpdaterCommandServices(service);
 }
 
+function commandUsesActiveBundle(
+  commandKind: ReturnType<typeof parseCliInvocation>["command"]["kind"],
+): boolean {
+  return !commandKind.startsWith("self-update.") && !commandKind.startsWith("skill.");
+}
+
 async function publicCommandHandlers(
   dependencies: ProductionMainDependencies,
   contextIssueIid: number | null,
+  commandKind: ReturnType<typeof parseCliInvocation>["command"]["kind"],
 ): Promise<CliCommandHandlers> {
   const cwd = dependencies.cwd ?? process.cwd();
   const currentBundle = dependencies.loadCurrentBundle === undefined
-    ? await embeddedBundleSelection()
+    ? commandUsesActiveBundle(commandKind)
+      ? await defaultBundleSelection(dependencies.updateChannelDefaults)
+      : await embeddedBundleSelection()
     : await dependencies.loadCurrentBundle();
   const local = createLocalCommandHandlers({
     cliVersion,
@@ -469,7 +537,7 @@ export async function runProductionMain(
 
   let handlers: CliCommandHandlers;
   try {
-    handlers = await publicCommandHandlers(dependencies, invocation.contextIssueIid);
+    handlers = await publicCommandHandlers(dependencies, invocation.contextIssueIid, parseCliInvocation(sanitizedArguments).command.kind);
   } catch {
     if (requestsJsonOutput(sanitizedArguments)) {
       return (await new CliJsonOutput(
