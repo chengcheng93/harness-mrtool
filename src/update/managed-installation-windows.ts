@@ -71,7 +71,7 @@ function copyIdentity(info: BigIntStats): FileIdentity {
 
 function sameIdentity(left: FileIdentity, right: FileIdentity): boolean {
   return left.dev === right.dev && left.ino === right.ino && left.size === right.size &&
-    left.mtimeNs === right.mtimeNs;
+    (process.platform === "win32" || left.mtimeNs === right.mtimeNs);
 }
 
 async function directoryIdentity(path: string, expected?: FileIdentity): Promise<FileIdentity> {

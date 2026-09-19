@@ -125,12 +125,12 @@ export function createNativeExecutableStore(input:NativeExecutableStoreOptions){
     !pathEqual(await realpath(executablePath),executablePath)||(process.platform!=='win32'&&(Number(before.mode)&0o7777)!==0o500))fail();
    const file=await open(executablePath,READ_FLAGS);
    try{
-    const opened=await file.stat({bigint:true});if(!same(before,opened)||!sealedFile(opened,bytes.length)||opened.mode!==before.mode||opened.ctimeNs!==before.ctimeNs)fail();
+    const opened=await file.stat({bigint:true});if(!same(before,opened)||!sealedFile(opened,bytes.length)||opened.mode!==before.mode||(process.platform!=='win32'&&opened.ctimeNs!==before.ctimeNs))fail();
     const hash=createHash('sha256');const buffer=Buffer.alloc(Math.min(64*1024,bytes.length));let offset=0;
     while(offset<bytes.length){const read=await file.read(buffer,0,Math.min(buffer.length,bytes.length-offset),offset);if(read.bytesRead===0)fail();hash.update(buffer.subarray(0,read.bytesRead));offset+=read.bytesRead;}
     const after=await file.stat({bigint:true});const named=await lstat(executablePath,{bigint:true});
     if(hash.digest('hex')!==digest||!same(opened,after)||!same(opened,named)||!sealedFile(after,bytes.length)||!sealedFile(named,bytes.length)||
-     after.size!==opened.size||after.mtimeNs!==opened.mtimeNs||after.ctimeNs!==opened.ctimeNs||named.mode!==after.mode)fail();
+     after.size!==opened.size||(process.platform!=='win32'&&(after.mtimeNs!==opened.mtimeNs||after.ctimeNs!==opened.ctimeNs))||named.mode!==after.mode)fail();
    }finally{await file.close();}
    if(!same(releaseIdentity,await directory(releaseDirectory,0o500)))fail();await stableParents();return result;
   });
