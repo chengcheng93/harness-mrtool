@@ -107,7 +107,7 @@ test('readiness derives the sealed executable and uses four fixed isolated reado
       cliVersion: '0.1.6', bundleManifestHash: f.bundleManifestHash,
     });
   });
-  assert.equal(calls, 4); await assert.rejects(access(cwd), {code: 'ENOENT'});
+  assert.equal(calls, 4); await assert.rejects(access(cwd), {code: 'ENOENT'}, 'native-readiness:cwd-cleanup');
   assert.equal(await readFile(resolve(f.root, 'active-release-set.json'), 'utf8'), 'existing-active-sentinel');
   await assert.rejects(access(resolve(f.root, 'releases')), {code: 'ENOENT'});
 });
@@ -167,13 +167,14 @@ for (const failure of ['nonzero', 'signal', 'stderr', 'garbage', 'bom', 'sea-fal
       const child = failure === 'spawn-error' ? spawn(resolve(f.root, 'missing'), [], options) : nodeChild(script, options);
       children.push(child); closed.push(false); child.once('close', () => {closed[index] = true;}); return child;
     };
+    const diagnostic = (suffix: string) => `native-readiness:${failure}-${suffix}`;
     const start = performance.now();
     await assert.rejects(verifyNativeReadiness(f.snapshot, {...f.options, nativeReadiness: {spawn: spawnProbe, timeoutMs: failure === 'timeout' ? 300 : 5000, maxOutputBytes: 4096}}), (error: any) => {
-      assert.equal(error.code, 'UPDATE_SECURITY_ERROR'); assert.ok(!JSON.stringify(error).includes('secret-child-output')); return true;
+      assert.equal(error.code, 'UPDATE_SECURITY_ERROR', diagnostic('error-code')); assert.ok(!JSON.stringify(error).includes('secret-child-output'), diagnostic('diagnostic-redaction')); return true;
     });
-    assert.ok(performance.now() - start < 7000, 'native-readiness:failure-timeout');
-    assert.equal(children.length > 0, failure !== 'spawn-throw', 'native-readiness:child-count');
-    assert.ok(closed.every(Boolean), 'native-readiness:child-close');
+    assert.ok(performance.now() - start < 7000, diagnostic('failure-timeout'));
+    assert.equal(children.length > 0, failure !== 'spawn-throw', diagnostic('child-count'));
+    assert.ok(closed.every(Boolean), diagnostic('child-close'));
     for (const child of children) if (child.pid) assert.throws(() => process.kill(child.pid!, 0));
     await assert.rejects(access(cwd), {code: 'ENOENT'});
   });
@@ -184,7 +185,7 @@ test('readiness shares one deadline across all probes rather than resetting each
   const spawnProbe: SpawnProbe = (_path, _args, options) => nodeChild(`setTimeout(()=>process.stdout.write(${JSON.stringify(f.outputs[calls++]!)}),350);`, options);
   const start = performance.now();
   await assert.rejects(verifyNativeReadiness(f.snapshot, {...f.options, nativeReadiness: {spawn: spawnProbe, timeoutMs: 900}}), {code: 'UPDATE_SECURITY_ERROR'});
-  assert.ok(calls >= 2 && calls < 4); assert.ok(performance.now() - start < 1800);
+  assert.ok(calls >= 2, 'native-readiness:deadline-min-calls'); assert.ok(calls < 4, 'native-readiness:deadline-max-calls'); assert.ok(performance.now() - start < 1800, 'native-readiness:deadline-duration');
 });
 
 
