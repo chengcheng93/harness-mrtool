@@ -71,5 +71,6 @@ test("Windows persistence descriptor is exclusively written and identity-observe
 test("Windows helper launch bounds child teardown after readiness failure", async () => {
   const source = await readFile(new URL("../../src/update/windows-persistence-helper.ts", import.meta.url), "utf8");
   assert.match(source, /HELPER_CLOSE_TIMEOUT_MS/u);
-  assert.match(source, /await terminateHelperProcess\(childProcess\)/u);
+  assert.match(source, /childClosePromise/u);
+  assert.match(source, /await terminateHelperProcess\(childProcess, childClosePromise\)/u);
 });

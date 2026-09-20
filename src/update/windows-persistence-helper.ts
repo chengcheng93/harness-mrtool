@@ -153,30 +153,19 @@ function childLaunchEvidence(
 
 type HelperChild = ChildProcessByStdio<null, Readable, null>;
 
-async function terminateHelperProcess(child: HelperChild): Promise<void> {
+async function terminateHelperProcess(child: HelperChild, closePromise: Promise<void>): Promise<void> {
   child.stdout.destroy();
   if (child.exitCode === null && child.signalCode === null) {
     try {
       child.kill();
     } catch {
-      // The close wait below is the authoritative bounded settlement check.
+      // The bounded close wait below remains the authoritative settlement check.
     }
   }
-  if (child.exitCode !== null || child.signalCode !== null) return;
-  await new Promise<void>((resolvePromise) => {
-    let settled = false;
-    const finish = () => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      child.off("close", finish);
-      child.off("error", finish);
-      resolvePromise();
-    };
-    const timer = setTimeout(finish, HELPER_CLOSE_TIMEOUT_MS);
-    child.once("close", finish);
-    child.once("error", finish);
-  });
+  await Promise.race([
+    closePromise,
+    new Promise<void>((resolvePromise) => setTimeout(resolvePromise, HELPER_CLOSE_TIMEOUT_MS)),
+  ]);
 }
 
 async function waitReady(child: HelperChild): Promise<InstallationProcessIdentity> {
@@ -279,6 +268,7 @@ export async function launchWindowsPersistenceHelper(
   const target = helperPath(installationDirectory, draft.launchId);
   await copyHelperExecutable(target, input.current.previousEvidence.native.sha256, input.current.previousEvidence.native.size);
   let childProcess: HelperChild | undefined;
+  let childClosePromise: Promise<void> = Promise.resolve();
   try {
     childProcess = spawn(target, ["internal", "windows-persist", stateDirectory, installationDirectory, target], {
       shell: false,
@@ -286,6 +276,9 @@ export async function launchWindowsPersistenceHelper(
       detached: true,
       stdio: ["ignore", "pipe", "ignore"],
     }) as HelperChild;
+    childClosePromise = new Promise<void>((resolvePromise) => {
+      childProcess!.once("close", () => resolvePromise());
+    });
     const child = await waitReady(childProcess);
     await verifyChildIdentity(child);
     journal = advanceWindowsLaunchInJournal(journal, childLaunchEvidence(journal, "registered", child, null));
@@ -303,7 +296,9 @@ export async function launchWindowsPersistenceHelper(
     childProcess.unref();
     return Object.freeze({ journal, child, helperPath: target });
   } catch (error) {
-    if (childProcess !== undefined) await terminateHelperProcess(childProcess);
+    if (childProcess !== undefined) {
+      await terminateHelperProcess(childProcess, childClosePromise);
+    }
     throw error instanceof ToolError ? error : failure("helper-launch-failed");
   }
 }
