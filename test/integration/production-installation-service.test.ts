@@ -225,8 +225,14 @@ test("recovery aborts only an intact precommit journal for the active previous r
         platform: "darwin-arm64",
         trustConfig: origin.trustConfig,
       });
+      const beforeExecutable = await readFile(resolve(installationDirectory, "harness-mrtool"));
+      const beforeMarker = await readFile(resolve(installationDirectory, ".harness-mrtool-install.json"));
+      const beforeActive = await readFile(resolve(stateDirectory, "active-release-set.json"));
       await service.recover();
       assert.equal(await lstat(resolve(stateDirectory, "installation-journal.json")).then(() => true, () => false), false);
+      assert.deepEqual(await readFile(resolve(installationDirectory, "harness-mrtool")), beforeExecutable);
+      assert.deepEqual(await readFile(resolve(installationDirectory, ".harness-mrtool-install.json")), beforeMarker);
+      assert.deepEqual(await readFile(resolve(stateDirectory, "active-release-set.json")), beforeActive);
     } finally {
       await removeTree(root);
     }
@@ -308,19 +314,13 @@ test("recovery keeps publication-phase journals unresolved", darwin, async () =>
   }
 });
 
-test("recovery preserves a precommit journal bound to a different installation root", darwin, async () => {
+test("recovery preserves a precommit journal when the installation root is replaced", darwin, async () => {
   const fixture = await createPrecommitRecoveryFixture("production-installation-precommit-root-mismatch-");
   try {
-    const alternateRoot = await lstat(fixture.root, {bigint: true});
-    const drifted = {
-      ...fixture.journal,
-      roots: {
-        ...fixture.journal.roots,
-        installation: {dev: String(alternateRoot.dev), ino: String(alternateRoot.ino)},
-      },
-    };
-    await fixture.store.write(drifted);
+    await fixture.store.write(fixture.journal);
     const before = await readFile(fixture.store.path);
+    await rm(fixture.installationDirectory, {recursive: true, force: true});
+    await mkdir(fixture.installationDirectory, {mode: 0o700});
 
     await assert.rejects(fixture.service.recover(), {code: "UPDATE_SECURITY_ERROR"});
     assert.deepEqual(await readFile(fixture.store.path), before);
