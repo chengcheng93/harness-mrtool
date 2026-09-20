@@ -107,6 +107,27 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.16.0
+      - run: npm ci --ignore-scripts
+      - name: Download the exact immutable channel input assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_TAG: ${{ inputs.cli_tag }}
+          TEMPLATE_TAG: ${{ inputs.template_tag }}
+          SKILL_TAG: ${{ inputs.skill_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p cli-release template-release skill-release
+          gh release download "$CLI_TAG" --dir cli-release \
+            --pattern 'harness-mrtool-windows-x64.zip' \
+            --pattern 'harness-mrtool-darwin-arm64.zip'
+          gh release download "$TEMPLATE_TAG" --dir template-release \
+            --pattern 'harness-mr-templates.zip'
+          gh release download "$SKILL_TAG" --dir skill-release \
+            --pattern 'harness-mr-skill.zip'
       - name: Materialize the externally signed channel envelope
         env:
           CHANNEL_ENVELOPE_B64: ${{ secrets.CHANNEL_ENVELOPE_B64 }}
@@ -119,6 +140,23 @@ jobs:
           test -s dist/channel/stable.envelope.json
           test "$(wc -c < dist/channel/stable.envelope.json)" -le 262144
           node --input-type=module -e "JSON.parse(await (await import('node:fs/promises')).readFile('dist/channel/stable.envelope.json', 'utf8'))"
+      - name: Authenticate channel and bind every input asset
+        env:
+          CLI_TAG: ${{ inputs.cli_tag }}
+          TEMPLATE_TAG: ${{ inputs.template_tag }}
+          SKILL_TAG: ${{ inputs.skill_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --import tsx/esm scripts/verify-channel-release-inputs.mjs \
+            --envelope dist/channel/stable.envelope.json \
+            --cli-tag "$CLI_TAG" \
+            --template-tag "$TEMPLATE_TAG" \
+            --skill-tag "$SKILL_TAG" \
+            --windows-archive cli-release/harness-mrtool-windows-x64.zip \
+            --darwin-archive cli-release/harness-mrtool-darwin-arm64.zip \
+            --template-archive template-release/harness-mr-templates.zip \
+            --skill-archive skill-release/harness-mr-skill.zip
       - name: Create a draft channel release after all immutable component checks
         env:
           GH_TOKEN: ${{ github.token }}
