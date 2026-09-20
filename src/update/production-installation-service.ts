@@ -148,7 +148,7 @@ function stableId(seed: string): string {
   return digest(seed).slice(0, 32);
 }
 
-function initialJournal(
+export function createInitialInstallationJournal(
   platform: SupportedReleasePlatform,
   operation: "apply" | "rollback",
   installationId: string,
@@ -222,7 +222,22 @@ export function createProductionInstallationService(options: ProductionInstallat
   const preparer = createProductionReleasePreparer({...options, stateDirectory, platform});
   const channel = createProductionChannelClient({...options, stateDirectory, ...(trustConfig === undefined ? {} : {trustConfig})});
 
+  async function recoverPrecommit(lease: ProcessLockLease, store: InstallationJournalStore): Promise<void> {
+    const journal = await store.read();
+    if (journal === null || (journal.phase !== "preparing" && journal.phase !== "prepared")) return;
+    const loaded = await cache.loadLastKnownGoodOrNull({}, lease);
+    if (loaded === null || loaded.record.transactionId !== journal.previous.transactionId) {
+      throw failure(`unresolved-journal:${journal.phase}`);
+    }
+    const observed = await verifyInstalledRelease(loaded, {stateDirectory, installationDirectory, platform, ...(trustConfig === undefined ? {} : {trustConfig})}, lease);
+    if (observed.releaseSetId !== journal.previous.releaseSetId || observed.cliVersion !== journal.previous.cliVersion) {
+      throw failure(`unresolved-journal:${journal.phase}`);
+    }
+    await store.write(transition(journal, "aborted", "previous", journal.slots));
+  }
+
   async function recoverTerminal(lease: ProcessLockLease, store: InstallationJournalStore): Promise<void> {
+    await recoverPrecommit(lease, store);
     const journal = await store.read();
     if (journal === null) return;
     if (journal.phase !== "committed" && journal.phase !== "aborted" && journal.phase !== "retention-transfer") throw failure(`unresolved-journal:${journal.phase}`);
@@ -285,7 +300,7 @@ export function createProductionInstallationService(options: ProductionInstallat
             const previousAuth = await authenticateReleaseSnapshot(previous, {platform, ...(trustConfig === undefined ? {} : {trustConfig})});
       const installationId = stableId(`installation:${fileIdentity(installRoot).dev}:${fileIdentity(installRoot).ino}:${platform}`);
       const enrollmentId = stableId(`enrollment:${fileIdentity(stateRoot).dev}:${fileIdentity(stateRoot).ino}:${installationId}`);
-      const journal = initialJournal(platform, operation, installationId, enrollmentId, {installation: fileIdentity(installRoot), state: fileIdentity(stateRoot)}, previous, previousAuth, candidate.snapshot, candidateAuth);
+      const journal = createInitialInstallationJournal(platform, operation, installationId, enrollmentId, {installation: fileIdentity(installRoot), state: fileIdentity(stateRoot)}, previous, previousAuth, candidate.snapshot, candidateAuth);
       await store.write(journal);
 
       let stage: ManagedPosixStage | ManagedWindowsStage | undefined;
