@@ -17,7 +17,7 @@ const MAX_BYTES = 256 * 1024 * 1024;
 const HELPER_TIMEOUT_MS = 60_000;
 // Add-Type cold start is bounded separately; READY starts the actual write budget.
 const WINDOWS_HELPER_STARTUP_GRACE_MS = 1_000;
-const WINDOWS_HELPER_STARTUP_MAX_MS = 30_000;
+const WINDOWS_HELPER_STARTUP_MAX_MS = 120_000;
 const MAX_HELPER_OUTPUT_BYTES = 512;
 const MAX_IDENTITY = (1n << 64n) - 1n;
 function failure(actual = 'windows-helper:anchored-write'): ToolError<'UPDATE_SECURITY_ERROR'> {
