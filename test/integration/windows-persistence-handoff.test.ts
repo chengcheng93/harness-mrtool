@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { chmod, lstat, mkdtemp, realpath, rm } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
@@ -65,4 +65,11 @@ test("Windows persistence descriptor is exclusively written and identity-observe
   assert.equal(observed.identity.dev, String(stat.dev));
   assert.equal(observed.identity.ino, String(stat.ino));
   await assert.rejects(writeWindowsPersistenceDescriptor(root, draft), { code: "UPDATE_SECURITY_ERROR" });
+});
+
+
+test("Windows helper launch bounds child teardown after readiness failure", async () => {
+  const source = await readFile(new URL("../../src/update/windows-persistence-helper.ts", import.meta.url), "utf8");
+  assert.match(source, /HELPER_CLOSE_TIMEOUT_MS/u);
+  assert.match(source, /await terminateHelperProcess\(childProcess\)/u);
 });

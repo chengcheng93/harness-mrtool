@@ -45,6 +45,7 @@ const HELPER_PREFIX = ".harness-mrtool-helper-";
 const READY_PREFIX = "READY\t";
 const READY_TIMEOUT_MS = 10_000;
 const MAX_READY_BYTES = 256;
+const HELPER_CLOSE_TIMEOUT_MS = 5_000;
 
 function failure(actual: string): ToolError<"UPDATE_SECURITY_ERROR"> {
   return new ToolError("UPDATE_SECURITY_ERROR", "Windows persistence helper is unsafe", {
@@ -151,6 +152,32 @@ function childLaunchEvidence(
 }
 
 type HelperChild = ChildProcessByStdio<null, Readable, null>;
+
+async function terminateHelperProcess(child: HelperChild): Promise<void> {
+  child.stdout.destroy();
+  if (child.exitCode === null && child.signalCode === null) {
+    try {
+      child.kill();
+    } catch {
+      // The close wait below is the authoritative bounded settlement check.
+    }
+  }
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  await new Promise<void>((resolvePromise) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.off("close", finish);
+      child.off("error", finish);
+      resolvePromise();
+    };
+    const timer = setTimeout(finish, HELPER_CLOSE_TIMEOUT_MS);
+    child.once("close", finish);
+    child.once("error", finish);
+  });
+}
 
 async function waitReady(child: HelperChild): Promise<InstallationProcessIdentity> {
   return await new Promise<InstallationProcessIdentity>((resolvePromise, rejectPromise) => {
@@ -276,8 +303,7 @@ export async function launchWindowsPersistenceHelper(
     childProcess.unref();
     return Object.freeze({ journal, child, helperPath: target });
   } catch (error) {
-    childProcess?.stdout.destroy();
-    if (childProcess !== undefined && childProcess.exitCode === null && childProcess.signalCode === null) childProcess.kill();
+    if (childProcess !== undefined) await terminateHelperProcess(childProcess);
     throw error instanceof ToolError ? error : failure("helper-launch-failed");
   }
 }
