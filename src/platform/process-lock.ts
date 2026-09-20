@@ -287,9 +287,9 @@ public static class ProcessLockNative {
  static extern bool CloseHandle(IntPtr handle);
  static readonly IntPtr InvalidHandle=new IntPtr(-1);
  static IntPtr held=IntPtr.Zero;
- public static int Acquire(string path,string expectedInoText,string timeoutText) {
-  ulong expectedIno; long timeoutMs;
-  if(!UInt64.TryParse(expectedInoText,out expectedIno) || !Int64.TryParse(timeoutText,out timeoutMs) || timeoutMs<1) return 2;
+ public static int Acquire(string path,string expectedDevText,string expectedInoText,string timeoutText) {
+  uint expectedVolume; ulong expectedIno; long timeoutMs;
+  if(!UInt32.TryParse(expectedDevText,out expectedVolume) || !UInt64.TryParse(expectedInoText,out expectedIno) || !Int64.TryParse(timeoutText,out timeoutMs) || timeoutMs<1) return 2;
   var watch=Stopwatch.StartNew();
   while (watch.ElapsedMilliseconds < timeoutMs) {
    var candidate=CreateFileW(path,0xC0000000,0,IntPtr.Zero,4,0x02200000,IntPtr.Zero);
@@ -297,7 +297,7 @@ public static class ProcessLockNative {
    try {
     Info info; if(!GetFileInformationByHandle(candidate,out info)) { CloseHandle(candidate); return 1; }
     ulong index=((ulong)info.IndexHigh<<32)|info.IndexLow;
-    if((info.Attributes&(0x10|0x400))!=0 || info.Links!=1 || index!=expectedIno) { CloseHandle(candidate); return 25; }
+    if((info.Attributes&(0x10|0x400))!=0 || info.Links!=1 || info.Volume!=expectedVolume || index!=expectedIno) { CloseHandle(candidate); return 25; }
     held=candidate; return 0;
    } catch { CloseHandle(candidate); return 2; }
   }
@@ -307,7 +307,7 @@ public static class ProcessLockNative {
 }
 '@ | Out-Null
 $stage='acquire'
-$code=[ProcessLockNative]::Acquire($env:HMRTOOL_PROCESS_LOCK_PATH,$env:HMRTOOL_PROCESS_LOCK_INO,$env:HMRTOOL_PROCESS_LOCK_TIMEOUT)
+$code=[ProcessLockNative]::Acquire($env:HMRTOOL_PROCESS_LOCK_PATH,$env:HMRTOOL_PROCESS_LOCK_DEV,$env:HMRTOOL_PROCESS_LOCK_INO,$env:HMRTOOL_PROCESS_LOCK_TIMEOUT)
 if($code -eq 1) { [Console]::Out.WriteLine('ERR:info'); exit 26 }
 if($code -eq 2) { [Console]::Out.WriteLine('ERR:exception'); exit 26 }
 if($code -ne 0) { exit $code }
@@ -322,6 +322,7 @@ exit 0
 `
 
 async function acquireWindows(path: string, timeoutMs: number, expected: LockFileIdentity): Promise<ProcessLockLease> {
+  if (expected.dev < 0n || expected.dev > 0xffffffffn) throw new ProcessLockError("unsafe");
   const child = spawn(
     resolveWindowsPowerShellPath(),
     ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(WINDOWS_LOCK_HELPER, "utf16le").toString("base64")],
@@ -331,6 +332,7 @@ async function acquireWindows(path: string, timeoutMs: number, expected: LockFil
       env: {
         ...process.env,
         HMRTOOL_PROCESS_LOCK_PATH: path,
+        HMRTOOL_PROCESS_LOCK_DEV: expected.dev.toString(),
         HMRTOOL_PROCESS_LOCK_INO: expected.ino.toString(),
         HMRTOOL_PROCESS_LOCK_TIMEOUT: String(timeoutMs),
       },

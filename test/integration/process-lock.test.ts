@@ -88,6 +88,13 @@ async function owner(t: TestContext, path: string, waiting = false): Promise<Chi
   return child;
 }
 
+test("Windows lock helper binds both volume serial and file index", async () => {
+  const source = await readFile(new URL("../../src/platform/process-lock.ts", import.meta.url), "utf8");
+  assert.match(source, /HMRTOOL_PROCESS_LOCK_DEV/u);
+  assert.match(source, /info\.Volume.*expectedVolume/u);
+  assert.match(source, /info\.Volume.*index.*expectedIno/u);
+});
+
 test("system lock acquires, releases idempotently, and retains the same lock inode", async (t) => {
   const path = await fixture(t);
   const lease = await locks.acquire(path, 3000);
