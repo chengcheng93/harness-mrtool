@@ -145,12 +145,15 @@ const RELEASE_KILL_DELAY_MS = 1_000;
 function waitForHelper(
   child: ChildProcessWithoutNullStreams,
   timeoutMs: number,
+  startupTimeoutMs = timeoutMs,
+  expectsReady = false,
 ): Promise<ProcessLockLease> {
   return new Promise((resolvePromise, rejectPromise) => {
     let output = "";
     let settled = false;
     let helperExited = false;
     let helperClosed = false;
+    let ready = !expectsReady;
     let releasing: Promise<void> | undefined;
     let timeout: NodeJS.Timeout | undefined;
     let resolveClose!: () => void;
@@ -192,7 +195,7 @@ function waitForHelper(
       });
     };
 
-    timeout = setTimeout(() => fail("timeout"), timeoutMs);
+    timeout = setTimeout(() => fail("timeout"), ready ? timeoutMs : startupTimeoutMs);
     child.once("close", () => {
       helperClosed = true;
       helperExited = true;
@@ -214,47 +217,66 @@ function waitForHelper(
         fail("unavailable");
         return;
       }
-      if (!output.includes("\n")) return;
-      if (output.trim() !== "LOCKED") {
-        const diagnostic = /^ERR:[a-z-]{1,32}$/u.test(output.trim())
-          ? `windows-lock-helper:${output.trim().slice(4)}` as const
-          : undefined;
-        fail("unavailable", true, diagnostic);
-        return;
-      }
-      settled = true;
-      if (timeout !== undefined) clearTimeout(timeout);
-      resolvePromise(Object.freeze({
-        assertHeld() {
-          if (releasing !== undefined || helperExited || helperClosed || child.exitCode !== null || child.signalCode !== null) {
-            throw new ProcessLockError("unavailable");
-          }
-        },
-        async release() {
-          if (releasing !== undefined) return releasing;
-          releasing = (async () => {
-            if (helperClosed) return;
-            const active = !helperExited && child.exitCode === null && child.signalCode === null;
-            const releaseKillTimeout = active
-              ? setTimeout(terminateHelper, RELEASE_KILL_DELAY_MS)
+      for (;;) {
+        const newline = output.indexOf("\n");
+        if (newline < 0) return;
+        const line = output.slice(0, newline).replace(/\r$/u, "");
+        output = output.slice(newline + 1);
+        if (!ready) {
+          if (line !== "READY") {
+            const diagnostic = /^ERR:[a-z-]{1,32}$/u.test(line)
+              ? `windows-lock-helper:${line.slice(4)}` as const
               : undefined;
-            if (active) {
-              try {
-                child.stdin.end("release\n");
-              } catch {
-                terminateHelper();
-              }
-            }
-            const closed = await waitForClose(RELEASE_CLOSE_TIMEOUT_MS);
-            if (releaseKillTimeout !== undefined) clearTimeout(releaseKillTimeout);
-            if (!closed) {
-              terminateHelper();
+            fail("unavailable", true, diagnostic);
+            return;
+          }
+          ready = true;
+          if (timeout !== undefined) clearTimeout(timeout);
+          timeout = setTimeout(() => fail("timeout"), timeoutMs);
+          continue;
+        }
+        if (line !== "LOCKED") {
+          const diagnostic = /^ERR:[a-z-]{1,32}$/u.test(line)
+            ? `windows-lock-helper:${line.slice(4)}` as const
+            : undefined;
+          fail("unavailable", true, diagnostic);
+          return;
+        }
+        settled = true;
+        if (timeout !== undefined) clearTimeout(timeout);
+        resolvePromise(Object.freeze({
+          assertHeld() {
+            if (releasing !== undefined || helperExited || helperClosed || child.exitCode !== null || child.signalCode !== null) {
               throw new ProcessLockError("unavailable");
             }
-          })();
-          return releasing;
-        },
-      }));
+          },
+          async release() {
+            if (releasing !== undefined) return releasing;
+            releasing = (async () => {
+              if (helperClosed) return;
+              const active = !helperExited && child.exitCode === null && child.signalCode === null;
+              const releaseKillTimeout = active
+                ? setTimeout(terminateHelper, RELEASE_KILL_DELAY_MS)
+                : undefined;
+              if (active) {
+                try {
+                  child.stdin.end("release\n");
+                } catch {
+                  terminateHelper();
+                }
+              }
+              const closed = await waitForClose(RELEASE_CLOSE_TIMEOUT_MS);
+              if (releaseKillTimeout !== undefined) clearTimeout(releaseKillTimeout);
+              if (!closed) {
+                terminateHelper();
+                throw new ProcessLockError("unavailable");
+              }
+            })();
+            return releasing;
+          },
+        }));
+        return;
+      }
     });
     child.once("error", () => fail("unavailable"));
     child.once("exit", (code) => {
@@ -264,6 +286,11 @@ function waitForHelper(
   });
 }
 
+
+// PowerShell/Add-Type startup is not lock contention. Keep a separate,
+// bounded startup budget so compilation latency cannot consume the caller's
+// actual lock-wait deadline; once READY is observed, timeoutMs is unchanged.
+const WINDOWS_HELPER_STARTUP_GRACE_MS = 1_000;
 
 const WINDOWS_LOCK_HELPER = String.raw`
 $ErrorActionPreference='Stop'
@@ -306,6 +333,8 @@ public static class ProcessLockNative {
  public static void Release() { if(held!=IntPtr.Zero && held!=InvalidHandle) CloseHandle(held); held=IntPtr.Zero; }
 }
 '@ | Out-Null
+[Console]::Out.WriteLine('READY')
+[Console]::Out.Flush()
 $stage='acquire'
 $code=[ProcessLockNative]::Acquire($env:HMRTOOL_PROCESS_LOCK_PATH,$env:HMRTOOL_PROCESS_LOCK_DEV,$env:HMRTOOL_PROCESS_LOCK_INO,$env:HMRTOOL_PROCESS_LOCK_TIMEOUT)
 if($code -eq 1) { [Console]::Out.WriteLine('ERR:info'); exit 26 }
@@ -338,7 +367,8 @@ async function acquireWindows(path: string, timeoutMs: number, expected: LockFil
       },
     },
   );
-  return waitForHelper(child, timeoutMs);
+  const startupTimeoutMs = Math.min(10_000, timeoutMs + WINDOWS_HELPER_STARTUP_GRACE_MS);
+  return waitForHelper(child, timeoutMs, startupTimeoutMs, true);
 }
 
 
