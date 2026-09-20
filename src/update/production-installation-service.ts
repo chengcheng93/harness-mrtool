@@ -225,6 +225,10 @@ export function createProductionInstallationService(options: ProductionInstallat
   async function recoverPrecommit(lease: ProcessLockLease, store: InstallationJournalStore): Promise<void> {
     const journal = await store.read();
     if (journal === null || (journal.phase !== "preparing" && journal.phase !== "prepared")) return;
+    const observedRoot = fileIdentity(await directoryIdentity(installationDirectory));
+    if (observedRoot.dev !== journal.roots.installation.dev || observedRoot.ino !== journal.roots.installation.ino) {
+      throw failure(`unresolved-journal:${journal.phase}`);
+    }
     const loaded = await cache.loadLastKnownGoodOrNull({}, lease);
     if (loaded === null || loaded.record.transactionId !== journal.previous.transactionId) {
       throw failure(`unresolved-journal:${journal.phase}`);

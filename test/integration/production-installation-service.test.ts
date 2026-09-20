@@ -1,6 +1,6 @@
 import {createHash} from "node:crypto";
 import assert from "node:assert/strict";
-import {chmod, lstat, mkdir, mkdtemp, readdir, realpath, rm} from "node:fs/promises";
+import {chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile} from "node:fs/promises";
 import test from "node:test";
 import {tmpdir} from "node:os";
 import {resolve} from "node:path";
@@ -88,6 +88,74 @@ test("production installation coordinates authenticated staging, journal, cache 
   }
 });
 
+async function createPrecommitRecoveryFixture(prefix: string) {
+  const origin = await exactReleaseFixture();
+  const family = nativeReleaseFixtureFamily(origin);
+  const previous = await family("darwin-arm64", {sequence: 43, cliVersion: "0.1.6", variantByte: 1, releaseSetId: "stable-0.1.6"});
+  const candidate = await family("darwin-arm64", {sequence: 44, cliVersion: "0.1.7", variantByte: 2, releaseSetId: "stable-0.1.7"});
+  const previousSnapshot = await createAuthenticatedReleaseSnapshot(previous.options);
+  const candidateSnapshot = await createAuthenticatedReleaseSnapshot(candidate.options);
+  const root = await mkdtemp(resolve(await realpath(tmpdir()), prefix));
+  const stateDirectory = resolve(root, "state");
+  const installationDirectory = resolve(root, "installation");
+  await mkdir(installationDirectory, {mode: 0o700});
+
+  const verifier = createReleaseSetSnapshotVerifier({platform: "darwin-arm64", trustConfig: origin.trustConfig});
+  const cache = new UpdateCache({stateDirectory, verifySnapshot: verifier});
+  const previousActive = await cache.storeVerifiedReleaseSet(previousSnapshot);
+  const previousStage = await stageAuthenticatedManagedPosixCandidate({
+    installationDirectory,
+    snapshot: previousSnapshot,
+    platform: "darwin-arm64",
+    trustConfig: origin.trustConfig,
+  });
+  await publishManagedPosixCandidate({stage: previousStage, attemptId: "d".repeat(32), previous: {executable: null, marker: null}});
+
+  const previousAuth = await authenticateReleaseSnapshot(previousSnapshot, {platform: "darwin-arm64", trustConfig: origin.trustConfig});
+  const candidateAuth = await authenticateReleaseSnapshot(candidateSnapshot, {platform: "darwin-arm64", trustConfig: origin.trustConfig});
+  const stateRoot = await lstat(stateDirectory, {bigint: true});
+  const installRoot = await lstat(installationDirectory, {bigint: true});
+  const journal = createInitialInstallationJournal(
+    "darwin-arm64",
+    "apply",
+    "1".repeat(32),
+    "2".repeat(32),
+    {installation: {dev: String(installRoot.dev), ino: String(installRoot.ino)}, state: {dev: String(stateRoot.dev), ino: String(stateRoot.ino)}},
+    previousActive,
+    previousAuth,
+    candidateSnapshot,
+    candidateAuth,
+  );
+  const store = createInstallationJournalStore(stateDirectory);
+  const service = createProductionInstallationService({
+    stateDirectory,
+    installationDirectory,
+    platform: "darwin-arm64",
+    trustConfig: origin.trustConfig,
+  });
+  return {root, stateDirectory, installationDirectory, origin, cache, candidateSnapshot, journal, store, service};
+}
+
+async function writePreparedJournal(fixture: Awaited<ReturnType<typeof createPrecommitRecoveryFixture>>): Promise<void> {
+  const stage = await stageAuthenticatedManagedPosixCandidate({
+    installationDirectory: fixture.installationDirectory,
+    snapshot: fixture.candidateSnapshot,
+    platform: "darwin-arm64",
+    trustConfig: fixture.origin.trustConfig,
+  });
+  const observation = await verifyManagedPosixStage(stage);
+  const executable = await lstat(resolve(fixture.installationDirectory, "harness-mrtool"), {bigint: true});
+  const marker = await lstat(resolve(fixture.installationDirectory, ".harness-mrtool-install.json"), {bigint: true});
+  const slots = fixture.journal.slots.map(slot => {
+    if (slot.name === "staged-executable") return {...slot, state: "created" as const, identity: {dev: observation.executableIdentity.dev, ino: observation.executableIdentity.ino}};
+    if (slot.name === "staged-marker") return {...slot, state: "created" as const, identity: {dev: observation.markerIdentity.dev, ino: observation.markerIdentity.ino}};
+    if (slot.name === "previous-executable") return {...slot, state: "created" as const, identity: {dev: String(executable.dev), ino: String(executable.ino)}};
+    if (slot.name === "previous-marker") return {...slot, state: "created" as const, identity: {dev: String(marker.dev), ino: String(marker.ino)}};
+    return slot;
+  });
+  await fixture.store.write(advanceInstallationJournalPhase(fixture.journal, "prepared", null, slots));
+}
+
 test("recovery aborts only an intact precommit journal for the active previous release", darwin, async () => {
   for (const phase of ["preparing", "prepared"] as const) {
     const origin = await exactReleaseFixture();
@@ -162,6 +230,102 @@ test("recovery aborts only an intact precommit journal for the active previous r
     } finally {
       await removeTree(root);
     }
+  }
+});
+
+test("recovery preserves a precommit journal when active cache points to another transaction", darwin, async () => {
+  const fixture = await createPrecommitRecoveryFixture("production-installation-precommit-pointer-mismatch-");
+  try {
+    await fixture.store.write(fixture.journal);
+    await fixture.cache.storeVerifiedReleaseSet(fixture.candidateSnapshot);
+    const beforeJournal = await readFile(fixture.store.path);
+    const beforeExecutable = await readFile(resolve(fixture.installationDirectory, "harness-mrtool"));
+    const beforeMarker = await readFile(resolve(fixture.installationDirectory, ".harness-mrtool-install.json"));
+
+    await assert.rejects(fixture.service.recover(), {code: "UPDATE_SECURITY_ERROR"});
+    assert.deepEqual(await readFile(fixture.store.path), beforeJournal);
+    assert.deepEqual(await readFile(resolve(fixture.installationDirectory, "harness-mrtool")), beforeExecutable);
+    assert.deepEqual(await readFile(resolve(fixture.installationDirectory, ".harness-mrtool-install.json")), beforeMarker);
+  } finally {
+    await removeTree(fixture.root);
+  }
+});
+
+test("recovery preserves a precommit journal when canonical marker evidence is tampered", darwin, async () => {
+  const fixture = await createPrecommitRecoveryFixture("production-installation-precommit-marker-mismatch-");
+  try {
+    await fixture.store.write(fixture.journal);
+    const markerPath = resolve(fixture.installationDirectory, ".harness-mrtool-install.json");
+    const tamperedMarker = Buffer.concat([await readFile(markerPath), Buffer.from("tampered")]);
+    await writeFile(markerPath, tamperedMarker);
+    const beforeJournal = await readFile(fixture.store.path);
+
+    await assert.rejects(fixture.service.recover(), {code: "UPDATE_SECURITY_ERROR"});
+    assert.deepEqual(await readFile(fixture.store.path), beforeJournal);
+    assert.deepEqual(await readFile(markerPath), tamperedMarker);
+  } finally {
+    await removeTree(fixture.root);
+  }
+});
+
+test("recovery preserves a precommit journal when canonical executable evidence is tampered", darwin, async () => {
+  const fixture = await createPrecommitRecoveryFixture("production-installation-precommit-executable-mismatch-");
+  try {
+    await fixture.store.write(fixture.journal);
+    const executablePath = resolve(fixture.installationDirectory, "harness-mrtool");
+    await chmod(executablePath, 0o700);
+    const tamperedExecutable = Buffer.concat([await readFile(executablePath), Buffer.from("tampered")]);
+    await writeFile(executablePath, tamperedExecutable);
+    const beforeJournal = await readFile(fixture.store.path);
+
+    await assert.rejects(fixture.service.recover(), {code: "UPDATE_SECURITY_ERROR"});
+    assert.deepEqual(await readFile(fixture.store.path), beforeJournal);
+    assert.deepEqual(await readFile(executablePath), tamperedExecutable);
+  } finally {
+    await removeTree(fixture.root);
+  }
+});
+
+test("recovery keeps publication-phase journals unresolved", darwin, async () => {
+  for (const phase of ["publish-intent", "canonical-published", "marker-published", "commit-intent"] as const) {
+    const fixture = await createPrecommitRecoveryFixture(`production-installation-${phase}-recovery-`);
+    try {
+      await writePreparedJournal(fixture);
+      let current = await fixture.store.read();
+      assert.ok(current);
+      for (const next of ["publish-intent", "canonical-published", "marker-published", "commit-intent"] as const) {
+        current = advanceInstallationJournalPhase(current, next, null, current.slots);
+        if (next === phase) break;
+      }
+      await fixture.store.write(current);
+      const beforeJournal = await readFile(fixture.store.path);
+
+      await assert.rejects(fixture.service.recover(), {code: "UPDATE_SECURITY_ERROR"});
+      assert.deepEqual(await readFile(fixture.store.path), beforeJournal);
+    } finally {
+      await removeTree(fixture.root);
+    }
+  }
+});
+
+test("recovery preserves a precommit journal bound to a different installation root", darwin, async () => {
+  const fixture = await createPrecommitRecoveryFixture("production-installation-precommit-root-mismatch-");
+  try {
+    const alternateRoot = await lstat(fixture.root, {bigint: true});
+    const drifted = {
+      ...fixture.journal,
+      roots: {
+        ...fixture.journal.roots,
+        installation: {dev: String(alternateRoot.dev), ino: String(alternateRoot.ino)},
+      },
+    };
+    await fixture.store.write(drifted);
+    const before = await readFile(fixture.store.path);
+
+    await assert.rejects(fixture.service.recover(), {code: "UPDATE_SECURITY_ERROR"});
+    assert.deepEqual(await readFile(fixture.store.path), before);
+  } finally {
+    await removeTree(fixture.root);
   }
 });
 
