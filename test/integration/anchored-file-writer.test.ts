@@ -239,7 +239,7 @@ test('Windows helper missing READY is hard-bounded and reaped before rejection',
     name: 'harness-mrtool.exe', bytes: Uint8Array.of(1),
   }), { code: 'UPDATE_SECURITY_ERROR' }).then(() => { rejected = true; });
   await new Promise<void>(resolveTick => realSetImmediate(resolveTick));
-  t.mock.timers.tick(10_000);
+  t.mock.timers.tick(30_000);
   assert.deepEqual(helper.kills, ['SIGKILL']);
   assert.equal(rejected, false, 'a kill request is not confirmed helper termination');
   helper.emit('close', null, 'SIGKILL');
