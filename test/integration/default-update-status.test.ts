@@ -30,7 +30,7 @@ test('default status authenticates its configured cache without claiming the cac
   assert.equal(code,0,stdout+stderr);const result=JSON.parse(stdout);
   assert.equal(result.data.releaseSetId,snapshot.record.releaseSetId);
   assert.equal(result.data.cliVersion,snapshot.record.cliVersion);
-  assert.equal(result.update.executedVersion,'0.1.6');
+  assert.equal(result.update.executedVersion,'0.1.7');
   assert.equal(result.update.installedVersion,'unknown','signed cache data alone is not a native installation receipt');
   assert.equal(result.data.installationConfirmed,false);
   assert.equal(result.update.latestVersionConfirmed,false);assert.equal(requests,0);assert.equal(stderr,'');

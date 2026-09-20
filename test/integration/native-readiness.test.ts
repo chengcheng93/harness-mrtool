@@ -34,7 +34,7 @@ async function cleanup(root: string) {
 async function setup(t: TestContext, realSea = false, target: SupportedReleasePlatform = platform) {
   const root = await mkdtemp(resolve(await realpath(tmpdir()), 'native-readiness-test-'));
   t.after(() => cleanup(root));
-  const f = await nativeReleaseFixture(target);
+  const f = await nativeReleaseFixture(target, realSea ? {cliVersion: '0.1.7', releaseSetId: 'stable-0.1.7'} : {});
   if (realSea) {
     const executableName = target === 'windows-x64' ? 'harness-mrtool.exe' : 'harness-mrtool';
     const files: Record<string, Uint8Array> = {
@@ -229,6 +229,6 @@ test('actual packaged SEA authenticates an ephemeral-root signed archive and rep
   }
   const f = await setup(t, true);
   const ready = await verifyNativeReadiness(f.snapshot, f.options);
-  assert.equal(ready.cliVersion, '0.1.6');
+  assert.equal(ready.cliVersion, '0.1.7');
   assert.equal(ready.bundleManifestHash, f.bundleManifestHash);
 });
