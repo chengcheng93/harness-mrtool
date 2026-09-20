@@ -6,7 +6,7 @@ profiles, rendering, labels, writes, and verification.
 
 ## Prerequisites
 
-CLI/Plugin 0.1.6 is a release candidate, not yet published. Build the CLI from
+CLI/Plugin 0.1.7 is a release candidate, not yet published. Build the CLI from
 current `main` source using the pinned-runtime instructions in the repository's
 root README; the plugin does not include a CLI binary. New release download links
 will be added only after publication.

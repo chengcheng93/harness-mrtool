@@ -12,7 +12,7 @@ import { verifyReleaseVersion } from "../../scripts/verify-release-version.mjs";
 const repositoryRoot = resolve(import.meta.dirname, "../..");
 const scriptPath = join(repositoryRoot, "scripts/verify-release-version.mjs");
 const components = ["cli", "templates", "skill", "plugin"] as const;
-const packageVersion = "0.1.6";
+const packageVersion = "0.1.7";
 const templateVersion = "1.1.0";
 const pluginPath = "plugins/harness-mrtool/.codex-plugin/plugin.json";
 const templatePath = "template-bundle/bundle-manifest.json";
@@ -130,7 +130,7 @@ test("all component releases require both lockfile root versions to agree with p
 });
 
 test("a plugin tag matching its manifest still fails if the CLI package version differs", async (t) => {
-  const root = await fixture(t);
+  const root = await fixture(t, "0.1.6");
   await json(root, pluginPath, { name: "harness-mrtool", version: "0.1.7" });
   await rejectsVersion(root, "plugin", "plugin-v0.1.7", /does not match/u);
 });
@@ -138,7 +138,7 @@ test("a plugin tag matching its manifest still fails if the CLI package version 
 test("a plugin tag matching the CLI package fails if its plugin manifest differs", async (t) => {
   const root = await fixture(t);
   await json(root, pluginPath, { name: "harness-mrtool", version: "0.1.5" });
-  await rejectsVersion(root, "plugin", "plugin-v0.1.6", /does not match/u);
+  await rejectsVersion(root, "plugin", "plugin-v0.1.7", /does not match/u);
 });
 
 test("missing, malformed, or noncanonical selected metadata fails closed", async (t) => {

@@ -5,12 +5,12 @@ import test from "node:test";
 // @ts-expect-error The build helper intentionally has no declaration file.
 import { expectedSeaContractProbeStdout, expectedSeaRendererProbeStdout, expectedSeaSelfTestStdout, finalizeSeaExecutable, verifySeaExecutable } from "../../scripts/sea-verification.mjs";
 
-const expectedStdout = expectedSeaSelfTestStdout("0.1.6");
+const expectedStdout = expectedSeaSelfTestStdout("0.1.7");
 const expectedProbeStdout = JSON.stringify({
   ok: true,
   code: "CONTRACT_PROBE_OK",
   sea: true,
-  version: "0.1.6",
+  version: "0.1.7",
   validOutputAccepted: true,
   invalidOutputRejected: true,
   requestValidAccepted: true,
@@ -20,7 +20,7 @@ const expectedRendererProbeStdout = JSON.stringify({
   ok: true,
   code: "RENDERER_PROBE_OK",
   sea: true,
-  version: "0.1.6",
+  version: "0.1.7",
   titleAccepted: true,
   descriptionAccepted: true,
   markerVerified: true,
@@ -29,8 +29,8 @@ const expectedRendererProbeStdout = JSON.stringify({
 });
 
 test("pins the embedded request and output contract probe result", () => {
-  assert.equal(expectedSeaContractProbeStdout("0.1.6"), expectedProbeStdout);
-  assert.equal(expectedSeaRendererProbeStdout("0.1.6"), expectedRendererProbeStdout);
+  assert.equal(expectedSeaContractProbeStdout("0.1.7"), expectedProbeStdout);
+  assert.equal(expectedSeaRendererProbeStdout("0.1.7"), expectedRendererProbeStdout);
 });
 
 test("rejects an injected executable whose self-test violates the contract", async () => {

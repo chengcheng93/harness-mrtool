@@ -5,7 +5,7 @@ AI/人负责填写变更说明，工具负责输入校验、自动标签、写�
 不是 GitLab 服务端合并门禁，也不能限制绕过工具的网页或原始 Git/API 操作。
 
 > **版本状态**：当前 main 已实现强制标签策略（Template Bundle **1.1.0**）。
-> CLI/Plugin **0.1.6** 是待验收发布候选，不代表已有可安装的新 Release。
+> CLI/Plugin **0.1.7** 是待验收发布候选，不代表已有可安装的新 Release。
 > 既有 [CLI 0.1.5](https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.5)
 > 和 [Plugin 0.1.5](https://github.com/chengcheng93/harness-mrtool/releases/tag/plugin-v0.1.5)
 > 不包含本次强制标签改造。新版尚未发布，完成发布后才更新正式下载链接。
