@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import childProcess from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
+import { PassThrough } from 'node:stream';
 import test from 'node:test';
 import { writeAnchoredFile } from '../../src/platform/anchored-file-writer.ts';
 
@@ -165,6 +167,84 @@ test('helper invocation has no ambient shell or inherited environment injection'
   const options = invocation?.[2] as childProcess.SpawnOptions;
   assert.equal(options.shell, false); assert.deepEqual(options.env, { PATH: '/usr/bin:/bin' });
   assert.equal(typeof (options.stdio as unknown[])[3], 'number');
+});
+
+const realSetImmediate = setImmediate;
+
+class ControlledWindowsWriter extends EventEmitter {
+  readonly stdin = new PassThrough();
+  readonly stdout = new PassThrough();
+  readonly stderr = new PassThrough();
+  readonly kills: (NodeJS.Signals | number | undefined)[] = [];
+  exitCode: number | null = null;
+  signalCode: NodeJS.Signals | null = null;
+  kill(signal?: NodeJS.Signals | number): boolean {
+    this.kills.push(signal);
+    return true;
+  }
+}
+
+test('Windows helper startup READY starts the full write budget after Add-Type', async t => {
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  const systemRoot = process.env.SystemRoot;
+  const originalSpawn = childProcess.spawn;
+  const helper = new ControlledWindowsWriter();
+  t.after(() => {
+    childProcess.spawn = originalSpawn; syncBuiltinESMExports();
+    Object.defineProperty(process, 'platform', platform);
+    if (systemRoot === undefined) delete process.env.SystemRoot; else process.env.SystemRoot = systemRoot;
+    helper.stdin.destroy(); helper.stdout.destroy(); helper.stderr.destroy();
+    t.mock.timers.reset(); t.mock.restoreAll();
+  });
+  Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+  process.env.SystemRoot = 'C:\\Windows';
+  childProcess.spawn = (() => helper) as unknown as typeof childProcess.spawn;
+  syncBuiltinESMExports();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+
+  const pending = writeAnchoredFile({
+    directory: 'C:\\state\\native', expectedIdentity: { dev: 1n, ino: 2n },
+    name: 'harness-mrtool.exe', bytes: Uint8Array.of(1),
+  });
+  await new Promise<void>(resolveTick => realSetImmediate(resolveTick));
+  t.mock.timers.tick(1_000);
+  helper.stdout.write('READY\n');
+  t.mock.timers.tick(59_000);
+  assert.deepEqual(helper.kills, [], 'startup must not consume the full write budget');
+  helper.stdout.write('OK\n'); helper.emit('close', 0, null);
+  await pending;
+});
+
+test('Windows helper missing READY is hard-bounded and reaped before rejection', async t => {
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  const systemRoot = process.env.SystemRoot;
+  const originalSpawn = childProcess.spawn;
+  const helper = new ControlledWindowsWriter();
+  t.after(() => {
+    childProcess.spawn = originalSpawn; syncBuiltinESMExports();
+    Object.defineProperty(process, 'platform', platform);
+    if (systemRoot === undefined) delete process.env.SystemRoot; else process.env.SystemRoot = systemRoot;
+    helper.stdin.destroy(); helper.stdout.destroy(); helper.stderr.destroy();
+    t.mock.timers.reset(); t.mock.restoreAll();
+  });
+  Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+  process.env.SystemRoot = 'C:\\Windows';
+  childProcess.spawn = (() => helper) as unknown as typeof childProcess.spawn;
+  syncBuiltinESMExports();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+
+  let rejected = false;
+  const pending = assert.rejects(writeAnchoredFile({
+    directory: 'C:\\state\\native', expectedIdentity: { dev: 1n, ino: 2n },
+    name: 'harness-mrtool.exe', bytes: Uint8Array.of(1),
+  }), { code: 'UPDATE_SECURITY_ERROR' }).then(() => { rejected = true; });
+  await new Promise<void>(resolveTick => realSetImmediate(resolveTick));
+  t.mock.timers.tick(10_000);
+  assert.deepEqual(helper.kills, ['SIGKILL']);
+  assert.equal(rejected, false, 'a kill request is not confirmed helper termination');
+  helper.emit('close', null, 'SIGKILL');
+  await pending;
+  assert.equal(rejected, true);
 });
 
 // These are native Windows gates, not PE-byte fixtures executed on POSIX.

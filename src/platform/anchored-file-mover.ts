@@ -28,17 +28,23 @@ export interface AnchoredMoveOptions {
     | { readonly kind: "identity"; readonly identity: AnchoredMoveFileIdentity };
 }
 
+export type AnchoredSwapOptions = Omit<AnchoredMoveOptions, "destination"> & {
+  readonly destination: { readonly kind: "identity"; readonly identity: AnchoredMoveFileIdentity };
+};
+
 const NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 const DIRECTORY = constants.O_DIRECTORY ?? 0;
 const MAX_IDENTITY = (1n << 64n) - 1n;
 const HELPER_TIMEOUT_MS = 60_000;
-const STAGE_DIRECTORY = /^\.harness-mrtool-stage-[0-9a-f-]{36}$/u;
+const STAGE_DIRECTORY = /^\.harness-mrtool-stage-(?:[0-9a-f]{32}|[0-9a-f-]{36})$/u;
 const POSIX_HELPER = String.raw`
 use strict; use warnings; use Config; use Fcntl qw(O_RDONLY O_NOFOLLOW O_DIRECTORY); use IO::Handle;
 $Config{d_fchdir} eq 'define' or die 'unsupported';
-my ($root_dev,$root_ino,$source_dir,$source_dir_dev,$source_dir_ino,$source_name,$sdev,$sino,$ssize,$smode,$suid,$destination_name,$destination_kind,@destination)=@ARGV;
+my ($operation,$root_dev,$root_ino,$source_dir,$source_dir_dev,$source_dir_ino,$source_name,$sdev,$sino,$ssize,$smode,$suid,$destination_name,$destination_kind,@destination)=@ARGV;
+$operation eq 'move' || $operation eq 'swap' or die 'operation';
+$operation eq 'swap' && $destination_kind eq 'identity' || $operation eq 'move' or die 'destination kind';
 for my $value ($root_dev,$root_ino,$source_dir_dev,$source_dir_ino,$sdev,$sino,$ssize,$smode,$suid) { defined($value) && $value =~ /\A[0-9]+\z/ or die 'identity'; }
-$source_dir =~ /\A((?:\.|\.harness-mrtool-stage-[0-9a-f-]{36}))\z/ or die 'source directory'; $source_dir=$1;
+$source_dir =~ /\A((?:\.|\.harness-mrtool-stage-(?:[0-9a-f]{32}|[0-9a-f-]{36})))\z/ or die 'source directory'; $source_dir=$1;
 $source_name =~ /\A((?:harness-mrtool|\.harness-mrtool-install\.json|harness-mrtool\.previous-(?:[0-9a-f]{32}|[0-9a-f-]{36})|\.harness-mrtool-install\.previous-(?:[0-9a-f]{32}|[0-9a-f-]{36})))\z/ or die 'source name'; $source_name=$1;
 $destination_name =~ /\A((?:harness-mrtool|\.harness-mrtool-install\.json|harness-mrtool\.previous-(?:[0-9a-f]{32}|[0-9a-f-]{36})|\.harness-mrtool-install\.previous-(?:[0-9a-f]{32}|[0-9a-f-]{36})))\z/ or die 'destination name'; $destination_name=$1;
 $destination_kind eq 'absent' || $destination_kind eq 'identity' or die 'destination kind';
@@ -53,7 +59,9 @@ my @source_dir_stat = lstat($source_dir);
 if ($source_dir eq '.') { @source_dir_stat = @root_stat; }
 else { $source_dir_stat[0] == $source_dir_dev && $source_dir_stat[1] == $source_dir_ino && $source_dir_stat[0] == $root_stat[0] or die 'source directory'; }
 my $source_parent;
-if ($source_dir ne '.') {
+if ($source_dir eq '.') {
+  $source_parent=$root;
+} else {
   sysopen($source_parent,$source_dir,O_RDONLY|O_DIRECTORY|O_NOFOLLOW) or die 'source directory open';
   my @parent_stat=stat($source_parent);
   @parent_stat && $parent_stat[0] == $source_dir_dev && $parent_stat[1] == $source_dir_ino && $parent_stat[4] == $suid && ($parent_stat[2] & 07777) == 0700 or die 'source directory identity';
@@ -68,11 +76,21 @@ if ($destination_kind eq 'absent') {
 } else {
   @destination_stat && -f _ && $destination_stat[3] == 1 && $destination_stat[0] == $destination[0] && $destination_stat[1] == $destination[1] && $destination_stat[7] == $destination[2] && ($destination_stat[2] & 07777) == $destination[3] && $destination_stat[4] == $destination[4] or die 'destination identity';
 }
-rename($source,$destination_name) or die 'rename';
-my @finished=lstat($destination_name);
-@finished && -f _ && $finished[3] == 1 && $finished[0] == $sdev && $finished[1] == $sino && $finished[7] == $ssize && ($finished[2] & 07777) == $smode && $finished[4] == $suid or die 'destination result';
-my @remaining=lstat($source); @remaining && die 'source remains';
-$source_parent->sync if defined($source_parent); $root->sync or die 'directory sync';
+if ($operation eq 'swap') {
+  !($source_dir eq '.' && $source_name eq $destination_name) or die 'same entry';
+  defined(fileno($source_parent)) && defined(fileno($root)) &&
+    syscall(488, fileno($source_parent), $source_name, fileno($root), $destination_name, 2) == 0 or die 'swap';
+  my @source_result=lstat($source);
+  @source_result && -f _ && $source_result[3] == 1 && $source_result[0] == $destination[0] && $source_result[1] == $destination[1] && $source_result[7] == $destination[2] && ($source_result[2] & 07777) == $destination[3] && $source_result[4] == $destination[4] or die 'source result';
+  my @destination_result=lstat($destination_name);
+  @destination_result && -f _ && $destination_result[3] == 1 && $destination_result[0] == $sdev && $destination_result[1] == $sino && $destination_result[7] == $ssize && ($destination_result[2] & 07777) == $smode && $destination_result[4] == $suid or die 'destination result';
+} else {
+  rename($source,$destination_name) or die 'rename';
+  my @finished=lstat($destination_name);
+  @finished && -f _ && $finished[3] == 1 && $finished[0] == $sdev && $finished[1] == $sino && $finished[7] == $ssize && ($finished[2] & 07777) == $smode && $finished[4] == $suid or die 'destination result';
+  my @remaining=lstat($source); @remaining && die 'source remains';
+}
+$source_parent->sync or die 'source directory sync'; $root->sync or die 'directory sync';
 print STDOUT "OK\n" or die 'status';
 `;
 
@@ -160,13 +178,14 @@ async function runHelper(args: string[], fd: number): Promise<void> {
   });
 }
 
-export async function moveAnchoredFile(options: AnchoredMoveOptions): Promise<void> {
+async function runAnchoredFileOperation(options: AnchoredMoveOptions, operation: "move" | "swap"): Promise<void> {
   if (process.platform !== "darwin") throw failure();
   try {
     if (!validRootPath(options.rootDirectory) || !validRootPath(options.sourceDirectory) ||
         !validMoveName(options.sourceName) || !validMoveName(options.destinationName) || options.rootDirectory === "/" ||
         typeof options.rootIdentity?.dev !== "bigint" || typeof options.rootIdentity?.ino !== "bigint" ||
-        typeof options.sourceDirectoryIdentity?.dev !== "bigint" || typeof options.sourceDirectoryIdentity?.ino !== "bigint") throw failure();
+        typeof options.sourceDirectoryIdentity?.dev !== "bigint" || typeof options.sourceDirectoryIdentity?.ino !== "bigint" ||
+        (operation === "swap" && options.destination?.kind !== "identity")) throw failure();
     const rootRelative = relative(options.rootDirectory, options.sourceDirectory);
     if (rootRelative !== "" && (rootRelative.includes("/") || rootRelative === ".." || rootRelative.startsWith("../") || !STAGE_DIRECTORY.test(rootRelative))) throw failure();
     const rootHandle = await open(options.rootDirectory, constants.O_RDONLY | DIRECTORY | NOFOLLOW);
@@ -184,7 +203,7 @@ export async function moveAnchoredFile(options: AnchoredMoveOptions): Promise<vo
       const destinationArgs = options.destination.kind === "absent" ? ["absent"] : ["identity", ...identityArgs(options.destination.identity)];
       if (options.destination.kind === "identity") assertIdentity(options.destination.identity);
       await runHelper([
-        decimal(root.dev), decimal(root.ino), rootRelative === "" ? "." : rootRelative,
+        operation, decimal(root.dev), decimal(root.ino), rootRelative === "" ? "." : rootRelative,
         decimal(sourceDirectory.dev), decimal(sourceDirectory.ino), options.sourceName,
         ...identityArgs(options.sourceIdentity), options.destinationName, ...destinationArgs,
       ], rootHandle.fd);
@@ -194,4 +213,12 @@ export async function moveAnchoredFile(options: AnchoredMoveOptions): Promise<vo
   } catch (error) {
     throw error instanceof ToolError ? error : failure();
   }
+}
+
+export async function moveAnchoredFile(options: AnchoredMoveOptions): Promise<void> {
+  return runAnchoredFileOperation(options, "move");
+}
+
+export async function swapAnchoredFile(options: AnchoredSwapOptions): Promise<void> {
+  return runAnchoredFileOperation(options, "swap");
 }

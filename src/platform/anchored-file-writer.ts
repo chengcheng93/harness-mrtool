@@ -15,6 +15,9 @@ export interface AnchoredFileWriteOptions {
 
 const MAX_BYTES = 256 * 1024 * 1024;
 const HELPER_TIMEOUT_MS = 60_000;
+// Add-Type cold start is bounded separately; READY starts the actual write budget.
+const WINDOWS_HELPER_STARTUP_GRACE_MS = 1_000;
+const WINDOWS_HELPER_STARTUP_MAX_MS = 10_000;
 const MAX_HELPER_OUTPUT_BYTES = 512;
 const MAX_IDENTITY = (1n << 64n) - 1n;
 function failure(actual = 'windows-helper:anchored-write'): ToolError<'UPDATE_SECURITY_ERROR'> {
@@ -59,6 +62,7 @@ print STDOUT "OK\n" or die 'status';
 `;
 
 // Windows path opens are safe only while EVERY ancestor is held without
+// READY is emitted only after Add-Type succeeds, before any path mutation.
 // FILE_SHARE_DELETE. Reparse points are opened themselves and rejected. Keep all
 // handles until exclusive creation, streaming and Flush(true) have completed.
 const WINDOWS_HELPER = String.raw`
@@ -145,6 +149,8 @@ public static class AnchoredNativeWriter {
  }
 }
 '@ | Out-Null
+[Console]::Out.Write("READY"+[char]10)
+[Console]::Out.Flush()
 } catch { [Console]::Out.Write("ERR:add-type"+[char]10); exit 1 }
 try {
   $ok = [AnchoredNativeWriter]::Write($env:HMR_ANCHOR_DIRECTORY,$env:HMR_ANCHOR_DEV,$env:HMR_ANCHOR_INO,$env:HMR_ANCHOR_NAME,$env:HMR_ANCHOR_LENGTH)
@@ -154,31 +160,63 @@ if (-not $ok) { exit 1 }
 exit 0
 `;
 
-async function runHelper(executable: string, args: string[], env: NodeJS.ProcessEnv, bytes: Uint8Array, fd?: number): Promise<void> {
+async function runHelper(executable: string, args: string[], env: NodeJS.ProcessEnv, bytes: Uint8Array, fd?: number, expectsReady = false): Promise<void> {
   await new Promise<void>((done, reject) => {
     let child: ChildProcess | undefined;
     let settled = false;
     let failed = false;
     let output = '';
+    let protocol = '';
+    let ready = !expectsReady;
+    let status = false;
     let failureDiagnostic: string | undefined;
-    const timer = setTimeout(() => abort('timeout'), HELPER_TIMEOUT_MS);
+    let timer: NodeJS.Timeout | undefined;
+    const startupTimeout = Math.min(WINDOWS_HELPER_STARTUP_MAX_MS, HELPER_TIMEOUT_MS + WINDOWS_HELPER_STARTUP_GRACE_MS);
+    const armTimeout = (timeoutMs: number) => {
+      if (timer !== undefined) clearTimeout(timer);
+      timer = setTimeout(() => abort('timeout'), timeoutMs);
+    };
+    armTimeout(expectsReady ? startupTimeout : HELPER_TIMEOUT_MS);
     function settle(ok: boolean) {
       if (settled) return;
-      settled = true; clearTimeout(timer);
-      if (ok) done();
-      else {
+      settled = true;
+      if (timer !== undefined) clearTimeout(timer);
+      if (ok) done(); else {
         const diagnostic = /^ERR:[a-z-]{1,32}$/u.exec(output.trim())?.[0];
         reject(failure(failureDiagnostic ?? (diagnostic === undefined ? 'windows-helper:unavailable' : `windows-helper:${diagnostic.slice(4)}`)));
       }
     }
-    function abort(stage: string = 'unavailable') {
+    function abort(stage: string = 'unavailable', diagnostic?: string) {
       if (settled || failed) return;
-      failed = true; failureDiagnostic = `windows-helper:${stage}`; clearTimeout(timer);
+      failed = true; failureDiagnostic = diagnostic ?? `windows-helper:${stage}`;
+      if (timer !== undefined) clearTimeout(timer);
       child?.stdin?.destroy(); child?.stdout?.destroy();
       child?.kill('SIGKILL');
       // A kill request does not prove the writer has stopped. Only `close`
       // settles a spawned helper, including timeout/error paths. In particular
       // never add a grace-period rejection while the process can still write.
+    }
+    function consumeWindowsProtocol(chunk: Buffer) {
+      protocol += chunk.toString('ascii');
+      if (protocol.length > MAX_HELPER_OUTPUT_BYTES) { abort('output'); return; }
+      for (;;) {
+        const newline = protocol.indexOf('\n');
+        if (newline < 0) return;
+        const line = protocol.slice(0, newline).replace(/\r$/u, '');
+        protocol = protocol.slice(newline + 1);
+        if (!ready) {
+          if (line !== 'READY') {
+            const diagnostic = /^ERR:[a-z-]{1,32}$/u.test(line) ? `windows-helper:${line.slice(4)}` : undefined;
+            abort('protocol', diagnostic); return;
+          }
+          ready = true;
+          armTimeout(HELPER_TIMEOUT_MS);
+          continue;
+        }
+        if (line !== 'OK' || status) { abort('protocol'); return; }
+        status = true;
+        if (protocol.length > 0) { abort('output'); return; }
+      }
     }
     try {
       child = spawn(executable, args, {
@@ -192,8 +230,9 @@ async function runHelper(executable: string, args: string[], env: NodeJS.Process
         if (failed || settled) return;
         if (chunk.length > MAX_HELPER_OUTPUT_BYTES - output.length) { abort('output'); return; }
         output += chunk.toString('ascii');
+        if (expectsReady) consumeWindowsProtocol(chunk);
       });
-      child.once('close', code => settle(!failed && code === 0 && output === 'OK\n'));
+      child.once('close', code => settle(!failed && code === 0 && (expectsReady ? ready && status && protocol === '' : output === 'OK\n')));
       child.stdin!.end(bytes);
     } catch {
       if (child === undefined) settle(false);
@@ -212,7 +251,9 @@ export async function writeAnchoredFile(options: AnchoredFileWriteOptions): Prom
   try {
     const directory = options.directory, name = options.name;
     const { dev, ino } = options.expectedIdentity;
-    if (typeof directory !== 'string' || !isAbsolute(directory) || resolve(directory) !== directory || directory.includes('\0') ||
+    const pathIsAbsolute = process.platform === 'win32' ? win32.isAbsolute : isAbsolute;
+    const pathResolve = process.platform === 'win32' ? win32.resolve : resolve;
+    if (typeof directory !== 'string' || !pathIsAbsolute(directory) || pathResolve(directory) !== directory || directory.includes('\0') ||
         (name !== 'harness-mrtool' && name !== 'harness-mrtool.exe' && name !== 'harness-mrtool.exe.new' && name !== '.harness-mrtool-install.json' && name !== '.harness-mrtool-install.json.new' && name !== '.harness-mrtool-launch.json') ||
         typeof dev !== 'bigint' || typeof ino !== 'bigint' || dev < 0n || ino < 1n || dev > MAX_IDENTITY || ino > MAX_IDENTITY ||
         !(options.bytes instanceof Uint8Array) || options.bytes.length < 1 || options.bytes.length > MAX_BYTES) throw failure();
@@ -225,7 +266,7 @@ export async function writeAnchoredFile(options: AnchoredFileWriteOptions): Prom
       await runHelper(executable, ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(WINDOWS_HELPER, 'utf16le').toString('base64')], {
         SystemRoot: systemRoot, WINDIR: systemRoot, PATH: win32.join(systemRoot, 'System32'), TEMP: tmpdir(), TMP: tmpdir(),
         HMR_ANCHOR_DIRECTORY: directory, HMR_ANCHOR_DEV: String(dev), HMR_ANCHOR_INO: String(ino), HMR_ANCHOR_NAME: name, HMR_ANCHOR_LENGTH: String(bytes.length),
-      }, bytes);
+      }, bytes, undefined, true);
     } else if (process.platform === 'darwin' || process.platform === 'linux') {
       const flags = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
       const handle = await open(directory, flags);

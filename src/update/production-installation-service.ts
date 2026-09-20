@@ -59,8 +59,10 @@ import {
 import {
   stageAuthenticatedManagedPosixCandidate,
   verifyManagedPosixStage,
-  verifyManagedPosixPublicationBackups,
-  publishManagedPosixCandidate,
+  managedPosixStageDirectory,
+  publishManagedPosixCandidateAtomic,
+  reconcileManagedPosixPublication,
+  removeManagedPosixPublishedStage,
   removeManagedPosixStage,
   type ManagedPosixStage,
 } from "./managed-installation-posix.ts";
@@ -246,9 +248,7 @@ export function createProductionInstallationService(options: ProductionInstallat
   async function recoverPublished(lease: ProcessLockLease, store: InstallationJournalStore): Promise<void> {
     let journal = await store.read();
     const phases = ["publish-intent", "canonical-published", "marker-published", "commit-intent"] as const;
-    if (journal === null || platform !== "darwin-arm64" || !phases.some(phase => phase === journal!.phase)) return;
-    // A phase records intent, never installed truth. Only finish a pair that is
-    // already fully published; partial/native restoration remains fail-closed.
+    if (journal === null || platform !== "darwin-arm64" || !phases.includes(journal.phase as typeof phases[number])) return;
     const observeRoots = async () => {
       for (const [path, expected] of [[installationDirectory, journal!.roots.installation], [stateDirectory, journal!.roots.state]] as const) {
         const actual = fileIdentity(await directoryIdentity(path));
@@ -274,37 +274,53 @@ export function createProductionInstallationService(options: ProductionInstallat
     }
     const config = trustConfig ?? createProductionUpdateTrustConfig();
     const policy = await new UpdateStateStore({stateDirectory, trustConfigSha256: updateTrustConfigSha256(config), bootstrapKeys: config.bootstrapKeys}).load(lease);
-    if (policy === null || digest(canonicalizeJson(policy.trustState)) !== journal.authorization.trustStateSha256) {
-      throw failure("publication-policy-changed");
-    }
+    if (policy === null || digest(canonicalizeJson(policy.trustState)) !== journal.authorization.trustStateSha256) throw failure("publication-policy-changed");
+    const slot = (name: "staged-executable" | "staged-marker" | "previous-executable" | "previous-marker"): InstallationFileIdentity => {
+      const found = journal!.slots.find(value => value.name === name);
+      if (found === undefined || found.state !== "created") throw failure("publication-slot-missing");
+      return found.identity;
+    };
+    const previous = {executable: slot("previous-executable"), marker: slot("previous-marker")};
+    const candidate = {executable: slot("staged-executable"), marker: slot("staged-marker")};
     if (active.record.transactionId === journal.previous.transactionId) {
       const previousAuth = await authenticateReleaseSnapshot(active, {platform, ...(trustConfig === undefined ? {} : {trustConfig})});
       if (canonicalizeJson(releaseEvidence(active, previousAuth)) !== canonicalizeJson(journal.previousEvidence)) throw failure("publication-predecessor-mismatch");
-      await verifyManagedPosixPublicationBackups(installationDirectory, journal);
     }
-    const observe = async () => {
-      await observeRoots();
-      const observed = await verifyInstalledRelease(next, {stateDirectory, installationDirectory, platform, ...(trustConfig === undefined ? {} : {trustConfig})}, lease);
-      for (const [slotName, path] of [["staged-executable", "harness-mrtool"], ["staged-marker", MARKER_NAME]] as const) {
-        const slot = journal!.slots.find(value => value.name === slotName);
-        const actual = fileIdentity(await privateFileIdentity(resolve(installationDirectory, path)));
-        if (slot?.state !== "created" || slot.identity.dev !== actual.dev || slot.identity.ino !== actual.ino) {
-          throw failure("publication-file-identity-mismatch");
-        }
-      }
-      await observeRoots();
-      return observed;
-    };
-    await observe();
+    const reconciled = await reconcileManagedPosixPublication({
+      installationDirectory, attemptId: journal.attemptId, previous, next: candidate,
+      previousHashes: {executable: journal.previousEvidence.native.sha256, marker: journal.previousEvidence.marker.sha256},
+      nextHashes: {executable: journal.nextEvidence.native.sha256, marker: journal.nextEvidence.marker.sha256},
+    });
+    if (reconciled === "previous") {
+      if (active.record.transactionId !== journal.previous.transactionId) throw failure("publication-previous-after-commit");
+      const observedPrevious = await verifyInstalledRelease(active, {stateDirectory, installationDirectory, platform, ...(trustConfig === undefined ? {} : {trustConfig})}, lease);
+      if (observedPrevious.releaseSetId !== journal.previous.releaseSetId || observedPrevious.cliVersion !== journal.previous.cliVersion) throw failure("publication-previous-installation-mismatch");
+      // The journal transition graph requires the explicit compensating
+      // boundary before an aborted outcome; never skip it during recovery.
+      const compensating = transition(journal, "compensating", "previous", journal.slots);
+      await store.write(compensating);
+      const aborted = transition(compensating, "aborted", "previous", compensating.slots);
+      await store.write(aborted);
+      await removeManagedPosixPublishedStage({installationDirectory, attemptId: journal.attemptId, previous: null, previousHashes: null});
+      await store.remove();
+      return;
+    }
+    const observed = await verifyInstalledRelease(next, {stateDirectory, installationDirectory, platform, ...(trustConfig === undefined ? {} : {trustConfig})}, lease);
+    for (const [slotName, path] of [["staged-executable", "harness-mrtool"], ["staged-marker", MARKER_NAME]] as const) {
+      const found = journal.slots.find(value => value.name === slotName);
+      const actual = fileIdentity(await privateFileIdentity(resolve(installationDirectory, path)));
+      if (found?.state !== "created" || found.identity.dev !== actual.dev || found.identity.ino !== actual.ino) throw failure("publication-file-identity-mismatch");
+    }
     for (const phase of phases.slice(phases.indexOf(journal.phase as typeof phases[number]) + 1)) {
       journal = transition(journal, phase, null, journal.slots);
       await store.write(journal);
     }
-    // Do not make next active until its actual canonical bytes and marker have
-    // been authenticated, including after a restart at commit-intent.
-    if (await cache.commitStagedReleaseSet(next.record, lease) === null) throw failure("candidate-cache-commit-missing");
-    await observe();
-    await store.write(transition(journal, "committed", "next", journal.slots));
+    if (active.record.transactionId === journal.previous.transactionId && await cache.commitStagedReleaseSet(next.record, lease) === null) throw failure("candidate-cache-commit-missing");
+    await verifyInstalledRelease(next, {stateDirectory, installationDirectory, platform, ...(trustConfig === undefined ? {} : {trustConfig})}, lease);
+    const committed = transition(journal, "committed", "next", journal.slots);
+    await store.write(committed);
+    await removeManagedPosixPublishedStage({installationDirectory, attemptId: journal.attemptId, previous, previousHashes: {executable: journal.previousEvidence.native.sha256, marker: journal.previousEvidence.marker.sha256}});
+    await store.remove();
   }
 
   async function recoverTerminal(lease: ProcessLockLease, store: InstallationJournalStore): Promise<void> {
@@ -381,7 +397,7 @@ export function createProductionInstallationService(options: ProductionInstallat
       let posixCommitted = false;
       try {
         if (platform === "darwin-arm64") {
-          const posixStage = await stageAuthenticatedManagedPosixCandidate({installationDirectory, snapshot: candidate.snapshot, platform, ...(trustConfig === undefined ? {} : {trustConfig})});
+          const posixStage = await stageAuthenticatedManagedPosixCandidate({installationDirectory, stageDirectory: managedPosixStageDirectory(installationDirectory, journal.attemptId), snapshot: candidate.snapshot, platform, ...(trustConfig === undefined ? {} : {trustConfig})});
           stage = posixStage;
           const observation = await verifyManagedPosixStage(posixStage);
           const prepared = transition(journal, "prepared", null, slotsWithCreatedIdentities(journal, identityFromObserved(observation.executableIdentity), identityFromObserved(observation.markerIdentity), fileIdentity(current.executable), fileIdentity(current.marker)));
@@ -390,7 +406,7 @@ export function createProductionInstallationService(options: ProductionInstallat
           await store.write(publishIntent);
           const previousExecutable = current.executable;
           const previousMarkerIdentity = current.marker;
-          const publication = await publishManagedPosixCandidate({stage: posixStage, attemptId: journal.attemptId, previous: {executable: previousExecutable, marker: previousMarkerIdentity}});
+          const publication = await publishManagedPosixCandidateAtomic({stage: posixStage, attemptId: journal.attemptId, previous: {executable: previousExecutable, marker: previousMarkerIdentity}});
           const published = transition(publishIntent, "canonical-published", null, slotsWithCreatedIdentities(publishIntent, identityFromObserved(observation.executableIdentity), identityFromObserved(observation.markerIdentity), fileIdentity(publication.previous?.executable ?? previousExecutable), fileIdentity(publication.previous?.marker ?? previousMarkerIdentity)));
           await store.write(published);
           await store.write(transition(published, "marker-published", null, published.slots));
@@ -433,6 +449,14 @@ export function createProductionInstallationService(options: ProductionInstallat
         const observed = await verifyInstalledRelease(candidate.snapshot, {stateDirectory, installationDirectory, platform, ...(trustConfig === undefined ? {} : {trustConfig})}, lease);
         const committed = transition(commitIntent, "committed", "next", commitIntent.slots);
         await store.write(committed);
+        if (platform === "darwin-arm64") {
+          const previousSlot = committed.slots.find(value => value.name === "previous-executable");
+          const previousMarkerSlot = committed.slots.find(value => value.name === "previous-marker");
+          if (previousSlot?.state !== "created" || previousMarkerSlot?.state !== "created") throw failure("publication-previous-slot-missing");
+          await removeManagedPosixPublishedStage({installationDirectory, attemptId: committed.attemptId,
+            previous: {executable: previousSlot.identity, marker: previousMarkerSlot.identity},
+            previousHashes: {executable: committed.previousEvidence.native.sha256, marker: committed.previousEvidence.marker.sha256}});
+        }
         await store.remove();
         posixCommitted = true;
         return installedResult(committedCache, observed);
@@ -444,6 +468,7 @@ export function createProductionInstallationService(options: ProductionInstallat
           // On failure the journal still owns every remaining staged leaf.
           // Cleanup after a partial publish would destroy recovery evidence.
           if (platform === "darwin-arm64") {
+            // Preserve the deterministic stage while its journal is recoverable.
             if (posixCommitted) await removeManagedPosixStage(stage as ManagedPosixStage).catch(() => undefined);
           } else await removeManagedWindowsStage(stage as ManagedWindowsStage).catch(() => undefined);
         }

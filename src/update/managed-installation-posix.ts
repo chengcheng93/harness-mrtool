@@ -1,20 +1,21 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants, type BigIntStats } from "node:fs";
 import { lstat, mkdir, open, realpath, rm, rmdir } from "node:fs/promises";
-import { isAbsolute, resolve } from "node:path";
+import { basename, isAbsolute, resolve } from "node:path";
 
 import { ToolError } from "../contracts/errors.ts";
 import { canonicalizeJson } from "../contracts/jcs.ts";
-import { moveAnchoredFile, type AnchoredMoveFileIdentity } from "../platform/anchored-file-mover.ts";
+import { moveAnchoredFile, swapAnchoredFile, type AnchoredMoveFileIdentity } from "../platform/anchored-file-mover.ts";
 import { writeAnchoredFile } from "../platform/anchored-file-writer.ts";
 import { openNativeMutationExecutor } from "../platform/native-mutation-executor.ts";
 import { validateReleaseSetSnapshot, type ReleaseSetSnapshot } from "./cache.ts";
 import { authenticateReleaseSnapshot, type ReleaseSnapshotOptions } from "./release-set-verifier.ts";
-import type {InstallationJournal} from "./installation-journal.ts";
+import type {InstallationFileIdentity, InstallationJournal} from "./installation-journal.ts";
 
 const EXECUTABLE_NAME = "harness-mrtool" as const;
 const MARKER_NAME = ".harness-mrtool-install.json" as const;
 const STAGE_PREFIX = ".harness-mrtool-stage-";
+const DETERMINISTIC_STAGE_SUFFIX = /^[a-f0-9]{32}$/u;
 const MAX_EXECUTABLE_BYTES = 256 * 1024 * 1024;
 const MAX_MARKER_BYTES = 8 * 1024;
 const READ_FLAGS = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
@@ -211,6 +212,8 @@ async function removeCreatedFile(path: string, expected: FileIdentity | undefine
 
 export interface ManagedPosixStageInput {
   readonly installationDirectory: string;
+  /** Optional journal-derived name used so a fresh process can re-open the stage. */
+  readonly stageDirectory?: string;
   readonly executableBytes: Uint8Array;
   readonly markerBytes: Uint8Array;
   readonly executableSha256: string;
@@ -219,6 +222,7 @@ export interface ManagedPosixStageInput {
 
 export interface AuthenticatedManagedPosixStageInput extends ReleaseSnapshotOptions {
   readonly installationDirectory: string;
+  readonly stageDirectory?: string;
   readonly snapshot: ReleaseSetSnapshot;
 }
 
@@ -229,6 +233,12 @@ export interface ManagedPosixStage {
   readonly markerPath: string;
   readonly executableSha256: string;
   readonly markerSha256: string;
+}
+
+export function managedPosixStageDirectory(installationDirectory: string, attemptId: string): string {
+  const root = absoluteRoot(installationDirectory);
+  if (typeof attemptId !== "string" || !DETERMINISTIC_STAGE_SUFFIX.test(attemptId)) throw failure();
+  return resolve(root, `${STAGE_PREFIX}${attemptId}`);
 }
 
 export interface ManagedPosixPreviousEvidence {
@@ -305,6 +315,7 @@ export async function stageAuthenticatedManagedPosixCandidate(
     const markerSha256 = createHash("sha256").update(marker).digest("hex");
     return stageManagedPosixCandidate({
       installationDirectory: input.installationDirectory,
+      ...(input.stageDirectory === undefined ? {} : {stageDirectory: input.stageDirectory}),
       executableBytes,
       markerBytes: marker,
       executableSha256,
@@ -322,6 +333,11 @@ export async function stageManagedPosixCandidate(input: ManagedPosixStageInput):
   const markerBytes = bytes(input.markerBytes, MAX_MARKER_BYTES);
   const executableSha256 = hash(input.executableSha256);
   const markerSha256 = hash(input.markerSha256);
+  const requestedStage = input.stageDirectory === undefined ? undefined : absoluteRoot(input.stageDirectory);
+  if (requestedStage !== undefined &&
+      (resolve(requestedStage, "..") !== root ||
+       basename(requestedStage).slice(0, STAGE_PREFIX.length) !== STAGE_PREFIX ||
+       !DETERMINISTIC_STAGE_SUFFIX.test(basename(requestedStage).slice(STAGE_PREFIX.length)))) throw failure();
   if (createHash("sha256").update(executableBytes).digest("hex") !== executableSha256 ||
       createHash("sha256").update(markerBytes).digest("hex") !== markerSha256) throw failure();
 
@@ -336,7 +352,7 @@ export async function stageManagedPosixCandidate(input: ManagedPosixStageInput):
   try {
     try {
       rootIdentity = await directoryIdentity(root);
-      stageDirectory = resolve(root, `${STAGE_PREFIX}${randomUUID()}`);
+      stageDirectory = requestedStage ?? resolve(root, `${STAGE_PREFIX}${randomUUID()}`);
       await mkdir(stageDirectory, { mode: 0o700 });
       stageIdentity = await directoryIdentity(stageDirectory);
       await writeAnchoredFile({ directory: stageDirectory, expectedIdentity: { dev: stageIdentity.dev, ino: stageIdentity.ino }, name: EXECUTABLE_NAME, bytes: executableBytes });
@@ -433,6 +449,185 @@ export async function verifyManagedPosixPublicationBackups(rootDirectory: string
           identity.size !== BigInt(slot.expectedSize) || await readDigest(path, identity, mode, maximum) !== slot.expectedSha256) throw failure();
     }
     await directoryIdentity(root, pinnedRoot);
+  } finally { await executor.close(); }
+}
+
+
+export interface ManagedPosixAtomicPublicationInput {
+  readonly stage: ManagedPosixStage;
+  readonly attemptId: string;
+  readonly previous: {readonly executable: AnchoredMoveFileIdentity | null; readonly marker: AnchoredMoveFileIdentity | null};
+}
+
+/**
+ * Publishes an already authenticated pair without ever unlinking the
+ * canonical executable or marker. Existing installations use Darwin's
+ * renameatx_np(RENAME_SWAP), leaving the previous pair in the private stage
+ * for restart recovery. First enrollment has no destination to swap and uses
+ * the existing anchored moves, after which recovery can finish a missing leaf.
+ */
+export async function publishManagedPosixCandidateAtomic(input: ManagedPosixAtomicPublicationInput): Promise<ManagedPosixPublication> {
+  if (process.platform !== "darwin") throw failure();
+  const state = assertStage(input.stage);
+  if (input.attemptId !== input.attemptId.toLowerCase() || !DETERMINISTIC_STAGE_SUFFIX.test(input.attemptId)) throw failure();
+  const executor = await openNativeMutationExecutor(state.publicValue.installationDirectory);
+  let result: ManagedPosixPublication | undefined;
+  let operationError: unknown;
+  try {
+    try {
+      const root = await directoryIdentity(state.publicValue.installationDirectory, state.rootIdentity);
+      await observeStage(state);
+      const current = {
+        executable: await optionalFileIdentity(resolve(state.publicValue.installationDirectory, EXECUTABLE_NAME), 0o500n),
+        marker: await optionalFileIdentity(resolve(state.publicValue.installationDirectory, MARKER_NAME), 0o600n),
+      };
+      if (!sameExpectedPair(current, input.previous)) throw failure();
+      const previous = current.executable === null || current.marker === null ? null : Object.freeze({executable: current.executable, marker: current.marker});
+      if (previous === null) {
+        await moveAnchoredFile({rootDirectory: state.publicValue.installationDirectory, rootIdentity: {dev: root.dev, ino: root.ino}, sourceDirectory: state.publicValue.stageDirectory, sourceDirectoryIdentity: {dev: state.stageIdentity.dev, ino: state.stageIdentity.ino}, sourceName: EXECUTABLE_NAME, sourceIdentity: state.executableIdentity, destinationName: EXECUTABLE_NAME, destination: {kind: "absent"}});
+        await moveAnchoredFile({rootDirectory: state.publicValue.installationDirectory, rootIdentity: {dev: root.dev, ino: root.ino}, sourceDirectory: state.publicValue.stageDirectory, sourceDirectoryIdentity: {dev: state.stageIdentity.dev, ino: state.stageIdentity.ino}, sourceName: MARKER_NAME, sourceIdentity: state.markerIdentity, destinationName: MARKER_NAME, destination: {kind: "absent"}});
+      } else {
+        await swapAnchoredFile({rootDirectory: state.publicValue.installationDirectory, rootIdentity: {dev: root.dev, ino: root.ino}, sourceDirectory: state.publicValue.stageDirectory, sourceDirectoryIdentity: {dev: state.stageIdentity.dev, ino: state.stageIdentity.ino}, sourceName: EXECUTABLE_NAME, sourceIdentity: state.executableIdentity, destinationName: EXECUTABLE_NAME, destination: {kind: "identity", identity: current.executable!}});
+        await swapAnchoredFile({rootDirectory: state.publicValue.installationDirectory, rootIdentity: {dev: root.dev, ino: root.ino}, sourceDirectory: state.publicValue.stageDirectory, sourceDirectoryIdentity: {dev: state.stageIdentity.dev, ino: state.stageIdentity.ino}, sourceName: MARKER_NAME, sourceIdentity: state.markerIdentity, destinationName: MARKER_NAME, destination: {kind: "identity", identity: current.marker!}});
+      }
+      const canonicalExecutable = await fileIdentity(resolve(state.publicValue.installationDirectory, EXECUTABLE_NAME), undefined, 0o500n);
+      const canonicalMarker = await fileIdentity(resolve(state.publicValue.installationDirectory, MARKER_NAME), undefined, 0o600n);
+      if (await readDigest(resolve(state.publicValue.installationDirectory, EXECUTABLE_NAME), canonicalExecutable, 0o500n, MAX_EXECUTABLE_BYTES) !== state.executableSha256 ||
+          await readDigest(resolve(state.publicValue.installationDirectory, MARKER_NAME), canonicalMarker, 0o600n, MAX_MARKER_BYTES) !== state.markerSha256) throw failure();
+      result = Object.freeze({attemptId: input.attemptId, canonicalExecutableIdentity: canonicalExecutable, canonicalMarkerIdentity: canonicalMarker, previous, stagedDirectory: state.publicValue.stageDirectory});
+    } catch (error) { operationError = error; }
+  } finally { try { await executor.close(); } catch (error) { if (operationError === undefined) operationError = error; } }
+  if (operationError !== undefined) throw operationError instanceof ToolError ? operationError : failure();
+  if (result === undefined) throw failure();
+  return result;
+}
+
+export interface ManagedPosixPublicationRecoveryInput {
+  readonly installationDirectory: string;
+  readonly attemptId: string;
+  readonly previous: {readonly executable: InstallationFileIdentity; readonly marker: InstallationFileIdentity};
+  readonly next: {readonly executable: InstallationFileIdentity; readonly marker: InstallationFileIdentity};
+  readonly previousHashes: {readonly executable: string; readonly marker: string};
+  readonly nextHashes: {readonly executable: string; readonly marker: string};
+}
+
+/** Reconcile a durable stage/canonical pair after a crash at either swap. */
+export async function reconcileManagedPosixPublication(input: ManagedPosixPublicationRecoveryInput): Promise<"previous" | "next"> {
+  if (process.platform !== "darwin") throw failure();
+  const root = absoluteRoot(input.installationDirectory);
+  const stage = managedPosixStageDirectory(root, input.attemptId);
+  const executor = await openNativeMutationExecutor(root);
+  try {
+    const rootIdentity = await directoryIdentity(root);
+    const stageIdentity = await directoryIdentity(stage);
+    const inspect = async (directory: string, name: string): Promise<"previous" | "next" | "absent" | "invalid"> => {
+      const current = await optionalFileIdentity(resolve(directory, name), name === EXECUTABLE_NAME ? 0o500n : 0o600n);
+      if (current === null) return "absent";
+      const digest = await readDigest(resolve(directory, name), current, name === EXECUTABLE_NAME ? 0o500n : 0o600n, name === EXECUTABLE_NAME ? MAX_EXECUTABLE_BYTES : MAX_MARKER_BYTES);
+      const previousId = input.previous[name === EXECUTABLE_NAME ? "executable" : "marker"];
+      const nextId = input.next[name === EXECUTABLE_NAME ? "executable" : "marker"];
+      const previousHash = input.previousHashes[name === EXECUTABLE_NAME ? "executable" : "marker"];
+      const nextHash = input.nextHashes[name === EXECUTABLE_NAME ? "executable" : "marker"];
+      if (String(current.dev) === previousId.dev && String(current.ino) === previousId.ino && digest === previousHash) return "previous";
+      if (String(current.dev) === nextId.dev && String(current.ino) === nextId.ino && digest === nextHash) return "next";
+      return "invalid";
+    };
+    const canonicalExe = await inspect(root, EXECUTABLE_NAME), canonicalMarker = await inspect(root, MARKER_NAME);
+    const stageExe = await inspect(stage, EXECUTABLE_NAME), stageMarker = await inspect(stage, MARKER_NAME);
+    if (canonicalExe === "next" && canonicalMarker === "next") {
+      // The stage is the durable predecessor retention pair until the journal
+      // is removed. Never accept a tampered or missing retention pair as a
+      // completed publication.
+      if (stageExe !== "previous" || stageMarker !== "previous") throw failure();
+      return "next";
+    }
+    if (canonicalExe === "previous" && canonicalMarker === "previous") {
+      if (stageExe !== "next" || stageMarker !== "next") throw failure();
+      const currentExe = await fileIdentity(resolve(root, EXECUTABLE_NAME), undefined, 0o500n);
+      const currentMarker = await fileIdentity(resolve(root, MARKER_NAME), undefined, 0o600n);
+      const stagedExe = await fileIdentity(resolve(stage, EXECUTABLE_NAME), undefined, 0o500n);
+      const stagedMarker = await fileIdentity(resolve(stage, MARKER_NAME), undefined, 0o600n);
+      await swapAnchoredFile({rootDirectory: root, rootIdentity: {dev: rootIdentity.dev, ino: rootIdentity.ino}, sourceDirectory: stage, sourceDirectoryIdentity: {dev: stageIdentity.dev, ino: stageIdentity.ino}, sourceName: EXECUTABLE_NAME, sourceIdentity: stagedExe, destinationName: EXECUTABLE_NAME, destination: {kind: "identity", identity: currentExe}});
+      await swapAnchoredFile({rootDirectory: root, rootIdentity: {dev: rootIdentity.dev, ino: rootIdentity.ino}, sourceDirectory: stage, sourceDirectoryIdentity: {dev: stageIdentity.dev, ino: stageIdentity.ino}, sourceName: MARKER_NAME, sourceIdentity: stagedMarker, destinationName: MARKER_NAME, destination: {kind: "identity", identity: currentMarker}});
+      return "next";
+    }
+    if (canonicalExe === "next" && canonicalMarker === "previous" && stageExe === "previous" && stageMarker === "next") {
+      const current = await fileIdentity(resolve(root, MARKER_NAME), undefined, 0o600n), staged = await fileIdentity(resolve(stage, MARKER_NAME), undefined, 0o600n);
+      await swapAnchoredFile({rootDirectory: root, rootIdentity: {dev: rootIdentity.dev, ino: rootIdentity.ino}, sourceDirectory: stage, sourceDirectoryIdentity: {dev: stageIdentity.dev, ino: stageIdentity.ino}, sourceName: MARKER_NAME, sourceIdentity: staged, destinationName: MARKER_NAME, destination: {kind: "identity", identity: current}}); return "next";
+    }
+    if (canonicalExe === "previous" && canonicalMarker === "next" && stageExe === "next" && stageMarker === "previous") {
+      const current = await fileIdentity(resolve(root, EXECUTABLE_NAME), undefined, 0o500n), staged = await fileIdentity(resolve(stage, EXECUTABLE_NAME), undefined, 0o500n);
+      await swapAnchoredFile({rootDirectory: root, rootIdentity: {dev: rootIdentity.dev, ino: rootIdentity.ino}, sourceDirectory: stage, sourceDirectoryIdentity: {dev: stageIdentity.dev, ino: stageIdentity.ino}, sourceName: EXECUTABLE_NAME, sourceIdentity: staged, destinationName: EXECUTABLE_NAME, destination: {kind: "identity", identity: current}}); return "next";
+    }
+    const moveStageLeaf = async (name: typeof EXECUTABLE_NAME | typeof MARKER_NAME) => {
+      const source = await fileIdentity(resolve(stage, name), undefined, name === EXECUTABLE_NAME ? 0o500n : 0o600n);
+      await moveAnchoredFile({rootDirectory: root, rootIdentity: {dev: rootIdentity.dev, ino: rootIdentity.ino}, sourceDirectory: stage, sourceDirectoryIdentity: {dev: stageIdentity.dev, ino: stageIdentity.ino}, sourceName: name, sourceIdentity: source, destinationName: name, destination: {kind: "absent"}});
+    };
+    // If an interruption left no canonical pair, restore the authenticated
+    // predecessor from the retention stage before aborting the transaction.
+    if (canonicalExe === "absent" && canonicalMarker === "absent" && stageExe === "previous" && stageMarker === "previous") {
+      await moveStageLeaf(EXECUTABLE_NAME); await moveStageLeaf(MARKER_NAME); return "previous";
+    }
+    if (canonicalExe === "previous" && canonicalMarker === "absent" && stageExe === "absent" && stageMarker === "previous") {
+      await moveStageLeaf(MARKER_NAME); return "previous";
+    }
+    if (canonicalExe === "absent" && canonicalMarker === "previous" && stageExe === "previous" && stageMarker === "absent") {
+      await moveStageLeaf(EXECUTABLE_NAME); return "previous";
+    }
+    // A first-enrollment publication can have one canonical leaf after a crash;
+    // complete only from the matching authenticated staged pair.
+    if (canonicalExe === "absent" && canonicalMarker === "absent" && stageExe === "next" && stageMarker === "next") {
+      const stagedExe = await fileIdentity(resolve(stage, EXECUTABLE_NAME), undefined, 0o500n), stagedMarker = await fileIdentity(resolve(stage, MARKER_NAME), undefined, 0o600n);
+      await moveAnchoredFile({rootDirectory: root, rootIdentity: {dev: rootIdentity.dev, ino: rootIdentity.ino}, sourceDirectory: stage, sourceDirectoryIdentity: {dev: stageIdentity.dev, ino: stageIdentity.ino}, sourceName: EXECUTABLE_NAME, sourceIdentity: stagedExe, destinationName: EXECUTABLE_NAME, destination: {kind: "absent"}});
+      await moveAnchoredFile({rootDirectory: root, rootIdentity: {dev: rootIdentity.dev, ino: rootIdentity.ino}, sourceDirectory: stage, sourceDirectoryIdentity: {dev: stageIdentity.dev, ino: stageIdentity.ino}, sourceName: MARKER_NAME, sourceIdentity: stagedMarker, destinationName: MARKER_NAME, destination: {kind: "absent"}});
+      return "next";
+    }
+    if (canonicalExe === "next" && canonicalMarker === "absent" && stageExe === "absent" && stageMarker === "next") { await moveStageLeaf(MARKER_NAME); return "next"; }
+    if (canonicalExe === "absent" && canonicalMarker === "next" && stageExe === "next" && stageMarker === "absent") { await moveStageLeaf(EXECUTABLE_NAME); return "next"; }
+    throw failure();
+  } finally { await executor.close(); }
+}
+
+
+export interface ManagedPosixPublishedStageCleanupInput {
+  readonly installationDirectory: string;
+  readonly attemptId: string;
+  readonly previous: {readonly executable: InstallationFileIdentity; readonly marker: InstallationFileIdentity} | null;
+  readonly previousHashes: {readonly executable: string; readonly marker: string} | null;
+}
+
+/** Remove only the stage pair that belongs to a completed atomic publication. */
+export async function removeManagedPosixPublishedStage(input: ManagedPosixPublishedStageCleanupInput): Promise<void> {
+  if (process.platform !== "darwin") throw failure();
+  const root = absoluteRoot(input.installationDirectory);
+  const stage = managedPosixStageDirectory(root, input.attemptId);
+  const executor = await openNativeMutationExecutor(root);
+  try {
+    const rootIdentity = await directoryIdentity(root);
+    const stageEntry = await lstat(stage, { bigint: true }).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    });
+    if (stageEntry === null) return;
+    if (!stageEntry.isDirectory() || stageEntry.isSymbolicLink()) throw failure();
+    const stageIdentity = await directoryIdentity(stage);
+    if (input.previous !== null && input.previousHashes !== null) {
+      const executable = await fileIdentity(resolve(stage, EXECUTABLE_NAME), undefined, 0o500n);
+      const marker = await fileIdentity(resolve(stage, MARKER_NAME), undefined, 0o600n);
+      if (String(executable.dev) !== input.previous.executable.dev || String(executable.ino) !== input.previous.executable.ino ||
+          await readDigest(resolve(stage, EXECUTABLE_NAME), executable, 0o500n, MAX_EXECUTABLE_BYTES) !== input.previousHashes.executable ||
+          String(marker.dev) !== input.previous.marker.dev || String(marker.ino) !== input.previous.marker.ino ||
+          await readDigest(resolve(stage, MARKER_NAME), marker, 0o600n, MAX_MARKER_BYTES) !== input.previousHashes.marker) throw failure();
+      await rm(resolve(stage, MARKER_NAME));
+      await rm(resolve(stage, EXECUTABLE_NAME));
+    } else {
+      for (const name of [MARKER_NAME, EXECUTABLE_NAME] as const) {
+        await rm(resolve(stage, name), {force: true});
+      }
+    }
+    await directoryIdentity(stage, stageIdentity);
+    await rmdir(stage);
+    await directoryIdentity(root, rootIdentity);
   } finally { await executor.close(); }
 }
 
