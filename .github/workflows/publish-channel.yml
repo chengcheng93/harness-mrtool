@@ -22,9 +22,12 @@ on:
         required: true
         type: string
 
+concurrency:
+  group: stable-channel-pages
+  cancel-in-progress: false
+
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 jobs:
   verify-cli:
@@ -103,6 +106,8 @@ jobs:
     needs: [verify-cli, verify-template, verify-skill]
     if: ${{ inputs.channel == 'stable' }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -181,3 +186,26 @@ jobs:
           gh release view "stable-${GITHUB_SHA}" --json isDraft,isImmutable
           test "$(gh release view "stable-${GITHUB_SHA}" --json isDraft --jq .isDraft)" = false
           test "$(gh release view "stable-${GITHUB_SHA}" --json isImmutable --jq .isImmutable)" = true
+          mkdir "$RUNNER_TEMP/channel-pages"
+          gh release download "stable-${GITHUB_SHA}" --dir "$RUNNER_TEMP/channel-pages" --pattern 'stable.envelope.json'
+          cmp --silent dist/channel/stable.envelope.json "$RUNNER_TEMP/channel-pages/stable.envelope.json"
+      - name: Upload the verified immutable channel for Pages
+        uses: actions/upload-pages-artifact@v4
+        with:
+          name: github-pages
+          path: ${{ runner.temp }}/channel-pages
+  deploy-pages:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy the verified stable channel to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+        with:
+          artifact_name: github-pages

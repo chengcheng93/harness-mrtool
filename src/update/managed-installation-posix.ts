@@ -10,6 +10,7 @@ import { writeAnchoredFile } from "../platform/anchored-file-writer.ts";
 import { openNativeMutationExecutor } from "../platform/native-mutation-executor.ts";
 import { validateReleaseSetSnapshot, type ReleaseSetSnapshot } from "./cache.ts";
 import { authenticateReleaseSnapshot, type ReleaseSnapshotOptions } from "./release-set-verifier.ts";
+import type {InstallationJournal} from "./installation-journal.ts";
 
 const EXECUTABLE_NAME = "harness-mrtool" as const;
 const MARKER_NAME = ".harness-mrtool-install.json" as const;
@@ -412,6 +413,29 @@ function publicationNames(attemptId: string): { readonly executable: string; rea
   });
 }
 
+/** Re-observe the durable predecessor pair before recovering an uncommitted publication. */
+export async function verifyManagedPosixPublicationBackups(rootDirectory: string, journal: InstallationJournal): Promise<void> {
+  if (process.platform !== "darwin" || journal.platform !== "darwin-arm64") throw failure();
+  const root = absoluteRoot(rootDirectory);
+  const executor = await openNativeMutationExecutor(root);
+  try {
+    const pinnedRoot = await directoryIdentity(root);
+    if (String(pinnedRoot.dev) !== journal.roots.installation.dev || String(pinnedRoot.ino) !== journal.roots.installation.ino) throw failure();
+    const names = publicationNames(journal.attemptId);
+    for (const [slotName, name, mode, maximum] of [
+      ["previous-executable", names.executable, 0o500n, MAX_EXECUTABLE_BYTES],
+      ["previous-marker", names.marker, 0o600n, MAX_MARKER_BYTES],
+    ] as const) {
+      const slot = journal.slots.find(value => value.name === slotName);
+      const path = resolve(root, name);
+      const identity = await fileIdentity(path, undefined, mode);
+      if (slot?.state !== "created" || String(identity.dev) !== slot.identity.dev || String(identity.ino) !== slot.identity.ino ||
+          identity.size !== BigInt(slot.expectedSize) || await readDigest(path, identity, mode, maximum) !== slot.expectedSha256) throw failure();
+    }
+    await directoryIdentity(root, pinnedRoot);
+  } finally { await executor.close(); }
+}
+
 /**
  * Publishes only the canonical executable/marker pair. It has no active-pointer
  * or cache authority. A failure deliberately leaves the exact stage/backup
@@ -621,11 +645,27 @@ export async function removeManagedPosixStage(stage: ManagedPosixStage): Promise
   let operationError: unknown;
   try {
     try {
-      await observeStage(state);
-      await rm(state.publicValue.markerPath);
-      await rm(state.publicValue.executablePath);
-      await directoryIdentity(state.publicValue.stageDirectory, state.stageIdentity);
-      await rmdir(state.publicValue.stageDirectory);
+      await directoryIdentity(state.publicValue.installationDirectory, state.rootIdentity);
+      const present = await lstat(state.publicValue.stageDirectory).catch(error => {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+        throw error;
+      });
+      if (present !== null) {
+        await directoryIdentity(state.publicValue.stageDirectory, state.stageIdentity);
+        // Publication moves either leaf out. Missing leaves are not damage, but
+        // a remaining leaf must still have the original identity AND bytes.
+        const executable = await optionalFileIdentity(state.publicValue.executablePath, 0o500n);
+        const marker = await optionalFileIdentity(state.publicValue.markerPath, 0o600n);
+        if (executable !== null && (!exactIdentity(executable, state.executableIdentity) ||
+            await readDigest(state.publicValue.executablePath, executable, 0o500n, MAX_EXECUTABLE_BYTES) !== state.executableSha256)) throw failure();
+        if (marker !== null && (!exactIdentity(marker, state.markerIdentity) ||
+            await readDigest(state.publicValue.markerPath, marker, 0o600n, MAX_MARKER_BYTES) !== state.markerSha256)) throw failure();
+        await directoryIdentity(state.publicValue.stageDirectory, state.stageIdentity);
+        if (marker !== null) await rm(state.publicValue.markerPath);
+        if (executable !== null) await rm(state.publicValue.executablePath);
+        await directoryIdentity(state.publicValue.stageDirectory, state.stageIdentity);
+        await rmdir(state.publicValue.stageDirectory);
+      }
     } catch (error) {
       operationError = error;
     }

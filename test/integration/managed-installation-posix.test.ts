@@ -188,3 +188,15 @@ test("stages only the authenticated native archive member and canonical marker",
     await removeManagedPosixStage(candidate);
   });
 });
+
+
+test("removes an identity-pinned empty stage after publication and accepts repeated cleanup", darwin, async () => {
+  await installationRoot(async root => {
+    const candidate = await stage(root, 12);
+    await publishManagedPosixCandidate({stage: candidate, attemptId: "9".repeat(32), previous: {executable: null, marker: null}});
+    await removeManagedPosixStage(candidate);
+    await removeManagedPosixStage(candidate);
+    await assert.rejects(lstat(candidate.stageDirectory), {code: "ENOENT"});
+    assert.deepEqual(await readFile(join(root, "harness-mrtool")), Buffer.from([0x7f, 0x53, 0x45, 0x41, 12]));
+  });
+});

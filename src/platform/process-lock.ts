@@ -14,6 +14,10 @@ export interface ProcessLockLease {
 
 
 export interface ProcessLockProvider {
+  // timeoutMs is the contention budget: Windows starts it at READY; POSIX
+  // includes helper startup. Windows separately allows min(10_000, timeoutMs +
+  // 1_000) ms for PowerShell/Add-Type startup. Failed acquisition additionally
+  // waits up to 1_000 ms for helper close, reporting unavailable if not reaped.
   acquire(path: string, timeoutMs: number): Promise<ProcessLockLease>;
 }
 
@@ -287,10 +291,11 @@ function waitForHelper(
 }
 
 
-// PowerShell/Add-Type startup is not lock contention. Keep a separate,
-// bounded startup budget so compilation latency cannot consume the caller's
-// actual lock-wait deadline; once READY is observed, timeoutMs is unchanged.
+// PowerShell/Add-Type gets a separate bounded startup budget. READY starts
+// the full caller contention budget exactly once; partial/duplicate frames
+// cannot renew either budget. Neither budget includes the bounded reap wait.
 const WINDOWS_HELPER_STARTUP_GRACE_MS = 1_000;
+const WINDOWS_HELPER_STARTUP_MAX_MS = 10_000;
 
 const WINDOWS_LOCK_HELPER = String.raw`
 $ErrorActionPreference='Stop'
@@ -367,7 +372,7 @@ async function acquireWindows(path: string, timeoutMs: number, expected: LockFil
       },
     },
   );
-  const startupTimeoutMs = Math.min(10_000, timeoutMs + WINDOWS_HELPER_STARTUP_GRACE_MS);
+  const startupTimeoutMs = Math.min(WINDOWS_HELPER_STARTUP_MAX_MS, timeoutMs + WINDOWS_HELPER_STARTUP_GRACE_MS);
   return waitForHelper(child, timeoutMs, startupTimeoutMs, true);
 }
 

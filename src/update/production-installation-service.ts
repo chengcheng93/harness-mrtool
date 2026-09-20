@@ -47,6 +47,8 @@ import {
   type InstallationSlot,
 } from "./installation-journal.ts";
 import {tupleDigest} from "./journal.ts";
+import {UpdateStateStore} from "./state-store.ts";
+import {createProductionUpdateTrustConfig, updateTrustConfigSha256} from "./trust-config.ts";
 import {coordinateWindowsInnerJournal} from "./windows-installation-coordinator.ts";
 import {createWindowsMutationPlan} from "./windows-persistence-handoff.ts";
 import {launchWindowsPersistenceHelper, recoverWindowsPersistence} from "./windows-persistence-helper.ts";
@@ -57,6 +59,7 @@ import {
 import {
   stageAuthenticatedManagedPosixCandidate,
   verifyManagedPosixStage,
+  verifyManagedPosixPublicationBackups,
   publishManagedPosixCandidate,
   removeManagedPosixStage,
   type ManagedPosixStage,
@@ -240,8 +243,73 @@ export function createProductionInstallationService(options: ProductionInstallat
     await store.write(transition(journal, "aborted", "previous", journal.slots));
   }
 
+  async function recoverPublished(lease: ProcessLockLease, store: InstallationJournalStore): Promise<void> {
+    let journal = await store.read();
+    const phases = ["publish-intent", "canonical-published", "marker-published", "commit-intent"] as const;
+    if (journal === null || platform !== "darwin-arm64" || !phases.some(phase => phase === journal!.phase)) return;
+    // A phase records intent, never installed truth. Only finish a pair that is
+    // already fully published; partial/native restoration remains fail-closed.
+    const observeRoots = async () => {
+      for (const [path, expected] of [[installationDirectory, journal!.roots.installation], [stateDirectory, journal!.roots.state]] as const) {
+        const actual = fileIdentity(await directoryIdentity(path));
+        if (actual.dev !== expected.dev || actual.ino !== expected.ino) throw failure("publication-root-mismatch");
+      }
+    };
+    await observeRoots();
+    const active = await cache.loadLastKnownGoodOrNull({}, lease);
+    if (active === null || ![journal.previous.transactionId, journal.next.transactionId].includes(active.record.transactionId)) {
+      throw failure("publication-pointer-mismatch");
+    }
+    if (active.record.transactionId === journal.next.transactionId && journal.phase !== "commit-intent") {
+      throw failure("publication-pointer-ahead-of-intent");
+    }
+    const next = await cache.loadStagedReleaseSet(journal.next, lease);
+    if (next === null) throw failure("publication-candidate-missing");
+    const authenticated = await authenticateReleaseSnapshot(next, {platform, ...(trustConfig === undefined ? {} : {trustConfig})});
+    if (canonicalizeJson(releaseEvidence(next, authenticated)) !== canonicalizeJson(journal.nextEvidence) ||
+        authenticated.verified.payloadSha256 !== journal.authorization.payloadSha256 ||
+        next.record.manifestSequence !== journal.authorization.sequence ||
+        digest(canonicalizeJson(authenticated.verified.nextTrustState)) !== journal.authorization.trustStateSha256) {
+      throw failure("publication-authorization-mismatch");
+    }
+    const config = trustConfig ?? createProductionUpdateTrustConfig();
+    const policy = await new UpdateStateStore({stateDirectory, trustConfigSha256: updateTrustConfigSha256(config), bootstrapKeys: config.bootstrapKeys}).load(lease);
+    if (policy === null || digest(canonicalizeJson(policy.trustState)) !== journal.authorization.trustStateSha256) {
+      throw failure("publication-policy-changed");
+    }
+    if (active.record.transactionId === journal.previous.transactionId) {
+      const previousAuth = await authenticateReleaseSnapshot(active, {platform, ...(trustConfig === undefined ? {} : {trustConfig})});
+      if (canonicalizeJson(releaseEvidence(active, previousAuth)) !== canonicalizeJson(journal.previousEvidence)) throw failure("publication-predecessor-mismatch");
+      await verifyManagedPosixPublicationBackups(installationDirectory, journal);
+    }
+    const observe = async () => {
+      await observeRoots();
+      const observed = await verifyInstalledRelease(next, {stateDirectory, installationDirectory, platform, ...(trustConfig === undefined ? {} : {trustConfig})}, lease);
+      for (const [slotName, path] of [["staged-executable", "harness-mrtool"], ["staged-marker", MARKER_NAME]] as const) {
+        const slot = journal!.slots.find(value => value.name === slotName);
+        const actual = fileIdentity(await privateFileIdentity(resolve(installationDirectory, path)));
+        if (slot?.state !== "created" || slot.identity.dev !== actual.dev || slot.identity.ino !== actual.ino) {
+          throw failure("publication-file-identity-mismatch");
+        }
+      }
+      await observeRoots();
+      return observed;
+    };
+    await observe();
+    for (const phase of phases.slice(phases.indexOf(journal.phase as typeof phases[number]) + 1)) {
+      journal = transition(journal, phase, null, journal.slots);
+      await store.write(journal);
+    }
+    // Do not make next active until its actual canonical bytes and marker have
+    // been authenticated, including after a restart at commit-intent.
+    if (await cache.commitStagedReleaseSet(next.record, lease) === null) throw failure("candidate-cache-commit-missing");
+    await observe();
+    await store.write(transition(journal, "committed", "next", journal.slots));
+  }
+
   async function recoverTerminal(lease: ProcessLockLease, store: InstallationJournalStore): Promise<void> {
     await recoverPrecommit(lease, store);
+    await recoverPublished(lease, store);
     const journal = await store.read();
     if (journal === null) return;
     if (journal.phase !== "committed" && journal.phase !== "aborted" && journal.phase !== "retention-transfer") throw failure(`unresolved-journal:${journal.phase}`);
@@ -310,6 +378,7 @@ export function createProductionInstallationService(options: ProductionInstallat
       let stage: ManagedPosixStage | ManagedWindowsStage | undefined;
       let windowsExecutor: NativeMutationExecutor | undefined;
       let windowsHandedOff = false;
+      let posixCommitted = false;
       try {
         if (platform === "darwin-arm64") {
           const posixStage = await stageAuthenticatedManagedPosixCandidate({installationDirectory, snapshot: candidate.snapshot, platform, ...(trustConfig === undefined ? {} : {trustConfig})});
@@ -358,20 +427,25 @@ export function createProductionInstallationService(options: ProductionInstallat
         if (markerPublished === null) throw failure("journal-disappeared");
         const commitIntent = transition(markerPublished, "commit-intent", null, markerPublished.slots);
         await store.write(commitIntent);
+        await verifyInstalledRelease(candidate.snapshot, {stateDirectory, installationDirectory, platform, ...(trustConfig === undefined ? {} : {trustConfig})}, lease);
         const committedCache = await cache.commitStagedReleaseSet(stagedCache.record, lease);
         if (committedCache === null) throw failure("candidate-cache-commit-missing");
         const observed = await verifyInstalledRelease(candidate.snapshot, {stateDirectory, installationDirectory, platform, ...(trustConfig === undefined ? {} : {trustConfig})}, lease);
         const committed = transition(commitIntent, "committed", "next", commitIntent.slots);
         await store.write(committed);
         await store.remove();
+        posixCommitted = true;
         return installedResult(committedCache, observed);
       } catch (error) {
         throw error instanceof ToolError ? error : failure("installation-mutation-failed");
       } finally {
         await windowsExecutor?.close().catch(() => undefined);
         if (stage !== undefined && !(platform === "windows-x64" && windowsHandedOff)) {
-          if (platform === "darwin-arm64") await removeManagedPosixStage(stage as ManagedPosixStage).catch(() => undefined);
-          else await removeManagedWindowsStage(stage as ManagedWindowsStage).catch(() => undefined);
+          // On failure the journal still owns every remaining staged leaf.
+          // Cleanup after a partial publish would destroy recovery evidence.
+          if (platform === "darwin-arm64") {
+            if (posixCommitted) await removeManagedPosixStage(stage as ManagedPosixStage).catch(() => undefined);
+          } else await removeManagedWindowsStage(stage as ManagedWindowsStage).catch(() => undefined);
         }
       }
     });

@@ -70,7 +70,10 @@ test("the callback can assert that its update lease remains held", async (t) => 
   assert.equal(held, false);
 });
 
-test("system lock contention never exceeds its declared timeout by a helper grace period", async (t) => {
+// Native wall-clock smoke test includes helper startup and reaping. The exact
+// separate Windows startup/READY contention budgets and disposal deadlines are
+// asserted with virtual time in windows-process-lock-protocol.test.ts.
+test("system lock contention returns timeout within the native smoke-test budget", async (t) => {
   if (process.platform !== "linux" && process.platform !== "win32" && process.platform !== "darwin") {
     t.skip("system process lock provider is not available on this platform");
     return;

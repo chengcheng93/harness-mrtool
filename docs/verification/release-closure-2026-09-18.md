@@ -122,3 +122,69 @@ installation/refresh/discovery; and an authorized isolated GitLab target for
 context, preview, dry-run, create/update/verify/readback and failure-closed
 label acceptance. No release tag, signed production asset, real installation,
 host activation, or GitLab mutation is claimed by this checkpoint.
+
+
+## Bounded recovery and deployment follow-up — 2026-09-20
+
+This supersedes statements above that all remaining gates are external. The
+candidate is **not ready for formal publication**, even though the earlier
+`60ff701` CI completed successfully.
+
+### Changes and fresh evidence
+
+- Darwin recovery now finishes a fully published, authenticated next CLI/marker
+  pair across publish-intent, canonical-published, marker-published,
+  commit-intent, and already-updated-active boundaries. It revalidates the exact
+  policy checkpoint, signed snapshot, journal slot identities, roots, and (until
+  active is next) the authenticated predecessor and pinned backup pair. Tests
+  recover in a fresh Node process and then verify idempotence. Substituted
+  inodes and tampered backups preserve the journal and active pointer.
+- Verify the next installed pair before committing the active pointer in the
+  normal path. Cleanup accepts already-moved POSIX leaves after success;
+  failures preserve journal-owned staged evidence instead of deleting it.
+- Windows committed cleanup removes and verifies the descriptor before removing
+  the journal. An interrupted cleanup with an absent descriptor can resume only
+  after launch ownership and authenticated installed-tuple checks. Legacy
+  descriptor-without-journal cases remain fail-closed, not silently deleted.
+- The Windows lock contract explicitly separates bounded PowerShell startup
+  from the caller contention budget; deterministic tests cover exact timers,
+  fragmented/duplicate/missing READY, late LOCKED, exit/close and helper reaping.
+  The startup split from `60ff701` is preserved, not reverted.
+- Channel workflow adds least-privilege Pages deployment only after published
+  immutable envelope readback and byte equality. No re-signing or envelope
+  rewriting. Repository Pages was enabled with GitHub Actions as the source;
+  this is configuration, **not a deployed signed channel**.
+- Exact Node **24.16.0**, Darwin ARM64: typecheck exit 0; combined 11-file scoped
+  verification **111 tests / 109 passed / 0 failed / 2 skipped** in 60.659s;
+  SEA build exit 0; SEA self-test OK (version 0.1.6); strict codesign verification
+  and git diff whitespace check exit 0. The two skipped cases require real
+  Windows PowerShell/C#; doubles do not substitute for native evidence. The SEA
+  build retains two existing esbuild import.meta/CJS warnings.
+- Independent review of the bounded Darwin recovery/cleanup patch found no
+  unresolved actionable P1/P2 in that scope after fixing the review's test gap:
+  assert the child's durable recovery result before the parent can run recovery.
+  Fresh follow-up typecheck and the two delta tests passed (2/2, no skips).
+  This is not approval of the remaining partial
+  native publication path, nor proof that all T00–T14 gates are complete.
+
+### Still open; do not turn into a release claim
+
+1. Partial native publication recovery, the POSIX interval with no canonical
+   executable, and restart-persistent stage/retention cleanup remain code gates.
+   The new recovery branch intentionally does not guess at mixed or absent
+   canonical pairs. Do not release or install this candidate as completed.
+2. Production signing custody is still unidentified. GitHub authentication works,
+   but repository secret names currently contain only BUNDLE_RECEIPT_B64 and
+   SKILL_BUNDLE_RECEIPT_B64; no CHANNEL_ENVELOPE_B64 is configured. Secret names
+   and dates do not prove their values match new component versions. Never
+   extract private secret values, replace the production trust root, or
+   fabricate a signed production release to bypass this gate.
+3. The already-pushed cli/plugin/skill-v0.1.6 and templates-v1.1.0 tags still pin
+   `60ff701`. They are not moved or overwritten by this follow-up. There were
+   no corresponding candidate Releases at the last authenticated preflight.
+   A later corrected release needs a fresh unused version after all code gates.
+4. New-SHA native Windows CI, real signed dual-platform installation/update/
+   rollback/recovery, host Skill/Plugin activation, and an explicitly identified
+   authorized isolated GitLab project remain uncompleted. Broad authorization
+   removes repeated permission questions; it does not identify a signing
+   service or a GitLab acceptance target.

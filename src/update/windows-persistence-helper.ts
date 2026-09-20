@@ -7,6 +7,7 @@ import { isAbsolute, resolve } from "node:path";
 
 import { ToolError } from "../contracts/errors.ts";
 import { withUpdateLock } from "../platform/lock.ts";
+import type { ProcessLockLease } from "../platform/process-lock.ts";
 import {
   systemProcessIdentityProvider,
   waitForProcessExit,
@@ -19,7 +20,8 @@ import {
   advanceInstallationJournalPhase,
   sealInstallationSettlement,
 } from "./installation-journal-coordination.ts";
-import { createInstallationJournalStore } from "./installation-journal-store.ts";
+import { createInstallationJournalStore, type InstallationJournalStore } from "./installation-journal-store.ts";
+import { tupleDigest } from "./journal.ts";
 import {
   advanceWindowsLaunchInJournal,
   markWindowsExecutionPending,
@@ -328,7 +330,7 @@ interface WindowsPersistenceSettlementInput {
 async function settleWindowsPersistence(input: WindowsPersistenceSettlementInput): Promise<void> {
   const { stateDirectory, installationDirectory, descriptor, decoded, child } = input;
   await withUpdateLock(stateDirectory, async (lease) => {
-    const store = createInstallationJournalStore(stateDirectory);
+    const store = createInstallationJournalStore(stateDirectory, { lease });
     let journal = await store.read();
     if (journal === null) throw failure("helper-journal-missing");
     const action = classifyWindowsPersistenceRecovery(journal);
@@ -348,6 +350,10 @@ async function settleWindowsPersistence(input: WindowsPersistenceSettlementInput
       throw failure("helper-root-mismatch");
     }
 
+    if (action === "cleanup-committed") {
+      await cleanupCommittedPersistence(stateDirectory, installationDirectory, journal, store, lease, descriptor);
+      return;
+    }
     const verifier = createReleaseSetSnapshotVerifier({ platform: "windows-x64" });
     const cache = new UpdateCache({ stateDirectory, verifySnapshot: verifier });
     const staged = await cache.loadStagedReleaseSet(journal.next, lease);
@@ -422,24 +428,67 @@ async function settleWindowsPersistence(input: WindowsPersistenceSettlementInput
     }
 
     if (journal.phase === "committed") {
-      const observed = await verifyInstalledRelease(staged, { stateDirectory, installationDirectory, platform: "windows-x64" }, lease);
-      if (observed.releaseSetId !== staged.record.releaseSetId || observed.cliVersion !== staged.record.cliVersion) {
-        throw failure("helper-committed-observation-mismatch");
-      }
-      await store.remove();
+      await cleanupCommittedPersistence(stateDirectory, installationDirectory, journal, store, lease, descriptor);
     }
   });
 }
 
-async function removeDescriptorAfterSuccess(
-  installationDirectory: string,
-  descriptor: Awaited<ReturnType<typeof observeWindowsPersistenceDescriptor>>,
-): Promise<void> {
-  const descriptorPath = resolve(installationDirectory, WINDOWS_LAUNCH_DESCRIPTOR_FILENAME);
-  const descriptorNow = await observeWindowsPersistenceDescriptor(installationDirectory).catch(() => null);
-  if (descriptorNow !== null && descriptorNow.sha256 === descriptor.sha256 && sameIdentity(descriptorNow.identity, descriptor.identity)) {
-    await rm(descriptorPath, { force: true }).catch(() => undefined);
+async function descriptorExists(installationDirectory: string): Promise<boolean> {
+  try {
+    await lstat(resolve(installationDirectory, WINDOWS_LAUNCH_DESCRIPTOR_FILENAME));
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw failure("repair-descriptor-unavailable");
   }
+}
+
+/** Keep the committed journal as recovery authority until cleanup is observed complete. */
+async function cleanupCommittedPersistence(
+  stateDirectory: string,
+  installationDirectory: string,
+  journal: InstallationJournal,
+  store: InstallationJournalStore,
+  lease: ProcessLockLease,
+  descriptor: Awaited<ReturnType<typeof observeWindowsPersistenceDescriptor>> | null,
+): Promise<void> {
+  if (classifyWindowsPersistenceRecovery(journal) !== "cleanup-committed") throw failure("cleanup-not-committed");
+  lease.assertHeld();
+  const root = await validateWindowsInstallationRoot(installationDirectory);
+  if (!sameIdentity(root, journal.roots.installation)) throw failure("helper-root-mismatch");
+  const verifier = createReleaseSetSnapshotVerifier({ platform: "windows-x64" });
+  const cache = new UpdateCache({ stateDirectory, verifySnapshot: verifier });
+  const active = await cache.loadLastKnownGoodOrNull({}, lease);
+  if (active === null || tupleDigest(active.record) !== journal.nextEvidence.tupleSha256) {
+    throw failure("helper-committed-pointer-mismatch");
+  }
+  const observed = await verifyInstalledRelease(active, { stateDirectory, installationDirectory, platform: "windows-x64" }, lease);
+  if (observed.releaseSetId !== journal.next.releaseSetId || observed.cliVersion !== journal.next.cliVersion ||
+      observed.channelPayloadSha256 !== journal.nextEvidence.authorizationPayloadSha256) {
+    throw failure("helper-committed-observation-mismatch");
+  }
+  if (descriptor !== null) {
+    const current = await observeWindowsPersistenceDescriptor(installationDirectory);
+    if (current.sha256 !== descriptor.sha256 || !sameIdentity(current.identity, descriptor.identity)) {
+      throw failure("cleanup-descriptor-mismatch");
+    }
+    // Do not swallow observation/unlink failures: the terminal journal must
+    // survive them. A restart may find the descriptor already removed below.
+    await rm(resolve(installationDirectory, WINDOWS_LAUNCH_DESCRIPTOR_FILENAME));
+  }
+  if (await descriptorExists(installationDirectory)) throw failure("cleanup-descriptor-remains");
+  if (!sameIdentity(await validateWindowsInstallationRoot(installationDirectory), root)) throw failure("helper-root-mismatch");
+  lease.assertHeld();
+  await store.remove();
+}
+
+async function assertRecoveryOwnerExited(parent: InstallationProcessIdentity, child: InstallationProcessIdentity): Promise<void> {
+  const parentState = await systemProcessIdentityProvider.inspect(parent.pid);
+  if (parentState.state === "alive" && parentState.startKey === parent.startKey) throw failure("repair-parent-live");
+  if (parentState.state === "unknown") throw failure("repair-parent-unknown");
+  const helper = await systemProcessIdentityProvider.inspect(child.pid);
+  if (helper.state === "alive" && helper.startKey === child.startKey) throw failure("repair-helper-live");
+  if (helper.state === "unknown") throw failure("repair-helper-unknown");
 }
 
 /** Run inside the copied SEA after the business parent has handed off. */
@@ -459,7 +508,6 @@ export async function runWindowsPersistenceHelper(input: WindowsPersistenceHelpe
   await waitForProcessExit(decoded.parent, { provider: systemProcessIdentityProvider });
   try {
     await settleWindowsPersistence({ stateDirectory, installationDirectory, descriptor, decoded, child });
-    await removeDescriptorAfterSuccess(installationDirectory, descriptor);
     await rm(helper, { force: true }).catch(() => undefined);
   } catch (error) {
     throw error instanceof ToolError ? error : failure("helper-settlement-failed");
@@ -479,40 +527,40 @@ export async function recoverWindowsPersistence(
   const stateDirectory = absolute(stateDirectoryInput, "state");
   const installationDirectory = absolute(installationDirectoryInput, "installation");
   await validateWindowsInstallationRoot(installationDirectory);
-  try {
-    await lstat(resolve(installationDirectory, WINDOWS_LAUNCH_DESCRIPTOR_FILENAME));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-    throw failure("repair-descriptor-unavailable");
-  }
-  const descriptor = await observeWindowsPersistenceDescriptor(installationDirectory);
-  const decoded = decodeWindowsPersistenceDescriptor(descriptor.bytes);
   const pending = await withUpdateLock(stateDirectory, async (lease) => {
-    const store = createInstallationJournalStore(stateDirectory);
+    const store = createInstallationJournalStore(stateDirectory, { lease });
     const journal = await store.read();
-    if (journal === null) return null;
+    if (!await descriptorExists(installationDirectory)) {
+      if (journal?.windows?.launch === null || journal?.windows?.launch === undefined) return null;
+      if (classifyWindowsPersistenceRecovery(journal) !== "cleanup-committed") throw failure("repair-descriptor-missing");
+      const launch = journal.windows.launch;
+      if (launch.child === null) throw failure("repair-launch-missing");
+      await assertRecoveryOwnerExited(launch.parent, launch.child);
+      await cleanupCommittedPersistence(stateDirectory, installationDirectory, journal, store, lease, null);
+      return { cleaned: true as const };
+    }
+    const descriptor = await observeWindowsPersistenceDescriptor(installationDirectory);
+    const decoded = decodeWindowsPersistenceDescriptor(descriptor.bytes);
+    // The descriptor is not signed and cannot authenticate its own transaction
+    // or launch. Even a matching active release cannot replace a lost journal.
+    if (journal === null) throw failure("repair-launch-missing");
     classifyWindowsPersistenceRecovery(journal);
     const launch = journal.windows?.launch;
     if (launch === null || launch === undefined || launch.launchId !== decoded.launchId ||
         launch.reservationId !== decoded.reservationId || launch.child === null) {
       throw failure("repair-descriptor-mismatch");
     }
-    return Object.freeze({ child: launch.child });
+    return { cleaned: false as const, descriptor, decoded, child: launch.child };
   });
-  if (pending === null || pending.child === null) throw failure("repair-launch-missing");
-  const parent = await systemProcessIdentityProvider.inspect(decoded.parent.pid);
-  if (parent.state === "alive" && parent.startKey === decoded.parent.startKey) throw failure("repair-parent-live");
-  if (parent.state === "unknown") throw failure("repair-parent-unknown");
-  const helper = await systemProcessIdentityProvider.inspect(pending.child.pid);
-  if (helper.state === "alive" && helper.startKey === pending.child.startKey) throw failure("repair-helper-live");
-  if (helper.state === "unknown") throw failure("repair-helper-unknown");
+  if (pending === null) return false;
+  if (pending.cleaned) return true;
+  await assertRecoveryOwnerExited(pending.decoded.parent, pending.child);
   await settleWindowsPersistence({
     stateDirectory,
     installationDirectory,
-    descriptor,
-    decoded,
+    descriptor: pending.descriptor,
+    decoded: pending.decoded,
     child: pending.child,
   });
-  await removeDescriptorAfterSuccess(installationDirectory, descriptor);
   return true;
 }

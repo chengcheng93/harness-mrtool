@@ -1,12 +1,15 @@
 import {createHash} from "node:crypto";
+import {spawnSync} from "node:child_process";
 import assert from "node:assert/strict";
-import {chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile} from "node:fs/promises";
-import test from "node:test";
+import {chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile} from "node:fs/promises";
+import test, {mock} from "node:test";
 import {tmpdir} from "node:os";
 import {resolve} from "node:path";
 
 import {authenticateReleaseSnapshot, createAuthenticatedReleaseSnapshot, createReleaseSetSnapshotVerifier} from "../../src/update/release-set-verifier.ts";
 import {UpdateCache} from "../../src/update/cache.ts";
+import {UpdateStateStore} from "../../src/update/state-store.ts";
+import {canonicalUpdateTrustConfigJson, updateTrustConfigSha256} from "../../src/update/trust-config.ts";
 import {stageAuthenticatedManagedPosixCandidate, publishManagedPosixCandidate} from "../../src/update/managed-installation-posix.ts";
 import {createProductionInstallationService, createInitialInstallationJournal} from "../../src/update/production-installation-service.ts";
 import {exactReleaseFixture} from "../helpers/default-historical-fixture.ts";
@@ -15,6 +18,10 @@ import {canonicalPayload, signedEnvelope} from "../helpers/signing.ts";
 import {createInstallationJournalStore} from "../../src/update/installation-journal-store.ts";
 import {advanceInstallationJournalPhase} from "../../src/update/installation-journal-coordination.ts";
 import {verifyManagedPosixStage} from "../../src/update/managed-installation-posix.ts";
+
+import * as posixModule from "../../src/update/managed-installation-posix.ts";
+import * as preparationModule from "../../src/update/production-release-preparation.ts";
+import * as channelModule from "../../src/update/production-channel.ts";
 
 const darwin = {skip: process.platform !== "darwin" || process.arch !== "arm64"};
 
@@ -136,7 +143,7 @@ async function createPrecommitRecoveryFixture(prefix: string) {
   return {root, stateDirectory, installationDirectory, origin, cache, candidateSnapshot, journal, store, service};
 }
 
-async function writePreparedJournal(fixture: Awaited<ReturnType<typeof createPrecommitRecoveryFixture>>): Promise<void> {
+async function writePreparedJournal(fixture: Awaited<ReturnType<typeof createPrecommitRecoveryFixture>>): Promise<Awaited<ReturnType<typeof stageAuthenticatedManagedPosixCandidate>>> {
   const stage = await stageAuthenticatedManagedPosixCandidate({
     installationDirectory: fixture.installationDirectory,
     snapshot: fixture.candidateSnapshot,
@@ -154,6 +161,7 @@ async function writePreparedJournal(fixture: Awaited<ReturnType<typeof createPre
     return slot;
   });
   await fixture.store.write(advanceInstallationJournalPhase(fixture.journal, "prepared", null, slots));
+  return stage;
 }
 
 test("recovery aborts only an intact precommit journal for the active previous release", darwin, async () => {
@@ -292,7 +300,7 @@ test("recovery preserves a precommit journal when canonical executable evidence 
   }
 });
 
-test("recovery keeps publication-phase journals unresolved", darwin, async () => {
+test("recovery preserves publication intents without authenticated next-pair evidence", darwin, async () => {
   for (const phase of ["publish-intent", "canonical-published", "marker-published", "commit-intent"] as const) {
     const fixture = await createPrecommitRecoveryFixture(`production-installation-${phase}-recovery-`);
     try {
@@ -395,4 +403,153 @@ test("production rollback installs exact previously released bytes only through 
   } finally {
     await removeTree(root);
   }
+});
+
+// Each fixture performs real native publication, then starts a fresh process
+// at a durable boundary rather than treating a phase string as filesystem truth.
+test("recovery completes an authenticated published pair at each commit boundary", darwin, async () => {
+  for (const boundary of ["publish-intent", "canonical-published", "marker-published", "commit-intent", "active-published"] as const) {
+    const fixture = await createPrecommitRecoveryFixture(`production-published-${boundary}-`);
+    try {
+      await fixture.cache.stageVerifiedReleaseSet(fixture.candidateSnapshot);
+      const authenticated = await authenticateReleaseSnapshot(fixture.candidateSnapshot, {platform: "darwin-arm64", trustConfig: fixture.origin.trustConfig});
+      await new UpdateStateStore({stateDirectory: fixture.stateDirectory, trustConfigSha256: updateTrustConfigSha256(fixture.origin.trustConfig), bootstrapKeys: fixture.origin.trustConfig.bootstrapKeys})
+        .save({trustState: authenticated.verified.nextTrustState, validators: {etag: null, lastModified: null}});
+      const stage = await writePreparedJournal(fixture);
+      let journal = await fixture.store.read();
+      assert.ok(journal);
+      journal = advanceInstallationJournalPhase(journal, "publish-intent", null);
+      await fixture.store.write(journal);
+      const identity = async (name: string) => {
+        const info = await lstat(resolve(fixture.installationDirectory, name), {bigint: true});
+        return {dev: info.dev, ino: info.ino, size: info.size, mode: info.mode, uid: info.uid};
+      };
+      await publishManagedPosixCandidate({stage, attemptId: journal.attemptId, previous: {
+        executable: await identity("harness-mrtool"), marker: await identity(".harness-mrtool-install.json"),
+      }});
+      if (boundary !== "publish-intent") {
+        for (const phase of ["canonical-published", "marker-published", "commit-intent"] as const) {
+          journal = advanceInstallationJournalPhase(journal, phase, null);
+          await fixture.store.write(journal);
+          if (phase === boundary) break;
+        }
+      }
+      if (boundary === "active-published") await fixture.cache.commitStagedReleaseSet(fixture.candidateSnapshot.record);
+      const executableBefore = await readFile(resolve(fixture.installationDirectory, "harness-mrtool"));
+      const markerBefore = await readFile(resolve(fixture.installationDirectory, ".harness-mrtool-install.json"));
+      const freshService = () => createProductionInstallationService({
+        stateDirectory: fixture.stateDirectory, installationDirectory: fixture.installationDirectory,
+        platform: "darwin-arm64", trustConfig: fixture.origin.trustConfig,
+      });
+      if (boundary === "publish-intent") {
+        // Identical signed bytes at a substituted inode are not this journal's
+        // published slot. A failed observation must leave all durable intent.
+        const executable = resolve(fixture.installationDirectory, "harness-mrtool");
+        const displaced = resolve(fixture.installationDirectory, "displaced-original");
+        const journalBefore = await readFile(fixture.store.path);
+        await rename(executable, displaced);
+        await writeFile(executable, executableBefore, {mode: 0o500});
+        await assert.rejects(freshService().recover(), {code: "UPDATE_SECURITY_ERROR"});
+        assert.deepEqual(await readFile(fixture.store.path), journalBefore);
+        assert.equal((await fixture.cache.loadLastKnownGoodOrNull())?.record.transactionId, fixture.journal.previous.transactionId);
+        await rm(executable); await rename(displaced, executable);
+      }
+      const recovered = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+        import {createProductionInstallationService} from ${JSON.stringify(new URL("../../src/update/production-installation-service.ts", import.meta.url).href)};
+        import {parseTestOnlyUpdateTrustConfig} from ${JSON.stringify(new URL("../../src/update/trust-config.ts", import.meta.url).href)};
+        await createProductionInstallationService({
+          stateDirectory: ${JSON.stringify(fixture.stateDirectory)}, installationDirectory: ${JSON.stringify(fixture.installationDirectory)},
+          platform: "darwin-arm64", trustConfig: parseTestOnlyUpdateTrustConfig(JSON.parse(process.env.TEST_RECOVERY_CONFIG)),
+        }).recover();
+      `], {encoding: "utf8", timeout: 30_000, env: {...process.env, TEST_RECOVERY_CONFIG: canonicalUpdateTrustConfigJson(fixture.origin.trustConfig)}});
+      assert.equal(recovered.status, 0, recovered.stderr || String(recovered.error ?? recovered.signal));
+      const assertRecovered = async () => {
+        assert.equal(await fixture.store.read(), null);
+        assert.equal((await fixture.cache.loadLastKnownGoodOrNull())?.record.transactionId, fixture.candidateSnapshot.record.transactionId);
+        assert.deepEqual(await readFile(resolve(fixture.installationDirectory, "harness-mrtool")), executableBefore);
+        assert.deepEqual(await readFile(resolve(fixture.installationDirectory, ".harness-mrtool-install.json")), markerBefore);
+      };
+      // The parent must not rescue a child that silently did no recovery.
+      await assertRecovered();
+      await freshService().recover();
+      await assertRecovered();
+    } finally { await removeTree(fixture.root); }
+  }
+});
+
+
+test("published-pair recovery preserves journal and active pointer if predecessor backup is tampered", darwin, async () => {
+  const fixture = await createPrecommitRecoveryFixture("production-published-tampered-backup-");
+  try {
+    await fixture.cache.stageVerifiedReleaseSet(fixture.candidateSnapshot);
+    const auth = await authenticateReleaseSnapshot(fixture.candidateSnapshot, {platform: "darwin-arm64", trustConfig: fixture.origin.trustConfig});
+    await new UpdateStateStore({stateDirectory: fixture.stateDirectory, trustConfigSha256: updateTrustConfigSha256(fixture.origin.trustConfig), bootstrapKeys: fixture.origin.trustConfig.bootstrapKeys})
+      .save({trustState: auth.verified.nextTrustState, validators: {etag: null, lastModified: null}});
+    const stage = await writePreparedJournal(fixture);
+    const prepared = await fixture.store.read();
+    assert.ok(prepared);
+    const journal = advanceInstallationJournalPhase(prepared, "publish-intent", null);
+    await fixture.store.write(journal);
+    const identity = async (name: string) => {
+      const info = await lstat(resolve(fixture.installationDirectory, name), {bigint: true});
+      return {dev: info.dev, ino: info.ino, size: info.size, mode: info.mode, uid: info.uid};
+    };
+    await publishManagedPosixCandidate({stage, attemptId: journal.attemptId, previous: {
+      executable: await identity("harness-mrtool"), marker: await identity(".harness-mrtool-install.json"),
+    }});
+    const backup = resolve(fixture.installationDirectory, "harness-mrtool.previous-" + journal.attemptId);
+    await chmod(backup, 0o700);
+    const tampered = await readFile(backup); tampered[0] = tampered[0]! ^ 0xff;
+    await writeFile(backup, tampered); await chmod(backup, 0o500);
+    const before = await readFile(fixture.store.path);
+    const pointer = await fixture.cache.loadLastKnownGoodOrNull();
+    await assert.rejects(fixture.service.recover(), {code: "UPDATE_SECURITY_ERROR"});
+    assert.deepEqual(await readFile(fixture.store.path), before);
+    assert.equal((await fixture.cache.loadLastKnownGoodOrNull())?.record.transactionId, pointer?.record.transactionId);
+  } finally { await removeTree(fixture.root); }
+});
+
+
+test("failed partial publication retains its journal-owned stage", darwin, async () => {
+  if (process.env.MRTOOL_TEST_PARTIAL_PUBLICATION !== "1") {
+    const env = {...process.env, MRTOOL_TEST_PARTIAL_PUBLICATION: "1"};
+    delete (env as NodeJS.ProcessEnv).NODE_TEST_CONTEXT;
+    const child = spawnSync(process.execPath, ["--experimental-transform-types", "--experimental-test-module-mocks", "--test", "--test-name-pattern=failed partial publication retains", import.meta.filename], {
+      encoding: "utf8", timeout: 30_000, env,
+    });
+    assert.equal(child.status, 0, child.stdout + child.stderr);
+    assert.match(child.stdout, /partial-native-boundary-reached/u, child.stdout + child.stderr);
+    return;
+  }
+  const fixture = await createPrecommitRecoveryFixture("production-partial-stage-retention-");
+  let capturedStage: posixModule.ManagedPosixStage | undefined;
+  try {
+    const authenticated = await authenticateReleaseSnapshot(fixture.candidateSnapshot, {platform: "darwin-arm64", trustConfig: fixture.origin.trustConfig});
+    mock.module("../../src/update/production-release-preparation.ts", {namedExports: {...preparationModule,
+      createProductionReleasePreparer: () => ({prepare: async () => ({snapshot: fixture.candidateSnapshot, authenticated})}),
+    }});
+    mock.module("../../src/update/production-channel.ts", {namedExports: {...channelModule,
+      createProductionChannelClient: () => ({check: async () => ({verified: authenticated.verified, latestVersionConfirmed: true, reachable: true})}),
+    }});
+    mock.module("../../src/update/managed-installation-posix.ts", {namedExports: {...posixModule,
+      publishManagedPosixCandidate: async (input: posixModule.ManagedPosixPublicationInput) => {
+        capturedStage = input.stage;
+        console.log("partial-native-boundary-reached");
+        await rename(resolve(fixture.installationDirectory, "harness-mrtool"), resolve(fixture.installationDirectory, "harness-mrtool.previous-" + input.attemptId));
+        await rename(input.stage.executablePath, resolve(fixture.installationDirectory, "harness-mrtool"));
+        throw new Error("injected failure between native leaf publications");
+      },
+    }});
+    // Fresh import uses the controlled publication boundary; actual journal,
+    // signed snapshots, staging, cache and cleanup remain production code.
+    const {createProductionInstallationService: createService} = await import(new URL("../../src/update/production-installation-service.ts?partial-retention", import.meta.url).href);
+    const service = createService({stateDirectory: fixture.stateDirectory, installationDirectory: fixture.installationDirectory,
+      platform: "darwin-arm64", trustConfig: fixture.origin.trustConfig});
+    await assert.rejects(service.apply(false), {code: "UPDATE_SECURITY_ERROR"});
+    assert.ok(capturedStage);
+    assert.equal((await fixture.store.read())?.phase, "publish-intent");
+    assert.equal((await fixture.cache.loadLastKnownGoodOrNull())?.record.transactionId, fixture.journal.previous.transactionId);
+    assert.ok((await lstat(capturedStage.stageDirectory)).isDirectory());
+    assert.ok((await readFile(capturedStage.markerPath)).length > 0);
+  } finally { mock.restoreAll(); await removeTree(fixture.root); }
 });
