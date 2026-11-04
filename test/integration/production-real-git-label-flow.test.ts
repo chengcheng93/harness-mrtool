@@ -3,10 +3,13 @@ import childProcess from "node:child_process";
 import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { basename, resolve } from "node:path";
+import { basename, dirname, isAbsolute, resolve } from "node:path";
 import test from "node:test";
 import { GitLabClient } from "../../src/gitlab/client.ts";
 import { runProductionMain } from "../../src/production-main.ts";
+import { defaultReadOnlyRepository } from "../../src/cli/production-runtime.ts";
+import { discoverProfileDetectionRepository } from "../../src/git/target-branch.ts";
+import { nodeProcessRunner } from "../../src/git/runner.ts";
 import { GitFixture } from "../helpers/git-fixture.ts";
 import { RealGitLabelTransport } from "../helpers/real-git-label-transport.ts";
 
@@ -16,6 +19,22 @@ const endpoint = "git@gitlab.example.test:group/project.git";
 const allowTestAcl = Object.freeze({ verify: async (_path: string): Promise<void> => undefined });
 
 async function setup(t: test.TestContext) {
+  // A controlled test host may pin a vetted executable outside the production
+  // installation roots. Discovery, isolated Git views and push planning stay real;
+  // production never consumes this test-only environment variable or trusts PATH.
+  const executable = process.env.HARNESS_MRTOOL_TEST_GIT_EXECUTABLE;
+  if (executable !== undefined) {
+    assert.ok(isAbsolute(executable), "test Git executable must be absolute");
+    assert.equal(basename(executable).toLowerCase(), process.platform === "win32" ? "git.exe" : "git");
+  }
+  const repository = executable === undefined ? undefined : {
+    ...defaultReadOnlyRepository,
+    discover: (options: Parameters<typeof discoverProfileDetectionRepository>[0]) =>
+      discoverProfileDetectionRepository({ ...options,
+        // Delegate every request to real native spawn; never synthesize Git responses.
+        processRunner: { run: nodeProcessRunner.run.bind(nodeProcessRunner) },
+        gitRunnerOptions: { trustedGitRoots: [dirname(executable)] } }),
+  };
   const git = await GitFixture.create();
   t.after(() => git.dispose());
   const stateDirectory = await mkdtemp(resolve(await realpath(tmpdir()), "mrtool-real-git-state-"));
@@ -71,6 +90,7 @@ async function setup(t: test.TestContext) {
       cwd: git.worktreePath,
       readOnlyDefaults: {
         stateDirectory,
+        ...(repository === undefined ? {} : { repository }),
         windowsAclVerifier: allowTestAcl,
         targetSessionResolver: { resolve: async () => ({
           origin: transport.origin, gitlab: client, project: transport.project,

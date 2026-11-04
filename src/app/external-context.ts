@@ -6,13 +6,17 @@ import type {
   IssueContextInput,
 } from "../context/types.ts";
 import type { ExternalContextSnapshot } from "../render/marker.ts";
+import type { GitLabMergeRequest } from "../gitlab/types.ts";
 import {
   getContext,
   type DiscoveredContext,
   type GetContextOptions,
 } from "./get-context.ts";
 
-export type ExternalContextReadOptions = Omit<GetContextOptions, "store">;
+export type ExternalContextReadOptions = Omit<GetContextOptions, "store"> & {
+  /** The MR response just read by the remote, reusable once within this discovery. */
+  readonly mergeRequestRead?: GitLabMergeRequest;
+};
 
 export interface ExternalContextReadResult {
   readonly binding: ContextBinding;
@@ -54,6 +58,32 @@ function projectedResult(
 export async function readExternalContext(
   options: ExternalContextReadOptions,
 ): Promise<ExternalContextReadResult> {
+  const { mergeRequestRead, ...contextOptions } = options;
+  let gitlab = contextOptions.gitlab;
+  if (mergeRequestRead !== undefined) {
+    if (contextOptions.operation !== "update" || contextOptions.mrIid !== mergeRequestRead.iid) {
+      throw new TypeError("The supplied MR read must match this update context's IID");
+    }
+    const mr = deepFreeze(copyJsonValue(mergeRequestRead, "$mergeRequestRead") as unknown as GitLabMergeRequest);
+    let consumed = false;
+    // Scope reuse to one exact request. All other reads, including project/head
+    // fences, label inventory, membership, Issue and review, remain live.
+    gitlab = new Proxy(contextOptions.gitlab, {
+      get(target, property) {
+        if (property === "getMergeRequest") {
+          return async (projectId: string, iid: number) => {
+            if (!consumed && projectId === mr.targetProjectId && iid === mr.iid) {
+              consumed = true;
+              return mr;
+            }
+            return target.getMergeRequest(projectId, iid);
+          };
+        }
+        const value: unknown = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+  }
   const capture: { input?: IssueContextInput } = {};
   const store: GetContextOptions["store"] = {
     issue: async (input): Promise<IssuedContext> => {
@@ -76,7 +106,7 @@ export async function readExternalContext(
     },
   };
 
-  const discovered = await getContext({ ...options, store });
+  const discovered = await getContext({ ...contextOptions, gitlab, store });
   if (capture.input === undefined) {
     throw new Error("External context capture did not complete");
   }

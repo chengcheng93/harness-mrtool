@@ -100,12 +100,20 @@ export function createDefaultWriteServices(
       if (!repo.worktree.clean || repo.targetProject?.host !== url.host ||
           repo.targetProject.path !== planned.options.targetProject || repo.targetRemote !== git.targetRemote ||
           repo.sourceRemote !== git.sourceRemote || repo.sourceRemoteRef !== git.sourceRemoteRef) throw changed();
-      if (!invocation.options.dryRun) {
-        const push = await repository.planPush(repo);
+      const [pushResult, diffResult] = await Promise.allSettled([
+        invocation.options.dryRun ? Promise.resolve(null) : repository.planPush(repo),
+        repository.readChangeSet(repo),
+      ]);
+      // A failed push check must not leave a Git read using the workspace after
+      // this command returns (for example while a caller starts recovery).
+      if (pushResult.status === "rejected") throw pushResult.reason;
+      if (diffResult.status === "rejected") throw diffResult.reason;
+      const push = pushResult.value;
+      const diff = diffResult.value;
+      if (push !== null) {
         if (push.kind !== "up-to-date" || push.remote !== git.sourceRemote || push.ref !== git.sourceRemoteRef ||
             push.sourceHeadSha !== planned.labelDiff.sourceHeadSha || push.remoteSha !== planned.labelDiff.sourceHeadSha) throw changed();
       }
-      const diff = await repository.readChangeSet(repo);
       if (repo.sourceBranch !== git.sourceBranch || repo.sourceProject?.path !== git.sourceProject.path ||
           diff.sourceHeadSha !== planned.labelDiff.sourceHeadSha ||
           diff.targetRefSha !== planned.labelDiff.targetRefSha || diff.mergeBaseSha !== planned.labelDiff.mergeBaseSha ||
@@ -150,7 +158,8 @@ export function createDefaultWriteServices(
       gitlab: planned.options.gitlab,
       targetProject: { id: snapshot.targetProject.id, fullPath: snapshot.targetProject.path },
       snapshotReader: async (mr) => {
-        const result = await reader.read({ ...planned.options, operation: "update", mrIid: mr.iid });
+        const result = await reader.read({ ...planned.options, operation: "update", mrIid: mr.iid,
+          mergeRequestRead: mr });
         planned.assertNoCredentialExposure(result.snapshot);
         return validateExternalContextSnapshot(result.snapshot);
       },
