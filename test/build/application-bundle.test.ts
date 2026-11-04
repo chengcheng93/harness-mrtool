@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
+
+import { ToolError } from "../../src/contracts/errors.ts";
 
 
 import { build } from "esbuild";
@@ -19,6 +22,38 @@ import bundleManifest from "../../template-bundle/bundle-manifest.json" with { t
 
 const repositoryRoot = resolve(import.meta.dirname, "../..");
 const templateBundlePath = resolve(repositoryRoot, "template-bundle");
+
+function assertApplicationBundleProcess(result: ReturnType<typeof runProcess>, operation: string): void {
+  const reason = result.error !== undefined ? "error" : result.status !== 0 ? `exit-${String(result.status)}` : result.stderr !== "" ? "stderr" : null;
+  if (reason !== null) {
+    throw new ToolError("INTERNAL_ERROR", "Application bundle command failed", {
+      field: "runtime",
+      expected: "the source-built application bundle command to exit cleanly",
+      actual: `application-bundle:${operation}-${reason}`,
+      safeNextStep: "Rebuild the application bundle and inspect the bounded command failure diagnostic.",
+    });
+  }
+}
+
+
+test("application bundle keeps embedded commands on an unsupported host even with an enrollment marker", async (context) => {
+  const { outputDirectory, outputPath } = await buildApplicationBundle(context, "harness-app-unsupported-host-");
+  const fakeExecutablePath = resolve(outputDirectory, "fake-node");
+  writeFileSync(resolve(outputDirectory, ".harness-mrtool-install.json"), "{}\n");
+  const script = `
+    const platform = Object.getOwnPropertyDescriptor(process, "platform");
+    Object.defineProperty(process, "platform", { ...platform, value: "linux" });
+    const executable = Object.getOwnPropertyDescriptor(process, "execPath");
+    Object.defineProperty(process, "execPath", { ...executable, value: ${JSON.stringify(fakeExecutablePath)} });
+    process.argv = [process.execPath, ${JSON.stringify(outputPath)}, "version", "--no-update", "--output", "json"];
+    await import(${JSON.stringify(pathToFileURL(outputPath).href)});
+  `;
+  const result = runProcess(process.execPath, ["--input-type=module", "-e", script], { cwd: outputDirectory });
+  const diagnostic = JSON.stringify(result, undefined, 2);
+  assert.equal(result.status, 0, diagnostic);
+  assert.equal(result.stderr, "", diagnostic);
+  assert.equal((JSON.parse(result.stdout) as { readonly code: string }).code, "OK", diagnostic);
+});
 
 
 test("application bundle executes Bundle validation without external modules", async (context) => {
@@ -89,8 +124,8 @@ test("application bundle executes Bundle validation without external modules", a
 });
 
 
-test("application bundle exposes verified local commands and atomic template export", async (context) => {
-  const outputDirectory = mkdtempSync(join(tmpdir(), "harness-app-commands-"));
+async function buildApplicationBundle(context: test.TestContext, prefix: string) {
+  const outputDirectory = mkdtempSync(join(tmpdir(), prefix));
   context.after(() => rmSync(outputDirectory, { recursive: true, force: true }));
   const outputPath = resolve(outputDirectory, "main.cjs");
   await build({
@@ -98,18 +133,22 @@ test("application bundle exposes verified local commands and atomic template exp
     outfile: outputPath,
     logLevel: "silent",
   });
+  return { outputDirectory, outputPath };
+}
 
-
-  for (const [arguments_, expectedCommand] of [
-    [["version", "--no-update", "--output", "json"], "version"],
-    [["profiles", "list", "--no-update", "--output", "json"], "profiles.list"],
-    [["schema", "show", "--no-update", "--output", "json"], "schema.show"],
-    [["template", "show", "--no-update", "--output", "json"], "template.show"],
-  ] as const) {
+for (const [arguments_, expectedCommand] of [
+  [["version", "--no-update", "--output", "json"], "version"],
+  [["profiles", "list", "--no-update", "--output", "json"], "profiles.list"],
+  [["schema", "show", "--no-update", "--output", "json"], "schema.show"],
+  [["template", "show", "--no-update", "--output", "json"], "template.show"],
+] as const) {
+  test(`application bundle exposes ${expectedCommand}`, async (context) => {
+    const { outputDirectory, outputPath } = await buildApplicationBundle(context, "harness-app-command-");
     const result = runProcess(process.execPath, [outputPath, ...arguments_], {
       cwd: outputDirectory,
     });
     const diagnostic = JSON.stringify(result, undefined, 2);
+    assertApplicationBundleProcess(result, expectedCommand);
     assert.equal(result.status, 0, diagnostic);
     assert.equal(result.stderr, "", diagnostic);
     const envelope = JSON.parse(result.stdout) as {
@@ -121,9 +160,11 @@ test("application bundle exposes verified local commands and atomic template exp
     assert.equal(envelope.versions.templateVersion, bundleManifest.version, diagnostic);
     assert.equal(envelope.data.command, expectedCommand, diagnostic);
     assert.equal(result.stdout.trimEnd().split(/\r?\n/u).length, 1, diagnostic);
-  }
+  });
+}
 
-
+test("application bundle exposes atomic template export", async (context) => {
+  const { outputDirectory, outputPath } = await buildApplicationBundle(context, "harness-app-export-");
   const destination = resolve(outputDirectory, "Docs.md");
   const exported = runProcess(process.execPath, [
     outputPath,
@@ -138,11 +179,11 @@ test("application bundle exposes verified local commands and atomic template exp
     "json",
   ], { cwd: outputDirectory });
   const diagnostic = JSON.stringify(exported, undefined, 2);
+  assertApplicationBundleProcess(exported, "export");
   assert.equal(exported.status, 0, diagnostic);
   assert.equal(exported.stderr, "", diagnostic);
   assert.equal(existsSync(destination), true, diagnostic);
   assert.match(readFileSync(destination, "utf8"), /^## 1\. Changes$/mu);
-
 
   const noOverwrite = runProcess(process.execPath, [
     outputPath,

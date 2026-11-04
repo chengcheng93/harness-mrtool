@@ -47,7 +47,7 @@ export const MAX_UPDATE_STATE_DIRECTORY_ENTRIES_SCANNED = 4_096;
 const STATE_VERSION = 1;
 const STATE_NAME = "update-state.json";
 const SHA256 = /^[a-f0-9]{64}$/u;
-const NOFOLLOW = (constants as { readonly O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
+const NOFOLLOW = process.platform === "win32" ? 0 : ((constants as { readonly O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0);
 const TEMP_NAME = /^update-state\.json\.tmp\.[a-f0-9]{24}$/u;
 const RECORD_FIELDS = new Set([
   "stateVersion",
@@ -116,7 +116,7 @@ function securityFailure(): ToolError<"UPDATE_SECURITY_ERROR"> {
     {
       field: "updateState",
       expected: "canonical state bound to the built-in update trust configuration",
-      actual: "invalid or unsafe local update state",
+      actual: "update-state:unsafe",
       safeNextStep: "Repair the private update state and retry.",
     },
   );
@@ -202,7 +202,7 @@ function samePath(left: string, right: string): boolean {
 
 function sameIdentity(left: BigIntStats, right: BigIntStats): boolean {
   return left.dev === right.dev && left.ino === right.ino && left.size === right.size &&
-    left.nlink === right.nlink && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
+    left.nlink === right.nlink && (process.platform === "win32" || (left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs));
 }
 
 
@@ -210,8 +210,8 @@ function sameIdentity(left: BigIntStats, right: BigIntStats): boolean {
 
 function sameMovedIdentity(left: BigIntStats, right: BigIntStats): boolean {
   return left.dev === right.dev && left.ino === right.ino && left.size === right.size &&
-    left.nlink === right.nlink && left.mtimeNs === right.mtimeNs &&
-    left.birthtimeNs === right.birthtimeNs;
+    left.nlink === right.nlink && (process.platform === "win32" || (left.mtimeNs === right.mtimeNs &&
+    left.birthtimeNs === right.birthtimeNs));
 }
 
 
@@ -232,6 +232,10 @@ function sameJson(left: unknown, right: unknown): boolean {
 
 
 async function syncDirectory(path: string): Promise<void> {
+  // Windows has no portable fsync-able directory handle through Node.
+  // File contents are flushed before rename; do not turn a valid state commit
+  // into a platform-specific failure while reopening the directory.
+  if (process.platform === "win32") return;
   let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
     handle = await open(path, "r");
@@ -644,7 +648,7 @@ export class UpdateStateStore {
 
 
 
-  async save(value: UpdateStateValue): Promise<StoredUpdateState> {
+  async save(value: UpdateStateValue, lease?: ProcessLockLease): Promise<StoredUpdateState> {
     const record = this.normalize(value);
     const serialized = `${canonicalizeJson(record as unknown as JsonValue)}\n`;
     const bytes = Buffer.from(serialized, "utf8");
@@ -735,6 +739,6 @@ export class UpdateStateStore {
         if (error instanceof ToolError) throw error;
         throw persistenceFailure();
       }
-    });
+    }, lease);
   }
 }

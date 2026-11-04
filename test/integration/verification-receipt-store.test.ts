@@ -481,6 +481,7 @@ test("detects a receipt path replacement after opening without quarantining the 
 });
 
 test("detects same-inode timestamp mutation after opening and does not record stale evidence", async (t) => {
+  if (process.platform === "win32") return t.skip("Windows timestamp metadata is not a stable identity fence");
   const stateDirectory = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-receipt-in-place-"));
   t.after(async () => rm(stateDirectory, { recursive: true, force: true }));
   const receipt = receiptFixture();

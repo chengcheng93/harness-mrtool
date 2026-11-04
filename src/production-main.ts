@@ -1,10 +1,18 @@
+import { lstat } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import packageMetadata from "../package.json" with { type: "json" };
 
-import { loadTemplateBundle, type LoadedTemplateBundle } from "./bundle/load.ts";
+import {
+  loadTemplateBundle,
+  type LoadedTemplateBundle,
+  MAX_BUNDLE_MANIFEST_BYTES,
+  MAX_BUNDLE_PAYLOAD_BYTES,
+  MAX_BUNDLE_TOTAL_PAYLOAD_BYTES,
+} from "./bundle/load.ts";
 import { validateTemplateBundle } from "./bundle/validate.ts";
+import { TEMPLATE_BUNDLE_PAYLOAD_PATHS } from "./bundle/types.ts";
 import {
   createLocalCommandHandlers,
   type TrustedBundleSelection,
@@ -46,12 +54,23 @@ import {
   runPublicInvocationPreflight,
   type PublicInvocationPreflight,
 } from "./update/preflight.ts";
-import { createUpdaterCommandServices } from "./cli/commands/updater.ts";
+import { createUpdaterCommandServices, createInstallationCommandServices } from "./cli/commands/updater.ts";
 import { createProductionChannelCheckHandler, type ProductionChannelCommandDefaults } from "./cli/commands/production-channel.ts";
 import { createSkillCommandServices, type SkillCommandService } from "./cli/commands/skill.ts";
+import { createProductionSkillCommandService } from "./skill/production-service.ts";
 import type { UpdateService } from "./update/service.ts";
-import { authenticateReleaseSnapshot } from "./update/release-set-verifier.ts";
+import type { ProductionInstallationService } from "./update/managed-installation-types.ts";
+import { defaultStateDirectory } from "./platform/state-path.ts";
+import { createProductionInstallationService } from "./update/production-installation-service.ts";
+import {
+  authenticateReleaseSnapshot,
+  createReleaseSetSnapshotVerifier,
+} from "./update/release-set-verifier.ts";
 import { currentReleasePlatform } from "./update/production-release-preparation.ts";
+import { UpdateCache } from "./update/cache.ts";
+import { loadTemplateBundleSnapshot } from "./update/historical-bundle-loader.ts";
+import { unpackTemplatePublicationArchive } from "./update/production-historical-source.ts";
+import { MAX_SIGNED_ENVELOPE_BYTES } from "./update/envelope.ts";
 
 declare const __HARNESS_MRTOOL_VERSION__: string;
 declare const __HARNESS_MRTOOL_BOOTSTRAP_BUNDLE__: unknown;
@@ -59,6 +78,32 @@ declare const __HARNESS_MRTOOL_BOOTSTRAP_BUNDLE__: unknown;
 const cliVersion = typeof __HARNESS_MRTOOL_VERSION__ === "string"
   ? __HARNESS_MRTOOL_VERSION__
   : packageMetadata.version;
+
+const INSTALL_MARKER_NAME = ".harness-mrtool-install.json";
+
+async function hasManagedInstallationMarker(): Promise<boolean> {
+  // A packaged managed executable is supported only on the two native release
+  // hosts. Unsupported source/application hosts may still run immutable local
+  // commands, but must never opt into the production update/cache path merely
+  // because a same-name marker happens to exist beside the host runtime.
+  if (!((process.platform === "darwin" && process.arch === "arm64") ||
+      (process.platform === "win32" && process.arch === "x64"))) return false;
+  try {
+    const info = await lstat(resolve(dirname(resolve(process.execPath)), INSTALL_MARKER_NAME));
+    if (!info.isFile() || info.isSymbolicLink()) {
+      throw new ToolError("UPDATE_SECURITY_ERROR", "Managed installation marker is unsafe", {
+        field: "update.installation.marker",
+        expected: "a regular marker file beside the installed executable",
+        actual: "marker is not a regular file",
+        safeNextStep: "Run self-update repair or reinstall a complete verified release.",
+      });
+    }
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
 
 interface TextOutput {
   readonly write: (chunk: string) => boolean;
@@ -75,6 +120,7 @@ export interface ProductionMainDependencies {
   readonly targetProjectResolver?: TargetProjectResolver;
   readonly updatePreflight?: PublicInvocationPreflight;
   readonly updateService?: UpdateService;
+  readonly installationService?: ProductionInstallationService;
   readonly updateChannelDefaults?: ProductionChannelCommandDefaults;
   readonly skillService?: SkillCommandService;
 }
@@ -100,6 +146,57 @@ async function embeddedBundleSelection(): Promise<TrustedBundleSelection> {
     releaseSetId: `embedded:${bundleManifestHash}`,
     releaseTag: `templates-v${bundle.manifest.version}`,
   };
+}
+
+async function activeBundleSelection(
+  channelDefaults: ProductionChannelCommandDefaults = {},
+): Promise<TrustedBundleSelection | null> {
+  // Source/test invocations must not probe or create the user's default state
+  // path. An explicit state path is the in-process test seam. For a packaged
+  // binary, the default cache is authoritative only after the executable has
+  // been enrolled by the immutable installer; an arbitrary Node application
+  // bundle must still be able to run its embedded local commands. Startup
+  // recovery has already rejected a malformed active installation before this
+  // selection point.
+  const explicitStateDirectory = channelDefaults.stateDirectory !== undefined;
+  if (!explicitStateDirectory && typeof __HARNESS_MRTOOL_VERSION__ !== "string") return null;
+  if (!explicitStateDirectory && !(await hasManagedInstallationMarker())) return null;
+  const platform = channelDefaults.platform ?? currentReleasePlatform();
+  const trustConfig = channelDefaults.trustConfig;
+  const verifier = createReleaseSetSnapshotVerifier({
+    platform,
+    ...(trustConfig === undefined ? {} : { trustConfig }),
+  });
+  const cache = new UpdateCache({
+    stateDirectory: channelDefaults.stateDirectory ?? defaultStateDirectory(),
+    verifySnapshot: verifier,
+    ...(channelDefaults.windowsAclVerifier === undefined ? {} : { windowsAclVerifier: channelDefaults.windowsAclVerifier }),
+  });
+  const active = await cache.loadLastKnownGoodOrNull();
+  if (active === null) return null;
+  const files = unpackTemplatePublicationArchive(active.templateBytes, {
+    filePaths: ["bundle-manifest.json", ...TEMPLATE_BUNDLE_PAYLOAD_PATHS],
+    limits: {
+      receiptEnvelopeBytes: MAX_SIGNED_ENVELOPE_BYTES,
+      manifestBytes: MAX_BUNDLE_MANIFEST_BYTES,
+      payloadBytes: MAX_BUNDLE_PAYLOAD_BYTES,
+      totalPayloadBytes: MAX_BUNDLE_TOTAL_PAYLOAD_BYTES,
+    },
+  });
+  const bundle = await loadTemplateBundleSnapshot(files);
+  const bundleManifestHash = sha256Utf8(`${canonicalizeJson(bundle.manifest)}\n`);
+  return Object.freeze({
+    bundle,
+    bundleManifestHash,
+    releaseSetId: active.record.releaseSetId,
+    releaseTag: `templates-v${active.record.templateVersion}`,
+  });
+}
+
+async function defaultBundleSelection(
+  channelDefaults: ProductionChannelCommandDefaults = {},
+): Promise<TrustedBundleSelection> {
+  return await activeBundleSelection(channelDefaults) ?? await embeddedBundleSelection();
 }
 
 function lazyDefaultUpdaterCommandServices(
@@ -129,19 +226,79 @@ function lazyDefaultUpdaterCommandServices(
   });
 }
 
+function lazyDefaultSkillCommandServices(
+  channelDefaults: ProductionChannelCommandDefaults = {},
+): Pick<ProductionCommandServices, "skillInstall" | "skillActivate" | "skillStatus"> {
+  let resolved: SkillCommandService | undefined;
+  function service(): SkillCommandService {
+    if (resolved === undefined) {
+      resolved = createProductionSkillCommandService({
+        ...channelDefaults,
+        cliVersion,
+        stateDirectory: channelDefaults.stateDirectory ?? defaultStateDirectory(),
+      });
+    }
+    return resolved;
+  }
+  return createSkillCommandServices({
+    install: (path, pin) => service().install(path, pin),
+    activate: (version, path, pin) => service().activate(version, path, pin),
+    status: (pin) => service().status(pin),
+  });
+}
+
+function createDefaultInstallationService(
+  channelDefaults: ProductionChannelCommandDefaults = {},
+): ProductionInstallationService {
+  return createProductionInstallationService({
+    ...channelDefaults,
+    stateDirectory: channelDefaults.stateDirectory ?? defaultStateDirectory(),
+    // In a packaged SEA, process.execPath is the installed native binary.
+    // Development invocations therefore fail closed at the canonical
+    // installation verification gate instead of mutating the Node runtime.
+    // The explicit path is an in-process composition/test seam only; it is
+    // never sourced from CLI arguments or environment variables.
+    installationDirectory: channelDefaults.installationDirectory ?? dirname(resolve(process.execPath)),
+  });
+}
+
+function lazyDefaultInstallationCommandServices(
+  channelDefaults: ProductionChannelCommandDefaults = {},
+): Pick<ProductionCommandServices, "selfUpdateRepair" | "selfUpdateApply" | "selfUpdateRollback"> {
+  let resolved: ReturnType<typeof createInstallationCommandServices> | undefined;
+  function service(): ReturnType<typeof createInstallationCommandServices> {
+    resolved ??= createInstallationCommandServices(createDefaultInstallationService(channelDefaults));
+    return resolved;
+  }
+  return Object.freeze({
+    selfUpdateRepair: (invocation) => service().selfUpdateRepair(invocation),
+    selfUpdateApply: (invocation) => service().selfUpdateApply(invocation),
+    selfUpdateRollback: (invocation) => service().selfUpdateRollback(invocation),
+  });
+}
+
 function injectedUpdaterCommandServices(
   service: UpdateService,
 ): Pick<ProductionCommandServices, "selfUpdateCheck" | "selfUpdateStatus"> {
   return createUpdaterCommandServices(service);
 }
 
+function commandUsesActiveBundle(
+  commandKind: ReturnType<typeof parseCliInvocation>["command"]["kind"],
+): boolean {
+  return !commandKind.startsWith("self-update.") && !commandKind.startsWith("skill.");
+}
+
 async function publicCommandHandlers(
   dependencies: ProductionMainDependencies,
   contextIssueIid: number | null,
+  commandKind: ReturnType<typeof parseCliInvocation>["command"]["kind"],
 ): Promise<CliCommandHandlers> {
   const cwd = dependencies.cwd ?? process.cwd();
   const currentBundle = dependencies.loadCurrentBundle === undefined
-    ? await embeddedBundleSelection()
+    ? commandUsesActiveBundle(commandKind)
+      ? await defaultBundleSelection(dependencies.updateChannelDefaults)
+      : await embeddedBundleSelection()
     : await dependencies.loadCurrentBundle();
   const local = createLocalCommandHandlers({
     cliVersion,
@@ -172,8 +329,11 @@ async function publicCommandHandlers(
       ...(dependencies.updateService === undefined
         ? lazyDefaultUpdaterCommandServices(dependencies.updateChannelDefaults)
         : injectedUpdaterCommandServices(dependencies.updateService)),
+      ...(dependencies.installationService === undefined
+        ? lazyDefaultInstallationCommandServices(dependencies.updateChannelDefaults)
+        : createInstallationCommandServices(dependencies.installationService)),
       ...(dependencies.skillService === undefined
-        ? {}
+        ? lazyDefaultSkillCommandServices(dependencies.updateChannelDefaults)
         : createSkillCommandServices(dependencies.skillService)),
       ...createManualCommandServices({
         cliVersion,
@@ -323,6 +483,29 @@ async function executeCliText(
   }
 }
 
+async function recoverInstallationBeforePublicInvocation(
+  dependencies: ProductionMainDependencies,
+  commandKind: Awaited<ReturnType<typeof parseCliInvocation>>["command"]["kind"],
+): Promise<void> {
+  // The explicit repair command owns its single recovery call. All other
+  // public commands must recover a durable handoff before ordinary work.
+  if (commandKind === "self-update.repair") return;
+  if (dependencies.installationService === undefined && typeof __HARNESS_MRTOOL_VERSION__ === "string" &&
+      !(await hasManagedInstallationMarker())) {
+    // A packaged application can be executed for its immutable self-test or
+    // local read-only commands before the installer has enrolled its canonical
+    // executable. Do not construct the default installation service (which
+    // resolves the native platform and state root) in that phase.
+    return;
+  }
+  const service = dependencies.installationService ?? (
+    typeof __HARNESS_MRTOOL_VERSION__ === "string"
+      ? createDefaultInstallationService(dependencies.updateChannelDefaults)
+      : undefined
+  );
+  await service?.recover();
+}
+
 export async function runProductionMain(
   arguments_: readonly string[],
   dependencies: ProductionMainDependencies = {},
@@ -382,9 +565,22 @@ export async function runProductionMain(
     }
   }
 
+  try {
+    const parsed = parseCliInvocation(sanitizedArguments);
+    await recoverInstallationBeforePublicInvocation(dependencies, parsed.command.kind);
+  } catch (error) {
+    if (requestsJsonOutput(sanitizedArguments)) {
+      return (await new CliJsonOutput(
+        { cliVersion },
+        jsonOutputSink(stdout),
+      ).failure(error)).exitCode;
+    }
+    return textFailure(error, stderr);
+  }
+
   let handlers: CliCommandHandlers;
   try {
-    handlers = await publicCommandHandlers(dependencies, invocation.contextIssueIid);
+    handlers = await publicCommandHandlers(dependencies, invocation.contextIssueIid, parseCliInvocation(sanitizedArguments).command.kind);
   } catch {
     if (requestsJsonOutput(sanitizedArguments)) {
       return (await new CliJsonOutput(

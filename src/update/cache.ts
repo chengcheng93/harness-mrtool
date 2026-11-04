@@ -80,7 +80,7 @@ const SNAPSHOT_FIELDS = ["record", "cliBytes", "templateBytes", "receiptBytes"] 
 const RELEASE_FILES = [CLI_NAME, TEMPLATE_NAME, RECEIPT_NAME] as const;
 const SORTED_RELEASE_FILES = [...RELEASE_FILES].sort();
 const MAX_POLICY_ITEMS = 1_024;
-const READ_ONLY_FLAGS = constants.O_RDONLY | ((constants as { readonly O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0);
+const READ_ONLY_FLAGS = constants.O_RDONLY | (process.platform === "win32" ? 0 : ((constants as { readonly O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0));
 const verifiedSecurityViews = new WeakSet<object>();
 
 
@@ -391,6 +391,10 @@ async function ignoreUnsupportedDirectorySync(handle: Awaited<ReturnType<typeof 
 
 
 async function syncDirectory(path: string): Promise<void> {
+  // Windows has no portable fsync-able directory handle through Node.
+  // File contents are flushed before rename; do not turn a valid state commit
+  // into a platform-specific failure while reopening the directory.
+  if (process.platform === "win32") return;
   let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
     handle = await open(path, "r");

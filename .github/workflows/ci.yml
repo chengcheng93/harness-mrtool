@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, feature/production-composition]
+    branches: [main, feature/production-composition, codex/release-closure-20260918]
   pull_request:
   workflow_dispatch:
 
@@ -23,7 +23,7 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - name: Run the portable suite without Windows-only SEA smoke tests
-        run: npm test -- --test-concurrency=1 $(find test -name '*.test.ts' ! -path 'test/contract/sea-smoke.test.ts' -print)
+        run: npm test -- --test-concurrency=1 --test-reporter=./scripts/ci-test-progress-reporter.mjs $(find test -name '*.test.ts' ! -path 'test/contract/sea-smoke.test.ts' -print)
       - run: npm test -- test/contract/release-assets.test.ts test/integration/installer.test.ts
       - name: Check the portable installer syntax
         run: bash -n scripts/install.sh
@@ -44,12 +44,16 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   windows-sea:
-    name: Windows SEA gate
+    name: Windows SEA gate (group ${{ matrix.group }})
     runs-on: windows-latest
-    # The serial native/ACL suite hit both 30-minute and 60-minute budgets in
-    # runs35189643169 and35306200784. Keep every test and serial isolation;
-    # cancellation is never a pass.
-    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        # Keep each Node test process serial for native/ACL isolation, but split
+        # the complete inventory across independent runners so one 90-minute
+        # aggregate process cannot hide a file-level stall.
+        group: [0, 1, 2, 3]
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -62,11 +66,19 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build:sea
-      - name: Run Windows durability smoke tests
-        run: npm test -- --test-concurrency=1 --test-name-pattern="Windows publisher flushes once|default Windows ACL adapter secures" test/integration/windows-write-through-move.test.ts test/unit/context-store.test.ts
-      - name: Run the complete serial Windows suite with safe live progress
-        run: npm test -- --test-concurrency=1 --test-reporter=./scripts/ci-test-progress-reporter.mjs
+      - name: Run Windows durability smoke tests with bounded diagnostics
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP ("harness-mrtool-windows-smoke-{0}-{1}.log" -f $env:GITHUB_RUN_ID, $env:GITHUB_RUN_ATTEMPT)
+          $status = 0
+          npm test -- --test-concurrency=1 --test-name-pattern="Windows publisher flushes once|default Windows ACL adapter secures" test/integration/windows-write-through-move.test.ts test/unit/context-store.test.ts *> $log
+          if ($LASTEXITCODE -ne 0) { $status = $LASTEXITCODE }
+          if ($status -ne 0) { node scripts/report-test-failures.mjs $log $status 2>$null }
+          exit $status
+      - name: Run one complete-inventory serial Windows suite group with safe live progress
+        run: node scripts/windows-suite-group.mjs --group ${{ matrix.group }} --groups 4
       - name: Check PowerShell installer syntax
+        if: matrix.group == 0
         shell: pwsh
         run: |
           $files = @(Get-ChildItem scripts -Filter *.ps1 | Select-Object -ExpandProperty FullName)
@@ -79,13 +91,16 @@ jobs:
               exit 1
             }
           }
-      - shell: pwsh
+      - if: matrix.group == 0
+        shell: pwsh
         run: .\dist\harness-mrtool.exe self-test --output json
       - name: Record verified development executable hash
+        if: matrix.group == 0
         shell: pwsh
         run: |
           (Get-FileHash .\dist\harness-mrtool.exe -Algorithm SHA256).Hash.ToLowerInvariant() | Set-Content .\dist\harness-mrtool.exe.sha256 -NoNewline
       - name: Upload verified development SEA artifact
+        if: matrix.group == 0
         uses: actions/upload-artifact@v4
         with:
           name: harness-mrtool-dev-${{ github.run_id }}-${{ github.run_attempt }}

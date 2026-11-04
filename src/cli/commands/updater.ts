@@ -2,6 +2,7 @@ import type { CliCommandExecution } from "../execute.ts";
 import type { CliInvocation } from "../program.ts";
 import type { ProductionCommandHandler } from "./production.ts";
 import type { UpdatePreflightResult, UpdateService } from "../../update/service.ts";
+import type { InstallationResult, ProductionInstallationService } from "../../update/managed-installation-types.ts";
 
 function execution(command: "self-update.check" | "self-update.status", value: UpdatePreflightResult): CliCommandExecution {
   return {
@@ -41,6 +42,93 @@ function requireCommand(
   kind: "self-update.check" | "self-update.status",
 ): void {
   if (invocation.command.kind !== kind) throw new TypeError("Updater command invocation is invalid");
+}
+
+function repairExecution(): CliCommandExecution {
+  return {
+    context: {
+      update: {
+        checked: true,
+        reachable: null,
+        usingLastKnownGood: false,
+        latestVersionConfirmed: false,
+        warning: null,
+        securityAnomaly: false,
+        activationRequired: false,
+        hostRefreshMayBeRequired: false,
+        persistencePending: false,
+        executedVersion: "unknown",
+        installedVersion: "unknown",
+      },
+    },
+    output: { data: { command: "self-update.repair", status: "repaired" } },
+  };
+}
+
+function installationExecution(command: "self-update.apply" | "self-update.rollback", result: InstallationResult): CliCommandExecution {
+  const pending = result.status === "persistence-pending";
+  const active = pending ? null : result.active;
+  const executing = pending ? result.executing : null;
+  return {
+    context: {
+      update: {
+        checked: true,
+        reachable: true,
+        usingLastKnownGood: active !== null,
+        latestVersionConfirmed: true,
+        warning: pending
+          ? "The signed release executed, but canonical persistence is pending and must be repaired before it is reported installed."
+          : null,
+        securityAnomaly: false,
+        activationRequired: false,
+        hostRefreshMayBeRequired: false,
+        persistencePending: pending,
+        executedVersion: "unknown",
+        installedVersion: active?.cliVersion ?? "unknown",
+      },
+    },
+    output: {
+      data: {
+        command,
+        status: result.status,
+        persistencePending: pending,
+        ...(active === null ? {executingVersion: executing!.cliVersion} : {
+          cliVersion: active.cliVersion,
+          releaseSetId: active.releaseSetId,
+          manifestSequence: active.manifestSequence,
+        }),
+      },
+    },
+  };
+}
+
+export function createInstallationCommandServices(
+  service: ProductionInstallationService,
+): {
+  readonly selfUpdateApply: ProductionCommandHandler;
+  readonly selfUpdateRollback: ProductionCommandHandler;
+  readonly selfUpdateRepair: ProductionCommandHandler;
+} {
+  if (service === null || typeof service !== "object" ||
+      typeof service.apply !== "function" || typeof service.rollback !== "function" ||
+      typeof service.recover !== "function") {
+    throw new TypeError("Installation service is invalid");
+  }
+  return Object.freeze({
+    selfUpdateApply: async (invocation: CliInvocation): Promise<CliCommandExecution> => {
+      if (invocation.command.kind !== "self-update.apply") throw new TypeError("Installation command invocation is invalid");
+      return installationExecution("self-update.apply", await service.apply(false));
+    },
+    selfUpdateRollback: async (invocation: CliInvocation): Promise<CliCommandExecution> => {
+      if (invocation.command.kind !== "self-update.rollback") throw new TypeError("Installation command invocation is invalid");
+      return installationExecution("self-update.rollback", await service.rollback(invocation.command.version));
+    },
+    selfUpdateRepair: async (invocation: CliInvocation): Promise<CliCommandExecution> => {
+      if (invocation.command.kind !== "self-update.repair") throw new TypeError("Installation command invocation is invalid");
+      await service.recover();
+      return repairExecution();
+    },
+  });
 }
 
 export function createUpdaterCommandServices(

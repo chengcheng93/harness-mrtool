@@ -105,6 +105,7 @@ test("component and channel workflows refuse unsigned or unverified publication"
   const template = await readFile(join(workflowDirectory, "release-template.yml"), "utf8");
   const skill = await readFile(join(workflowDirectory, "release-skill.yml"), "utf8");
   const channel = await readFile(join(workflowDirectory, "publish-channel.yml"), "utf8");
+  const channelVerifier = await readFile(join(import.meta.dirname, "../../scripts/verify-channel-release-inputs.mjs"), "utf8");
   for (const source of [template, skill]) {
     assert.match(source, /BUNDLE_RECEIPT_B64|RECEIPT_B64/u);
     assert.match(source, /--draft/u);
@@ -115,6 +116,15 @@ test("component and channel workflows refuse unsigned or unverified publication"
   assert.match(channel, /gh release view/u);
   assert.match(channel, /isImmutable/u);
   assert.match(channel, /CHANNEL_ENVELOPE_B64/u);
+  assert.match(channel, /verify-channel-release-inputs\.mjs/u);
+  assert.match(channel, /--windows-archive/u);
+  assert.match(channel, /--darwin-archive/u);
+  assert.match(channelVerifier, /verifyChannelEnvelope/u);
+  assert.match(channelVerifier, /manifest\.components\.cli\.tag/u);
+  assert.match(channelVerifier, /manifest\.components\.templates\.tag/u);
+  assert.match(channelVerifier, /manifest\.components\.skill\.tag/u);
+  assert.match(channelVerifier, /manifest\.releaseSet\.cli/u);
+  assert.match(channelVerifier, /manifest\.releaseSet\.templates/u);
   assert.match(channel, /--draft/u);
   assert.match(template, /attestations:\s*write/u);
   assert.match(skill, /attestations:\s*write/u);
@@ -130,6 +140,8 @@ test("component and channel workflows refuse unsigned or unverified publication"
   assert.match(skill, /cmp --silent "\$SKILL_DIST\/skill-bundle\/SHA256SUMS" draft-skill\/SHA256SUMS/u);
   assert.match(skill, /package-skill-archive\.mjs/u);
   assert.match(channel, /harness-mr-skill\.zip/u);
+  assert.match(channel, /harness-mrtool-darwin-arm64\.zip/u);
+  assert.match(channel, /platform:\s*'darwin-arm64'/u);
   assert.match(channel, /--target[\s\S]*GITHUB_SHA/u);
   assert.match(channel, /cmp --silent dist\/channel\/stable\.envelope\.json draft-channel\/stable\.envelope\.json/u);
   assert.match(template, /TEMPLATE_DIST/u);

@@ -119,11 +119,14 @@ function contextInputError(reason: string, field = "contextId"): ToolError<"INPU
   });
 }
 
-function internalError(reason: string): ToolError<"INTERNAL_ERROR"> {
+function internalError(reason: string, diagnostic?: string): ToolError<"INTERNAL_ERROR"> {
+  const actual = diagnostic !== undefined && /^(?:windows-helper|windows-lock-helper|native-store|native-readiness|managed-installation|update-state|installation-journal):[a-z-]{1,32}$/u.test(diagnostic)
+    ? diagnostic
+    : "local context state is unavailable";
   return new ToolError("INTERNAL_ERROR", reason, {
     field: null,
     expected: "a locked, valid, private candidate context store",
-    actual: "local context state is unavailable",
+    actual,
     safeNextStep: "Retry the command; inspect the quarantined state file if the problem persists.",
   });
 }
@@ -377,7 +380,8 @@ export class CandidateContextStore {
   }
 
   private sameFileIdentity(left: BigIntStats, right: BigIntStats): boolean {
-    return left.dev === right.dev && left.ino === right.ino;
+    return left.ino > 0n && right.ino > 0n && left.ino === right.ino &&
+      (process.platform === "win32" || left.dev === right.dev);
   }
 
   private async readLockOwnerAt(lockPath: string): Promise<LockOwnerRead> {
@@ -395,7 +399,7 @@ export class CandidateContextStore {
     let handle: FileHandle | undefined;
     let result: LockOwnerRead = { kind: "unsafe" };
     try {
-      handle = await open(ownerPath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+      handle = await open(ownerPath, constants.O_RDONLY | (process.platform === "win32" ? 0 : (constants.O_NOFOLLOW ?? 0)));
       await this.faultInjector?.hit("after-lock-owner-open");
       const before = await handle.stat({ bigint: true });
       if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n ||
@@ -414,7 +418,7 @@ export class CandidateContextStore {
         const after = await handle.stat({ bigint: true });
         const pathAfter = await lstat(ownerPath, { bigint: true });
         if (offset !== expectedSize || after.size !== before.size || after.nlink !== 1n ||
-            after.mtimeNs !== before.mtimeNs || after.ctimeNs !== before.ctimeNs ||
+            (process.platform !== "win32" && (after.mtimeNs !== before.mtimeNs || after.ctimeNs !== before.ctimeNs)) ||
             !this.sameFileIdentity(before, after) || pathAfter.isSymbolicLink() ||
             pathAfter.nlink !== 1n || !this.sameFileIdentity(before, pathAfter)) {
           result = { kind: "unsafe" };
@@ -517,12 +521,19 @@ export class CandidateContextStore {
           !/^[A-Za-z0-9:._-]{1,128}$/u.test(identity.startKey)) {
         throw new Error("invalid process identity");
       }
+    } catch {
+      throw internalError("Candidate context process identity is unavailable", "native-store:process-identity");
+    }
+    try {
       processLock = await this.processLockProvider.acquire(this.processLockPath, this.lockTimeoutMs);
     } catch (error) {
       if (error instanceof ProcessLockError && error.reason === "timeout") {
-        throw internalError("Candidate context lock timed out");
+        throw internalError("Candidate context lock timed out", "native-store:process-lock-timeout");
       }
-      throw internalError("Candidate context process lock is unavailable");
+      const diagnostic = error instanceof ProcessLockError
+        ? error.diagnostic ?? `native-store:process-lock-${error.reason}`
+        : "native-store:process-lock-exception";
+      throw internalError("Candidate context process lock is unavailable", diagnostic);
     }
     let leaseCreated = false;
     try {

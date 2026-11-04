@@ -1,5 +1,6 @@
 import { ToolError } from "../contracts/errors.ts";
 import { defaultStateDirectory, type WindowsAclVerifier } from "../platform/state-path.ts";
+import type { ProcessLockLease } from "../platform/process-lock.ts";
 import { createTrustState, updateSecurityError } from "./envelope.ts";
 import { checkStableChannel, type ChannelHttpTransport } from "./http.ts";
 import { verifyChannelEnvelope, type VerifiedChannelManifest } from "./manifest.ts";
@@ -29,7 +30,7 @@ export interface ProductionChannelCheckResult {
 }
 
 export interface ProductionChannelClient {
-  readonly check: (force: boolean) => Promise<ProductionChannelCheckResult>;
+  readonly check: (force: boolean, lease?: ProcessLockLease) => Promise<ProductionChannelCheckResult>;
 }
 
 function noAcceptedChannel(): ToolError<"UPDATE_REQUIRED"> {
@@ -75,10 +76,10 @@ export function createProductionChannelClient(
   }
 
   return Object.freeze({
-    async check(force: boolean): Promise<ProductionChannelCheckResult> {
+    async check(force: boolean, lease?: ProcessLockLease): Promise<ProductionChannelCheckResult> {
       if (typeof force !== "boolean") throw new TypeError("Update force flag is invalid");
       const persistent = stateStore();
-      const stored = await persistent.load();
+      const stored = await persistent.load(lease);
       const checked = await checkStableChannel({
         url: channelUrl,
         validators: stored?.validators ?? { etag: null, lastModified: null },
@@ -91,7 +92,7 @@ export function createProductionChannelClient(
       if (checked.kind === "unavailable") {
         // Another process may have advanced trust during this request. Do not
         // return a stale snapshot, or treat persisted validators as a signature.
-        const current = await persistent.load();
+        const current = await persistent.load(lease);
         if (current === null || current.trustState.acceptedChannelEnvelope === null) {
           throw noAcceptedChannel();
         }
@@ -112,7 +113,7 @@ export function createProductionChannelClient(
       // Also save on 304: refresh validators only after authenticating the cached
       // envelope, and let the real store reject any concurrent trust regression.
       // No success result escapes a failed durable publication.
-      await persistent.save({ trustState: verified.nextTrustState, validators: checked.validators });
+      await persistent.save({ trustState: verified.nextTrustState, validators: checked.validators }, lease);
       return Object.freeze({ verified, latestVersionConfirmed: true, reachable: true });
     },
   });

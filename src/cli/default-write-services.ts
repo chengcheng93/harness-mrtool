@@ -10,7 +10,6 @@ import type { Candidate } from "../context/types.ts";
 import { canonicalizeJson, sha256Utf8, copyJsonValue, type JsonObject } from "../contracts/jcs.ts";
 import { ToolError } from "../contracts/errors.ts";
 import { GitLabMergeRequestRemote } from "../gitlab/mr-remote.ts";
-import type { GitLabMergeRequest } from "../gitlab/types.ts";
 import { normalizeAndValidateRequest } from "../input/normalize.ts";
 import { defaultStateDirectory } from "../platform/state-path.ts";
 import { VerificationReceiptStore } from "../platform/verification-receipt-store.ts";
@@ -43,62 +42,6 @@ function candidatesMatch(snapshot: ExternalContextSnapshot, candidates: readonly
       user.username === candidate.username && user.displayName === candidate.displayName));
 }
 
-export function mergeExternalContextSnapshot(
-  base: ExternalContextSnapshot,
-  mr: GitLabMergeRequest,
-): ExternalContextSnapshot | null {
-  if (mr.targetProjectId !== base.targetProject.id ||
-      mr.sourceProjectId !== base.sourceProject.id ||
-      mr.sha !== base.sourceHeadSha ||
-      mr.assignees.length > 1) {
-    return null;
-  }
-
-  const labelsByName = new Map<string, string[]>();
-  for (const label of base.labelCandidates) {
-    const values = labelsByName.get(label.name) ?? [];
-    values.push(label.id);
-    labelsByName.set(label.name, values);
-  }
-  const labelIds: string[] = [];
-  for (const label of mr.labels) {
-    const matches = labelsByName.get(label.name);
-    if (matches === undefined || matches.length !== 1) return null;
-    labelIds.push(matches[0]!);
-  }
-  if (new Set(labelIds).size !== labelIds.length) return null;
-
-  const users = new Map(base.userCandidates.map((user) => [user.id, user] as const));
-  for (const user of [mr.author, ...mr.assignees, ...mr.reviewers]) {
-    const candidate = users.get(user.id);
-    if (candidate === undefined || candidate.username !== user.username || candidate.displayName !== user.displayName) {
-      return null;
-    }
-  }
-
-  const lifecycle = mr.state === "merged" ? "merged"
-    : mr.state === "closed" || mr.state === "locked" ? "closed"
-    : mr.draft ? "draft" : "ready";
-  const next = {
-    ...base,
-    metadataRead: { status: "available" as const, evidence: "GitLab MR metadata read completed." },
-    ci: { status: mr.pipelineStatus },
-    mergeRequest: {
-      iid: mr.iid,
-      authorUserId: mr.author.id,
-      lifecycle,
-      labelIds: Object.freeze([...labelIds].sort()),
-      assigneeUserId: mr.assignees[0]?.id ?? null,
-      reviewerUserIds: Object.freeze(mr.reviewers.map((user) => user.id).sort()),
-    },
-  };
-  try {
-    return validateExternalContextSnapshot(next);
-  } catch {
-    return null;
-  }
-}
-
 /** Lazy command-scoped composition: read-only commands never initialize write resources. */
 export function createDefaultWriteServices(
   dependencies: DefaultWriteDependencies,
@@ -120,7 +63,7 @@ export function createDefaultWriteServices(
       stateDirectory: options.stateDirectory ?? defaultStateDirectory(),
       ...(options.windowsAclVerifier === undefined ? {} : { windowsAclVerifier: options.windowsAclVerifier }),
     });
-    const historical = createDefaultHistoricalBundleLoader(currentBundle, { ...options.historicalBundleDefaults, stateDirectory: options.stateDirectory });
+    const historical = createDefaultHistoricalBundleLoader(currentBundle, { ...options.historicalBundleDefaults, stateDirectory: options.stateDirectory, ...(options.windowsAclVerifier === undefined ? {} : { windowsAclVerifier: options.windowsAclVerifier }) });
     const mrIid = command.kind === "create" ? null : command.iid;
     if (command.kind !== "create" && mrIid === null) throw new ToolError("INPUT_ERROR", "An MR IID is required", {
       field: "iid", expected: "a resolved MR IID", actual: null, safeNextStep: "Specify the merge request IID and retry.",
@@ -145,19 +88,10 @@ export function createDefaultWriteServices(
       diff: planned.labelDiff, binding: snapshot, inventory: snapshot.labelCandidates,
       intent: request.intent, options: labelOptionsForProductionInvocation(invocation),
     });
-    let latestSnapshot = snapshot;
 
     let mutationStarted = false;
-    let preMutationValidationDone = false;
-    let postMutationValidationDone = false;
     // Re-discover immediately before writing, rather than trusting a captured SHA tuple.
     async function fresh() {
-      if (mutationStarted && postMutationValidationDone) {
-        return { ...live, snapshot: latestSnapshot };
-      }
-      if (!mutationStarted && preMutationValidationDone) {
-        return { ...live, snapshot: latestSnapshot };
-      }
       const git = planned.options.git;
       const url = new URL(planned.options.gitlabOrigin);
       const repo = await repository.discover({ cwd: options.cwd,
@@ -166,12 +100,20 @@ export function createDefaultWriteServices(
       if (!repo.worktree.clean || repo.targetProject?.host !== url.host ||
           repo.targetProject.path !== planned.options.targetProject || repo.targetRemote !== git.targetRemote ||
           repo.sourceRemote !== git.sourceRemote || repo.sourceRemoteRef !== git.sourceRemoteRef) throw changed();
-      if (!invocation.options.dryRun) {
-        const push = await repository.planPush(repo);
+      const [pushResult, diffResult] = await Promise.allSettled([
+        invocation.options.dryRun ? Promise.resolve(null) : repository.planPush(repo),
+        repository.readChangeSet(repo),
+      ]);
+      // A failed push check must not leave a Git read using the workspace after
+      // this command returns (for example while a caller starts recovery).
+      if (pushResult.status === "rejected") throw pushResult.reason;
+      if (diffResult.status === "rejected") throw diffResult.reason;
+      const push = pushResult.value;
+      const diff = diffResult.value;
+      if (push !== null) {
         if (push.kind !== "up-to-date" || push.remote !== git.sourceRemote || push.ref !== git.sourceRemoteRef ||
             push.sourceHeadSha !== planned.labelDiff.sourceHeadSha || push.remoteSha !== planned.labelDiff.sourceHeadSha) throw changed();
       }
-      const diff = await repository.readChangeSet(repo);
       if (repo.sourceBranch !== git.sourceBranch || repo.sourceProject?.path !== git.sourceProject.path ||
           diff.sourceHeadSha !== planned.labelDiff.sourceHeadSha ||
           diff.targetRefSha !== planned.labelDiff.targetRefSha || diff.mergeBaseSha !== planned.labelDiff.mergeBaseSha ||
@@ -187,9 +129,6 @@ export function createDefaultWriteServices(
       planned.assertNoCredentialExposure(current);
       if (selection !== null && selection.ids.some((id, index) =>
         !current.labelCandidates.some((label) => label.id === id && label.name === selection.names[index]))) throw changed();
-      latestSnapshot = current;
-      if (mutationStarted) postMutationValidationDone = true;
-      else preMutationValidationDone = true;
       return value;
     }
 
@@ -219,24 +158,16 @@ export function createDefaultWriteServices(
       gitlab: planned.options.gitlab,
       targetProject: { id: snapshot.targetProject.id, fullPath: snapshot.targetProject.path },
       snapshotReader: async (mr) => {
-        if (mutationStarted && request !== null && request.intent === "draft") {
-          const merged = mergeExternalContextSnapshot(latestSnapshot, mr);
-          if (merged !== null) {
-            latestSnapshot = merged;
-            return merged;
-          }
-        }
-        const result = await reader.read({ ...planned.options, operation: "update", mrIid: mr.iid });
+        const result = await reader.read({ ...planned.options, operation: "update", mrIid: mr.iid,
+          mergeRequestRead: mr });
         planned.assertNoCredentialExposure(result.snapshot);
-        latestSnapshot = validateExternalContextSnapshot(result.snapshot);
-        return latestSnapshot;
+        return validateExternalContextSnapshot(result.snapshot);
       },
     });
     const authenticatedRemote: MergeRequestRemote = {
       ...guardedRemote(rawRemote, async () => {}),
       findOpen: async (input) => {
         const found = await rawRemote.findOpen(input);
-        if (!mutationStarted) preMutationValidationDone = false;
         if (command.kind === "create" && command.upsert && !mutationStarted && found.value.length === 1) {
           const existing = found.value[0]!;
           const pinned = await loadMrBundle({ current: { iid: existing.iid,

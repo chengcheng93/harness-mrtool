@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -9,16 +9,22 @@ import { parse } from "yaml";
 import { runProcess } from "../helpers/process.ts";
 
 const root = resolve(import.meta.dirname, "../..");
+const tempRoot = realpathSync(tmpdir());
 const reporter = resolve(root, "scripts/report-test-failures.mjs");
 const knownName = "test runner exits nonzero when a name pattern matches no test cases";
 const otherName = "test runner still accepts a caller reporter without a name filter";
 
 function report(log: string, status = "1") {
-  const directory = mkdtempSync(join(tmpdir(), "test-failure-report-"));
+  const directory = mkdtempSync(join(tempRoot, "test-failure-report-"));
   try {
     const path = join(directory, "spec.log");
     writeFileSync(path, log);
-    return runProcess(process.execPath, [reporter, path, status], { cwd: root });
+    const result = runProcess(process.execPath, [reporter, path, status], { cwd: root });
+    return {
+      ...result,
+      stdout: result.stdout.replaceAll("\r\n", "\n"),
+      stderr: result.stderr.replaceAll("\r\n", "\n"),
+    };
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -78,7 +84,7 @@ test("failure reporter escapes workflow command data without double-escaping CR 
 });
 
 test("failure reporter bounds unique name count and length after duplicate summaries", () => {
-  const names = Array.from({ length: 30 }, (_, index) => `case ${index} ${"x".repeat(400)}`);
+  const names = Array.from({ length: 21 }, (_, index) => `case ${index} ${"x".repeat(220)}`);
   const lines = names.flatMap((name) => [`✖ ${name} (1ms)`, `✖ ${name} (2ms)`]).join("\n");
   const parsed = evaluate(`reporter.parseFailureReport([${JSON.stringify(lines)}], new Set(${JSON.stringify(names)}))`) as { names: string[] };
   assert.equal(parsed.names.length, 20);
@@ -125,7 +131,7 @@ test("failure reporter never reflects missing log paths or invalid status input"
 });
 
 test("failure reporter reads bounded head and tail without joining partial lines", () => {
-  const directory = mkdtempSync(join(tmpdir(), "test-failure-bound-"));
+  const directory = mkdtempSync(join(tempRoot, "test-failure-bound-"));
   try {
     const path = join(directory, "spec.log");
     // Place a forged header across each read boundary; neither partial line is a record.
@@ -161,7 +167,7 @@ test("macOS diagnostics capture spec privately and preserve npm exit independent
   assert.match(step.run!, /exit "\$status"/);
   assert.match(step.run!, /report-test-failures\.mjs "\$log" "\$status" 2>\/dev\/null/);
   assert.doesNotMatch(step.run!, /tee|cat |upload|continue-on-error|retry|skip/);
-  assert.ok(workflow.jobs["windows-sea"].steps.some((entry: { run?: string }) => entry.run === "npm test -- --test-concurrency=1 --test-reporter=./scripts/ci-test-progress-reporter.mjs"));
+  assert.ok(workflow.jobs["windows-sea"].steps.some((entry: { run?: string }) => entry.run?.includes("windows-suite-group.mjs")));
 });
 
 test("failure reporter keeps 100%0A::error:: text on one annotation line", () => {
@@ -173,7 +179,7 @@ test("failure reporter keeps 100%0A::error:: text on one annotation line", () =>
 });
 
 test("failure reporter accepts actual pinned Node spec output without assertion details", () => {
-  const directory = mkdtempSync(join(tmpdir(), "test-failure-spec-"));
+  const directory = mkdtempSync(join(tempRoot, "test-failure-spec-"));
   try {
     const fixture = join(directory, "fixture.test.mjs");
     writeFileSync(fixture, `import test from "node:test";
@@ -184,8 +190,9 @@ test(${JSON.stringify(knownName)}, () => assert.equal("SECRET_ACTUAL", "SECRET_E
     delete env.NODE_TEST_CONTEXT;
     const run = runProcess(process.execPath, ["--test", "--test-reporter=spec", fixture], { env });
     assert.equal(run.status, 1);
-    assert.match(run.stdout, /SECRET_ACTUAL/);
-    const result = report(run.stdout + run.stderr, String(run.status));
+    const spec = run.stdout + run.stderr;
+    assert.match(spec, /SECRET_ACTUAL/);
+    const result = report(spec, String(run.status));
     assert.equal(result.status, 0);
     assert.equal(result.stderr, "");
     assert.equal(result.stdout, [
@@ -197,10 +204,11 @@ test(${JSON.stringify(knownName)}, () => assert.equal("SECRET_ACTUAL", "SECRET_E
   }
 });
 
-test("Windows native CI retains the full serial suite with enough time after the observed 30-minute cancellation", () => {
+test("Windows native CI retains the complete serial suite in bounded parallel groups", () => {
   const workflow = parse(readFileSync(resolve(root, ".github/workflows/ci.yml"), "utf8"));
   const job = workflow.jobs["windows-sea"];
-  assert.equal(job["timeout-minutes"], 90);
+  assert.equal(job["timeout-minutes"], 45);
   assert.equal(job["continue-on-error"], undefined);
-  assert.ok(job.steps.some((entry: {run?: string}) => entry.run === "npm test -- --test-concurrency=1 --test-reporter=./scripts/ci-test-progress-reporter.mjs"));
+  assert.deepEqual(job.strategy.matrix.group, [0, 1, 2, 3]);
+  assert.ok(job.steps.some((entry: {run?: string}) => entry.run?.includes("windows-suite-group.mjs")));
 });

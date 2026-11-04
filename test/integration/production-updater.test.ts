@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { resolve } from "node:path";
 import test from "node:test";
 
 import type { CliCommand } from "../../src/cli/program.ts";
@@ -111,3 +114,23 @@ test("the default production preflight accepts the pinned production trust roots
     }),
   );
 });
+
+test("default production composition routes apply to the installation coordinator", async (t) => {
+  const stateDirectory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-default-install-route-"));
+  t.after(() => rm(stateDirectory, { recursive: true, force: true }));
+  let stdout = "";
+  const exitCode = await runProductionMain(["self-update", "apply", "--output", "json"], {
+    updatePreflight: { run: async () => {} },
+    updateChannelDefaults: {
+      stateDirectory,
+      platform: "darwin-arm64",
+      windowsAclVerifier: { verify: async () => {} },
+      transport: { request: async () => ({ status: 503, headers: {}, body: new Uint8Array() }) },
+    },
+    stdout: { write: (chunk) => { stdout += chunk; return true; } },
+    stderr: { write: () => true },
+  });
+  assert.equal(exitCode, 5);
+  assert.equal(JSON.parse(stdout).code, "UPDATE_REQUIRED");
+});
+

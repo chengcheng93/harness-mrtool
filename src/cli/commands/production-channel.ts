@@ -8,8 +8,14 @@ import type { ProductionCommandHandler } from "./production.ts";
 
 /** In-process embedding/test seams only. No public flags or env can supply roots/URLs. */
 export type ProductionChannelCommandDefaults = ProductionChannelClientOptions & {
+  /** Trusted in-process asset transport seam; never taken from CLI/environment. */
+  readonly fetch?: typeof globalThis.fetch;
   /** Trusted in-process platform seam; never taken from CLI arguments/environment. */
   readonly platform?: import("../../update/release-set-verifier.ts").SupportedReleasePlatform;
+  /** Trusted in-process Skill active-path seam; never taken from CLI arguments/environment. */
+  readonly defaultActivePath?: string;
+  /** Trusted in-process managed-installation root seam; never taken from CLI arguments/environment. */
+  readonly installationDirectory?: string;
 };
 
 /** Checking is not installing: no cache pointer, executable or Skill is activated here. */

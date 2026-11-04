@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { inspect } from "node:util";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
@@ -888,7 +888,7 @@ test("discovers tokenized live candidates while keeping lifecycle labels derived
     name: "develop", commit: { id: "a".repeat(40) },
   } });
 
-  const stateRoot = await mkdtemp(resolve(tmpdir(), "hmr-gitlab-context-"));
+  const stateRoot = await mkdtemp(resolve(await realpath(tmpdir()), "hmr-gitlab-context-"));
   try {
     const bundle = await loadTemplateBundle(resolve(repositoryRoot, "template-bundle"));
     const store = new CandidateContextStore({
@@ -956,7 +956,7 @@ test("discovers tokenized live candidates while keeping lifecycle labels derived
 
 test("context is fail-closed when the live target branch moved", async () => {
   const bundle = await loadTemplateBundle(resolve(repositoryRoot, "template-bundle"));
-  const stateRoot = await mkdtemp(resolve(tmpdir(), "hmr-gitlab-context-moved-"));
+  const stateRoot = await mkdtemp(resolve(await realpath(tmpdir()), "hmr-gitlab-context-moved-"));
   try {
     const minimal = {
       origin: "https://gitlab.example.test",

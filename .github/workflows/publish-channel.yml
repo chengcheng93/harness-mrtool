@@ -22,9 +22,12 @@ on:
         required: true
         type: string
 
+concurrency:
+  group: stable-channel-pages
+  cancel-in-progress: false
+
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 jobs:
   verify-cli:
@@ -49,8 +52,8 @@ jobs:
           gh release view "$CLI_TAG" --json isDraft,isImmutable
           test "$(gh release view "$CLI_TAG" --json isDraft --jq .isDraft)" = false
           test "$(gh release view "$CLI_TAG" --json isImmutable --jq .isImmutable)" = true
-          gh release download "$CLI_TAG" --dir cli-release --pattern 'harness-mrtool-windows-x64.zip' --pattern 'bundle-receipt.envelope.json'
-          node --input-type=module -e "import {readFile} from 'node:fs/promises'; import {unzipSync} from 'fflate'; import {validateReleaseArchiveAndReceipt} from './scripts/package-portable.mjs'; validateReleaseArchiveAndReceipt(unzipSync(await readFile('cli-release/harness-mrtool-windows-x64.zip')), await readFile('cli-release/bundle-receipt.envelope.json'));"
+          gh release download "$CLI_TAG" --dir cli-release --pattern 'harness-mrtool-windows-x64.zip' --pattern 'harness-mrtool-darwin-arm64.zip' --pattern 'bundle-receipt.envelope.json'
+          node --input-type=module -e "import {readFile} from 'node:fs/promises'; import {unzipSync} from 'fflate'; import {validateReleaseArchiveAndReceipt} from './scripts/package-portable.mjs'; const receipt = await readFile('cli-release/bundle-receipt.envelope.json'); validateReleaseArchiveAndReceipt(unzipSync(await readFile('cli-release/harness-mrtool-windows-x64.zip')), receipt); validateReleaseArchiveAndReceipt(unzipSync(await readFile('cli-release/harness-mrtool-darwin-arm64.zip')), receipt, { platform: 'darwin-arm64' });"
   verify-template:
     runs-on: ubuntu-latest
     steps:
@@ -103,10 +106,33 @@ jobs:
     needs: [verify-cli, verify-template, verify-skill]
     if: ${{ inputs.channel == 'stable' }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.16.0
+      - run: npm ci --ignore-scripts
+      - name: Download the exact immutable channel input assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_TAG: ${{ inputs.cli_tag }}
+          TEMPLATE_TAG: ${{ inputs.template_tag }}
+          SKILL_TAG: ${{ inputs.skill_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p cli-release template-release skill-release
+          gh release download "$CLI_TAG" --dir cli-release \
+            --pattern 'harness-mrtool-windows-x64.zip' \
+            --pattern 'harness-mrtool-darwin-arm64.zip'
+          gh release download "$TEMPLATE_TAG" --dir template-release \
+            --pattern 'harness-mr-templates.zip'
+          gh release download "$SKILL_TAG" --dir skill-release \
+            --pattern 'harness-mr-skill.zip'
       - name: Materialize the externally signed channel envelope
         env:
           CHANNEL_ENVELOPE_B64: ${{ secrets.CHANNEL_ENVELOPE_B64 }}
@@ -119,6 +145,23 @@ jobs:
           test -s dist/channel/stable.envelope.json
           test "$(wc -c < dist/channel/stable.envelope.json)" -le 262144
           node --input-type=module -e "JSON.parse(await (await import('node:fs/promises')).readFile('dist/channel/stable.envelope.json', 'utf8'))"
+      - name: Authenticate channel and bind every input asset
+        env:
+          CLI_TAG: ${{ inputs.cli_tag }}
+          TEMPLATE_TAG: ${{ inputs.template_tag }}
+          SKILL_TAG: ${{ inputs.skill_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --import tsx/esm scripts/verify-channel-release-inputs.mjs \
+            --envelope dist/channel/stable.envelope.json \
+            --cli-tag "$CLI_TAG" \
+            --template-tag "$TEMPLATE_TAG" \
+            --skill-tag "$SKILL_TAG" \
+            --windows-archive cli-release/harness-mrtool-windows-x64.zip \
+            --darwin-archive cli-release/harness-mrtool-darwin-arm64.zip \
+            --template-archive template-release/harness-mr-templates.zip \
+            --skill-archive skill-release/harness-mr-skill.zip
       - name: Create a draft channel release after all immutable component checks
         env:
           GH_TOKEN: ${{ github.token }}
@@ -143,3 +186,26 @@ jobs:
           gh release view "stable-${GITHUB_SHA}" --json isDraft,isImmutable
           test "$(gh release view "stable-${GITHUB_SHA}" --json isDraft --jq .isDraft)" = false
           test "$(gh release view "stable-${GITHUB_SHA}" --json isImmutable --jq .isImmutable)" = true
+          mkdir "$RUNNER_TEMP/channel-pages"
+          gh release download "stable-${GITHUB_SHA}" --dir "$RUNNER_TEMP/channel-pages" --pattern 'stable.envelope.json'
+          cmp --silent dist/channel/stable.envelope.json "$RUNNER_TEMP/channel-pages/stable.envelope.json"
+      - name: Upload the verified immutable channel for Pages
+        uses: actions/upload-pages-artifact@v4
+        with:
+          name: github-pages
+          path: ${{ runner.temp }}/channel-pages
+  deploy-pages:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy the verified stable channel to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+        with:
+          artifact_name: github-pages

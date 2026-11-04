@@ -18,6 +18,7 @@ import { runProductionMain } from "../../src/production-main.ts";
 
 const root = resolve(import.meta.dirname, "../..");
 const sourceSha = "b".repeat(40), targetSha = "a".repeat(40);
+const allowTestAcl = Object.freeze({ verify: async (_path: string): Promise<void> => undefined });
 async function setup(t: test.TestContext) {
   const stateDirectory = await mkdtemp(resolve(await realpath(tmpdir()), "mrtool-default-write-"));
   t.after(() => rm(stateDirectory, { recursive: true, force: true }));
@@ -90,8 +91,8 @@ async function setup(t: test.TestContext) {
   raw.intent = "draft";
   raw.workItem = { relation: "none", noIssueReason: "A self-contained maintenance change." };
   raw.mergeRequest.labelCandidateTokens = [];
-  const contextStore = new CandidateContextStore({ stateDirectory });
-  const overrides = { stateDirectory, contextStore, repository, stdinIsTerminal: () => false,
+  const contextStore = new CandidateContextStore({ stateDirectory, windowsAclVerifier: allowTestAcl });
+  const overrides = { stateDirectory, windowsAclVerifier: allowTestAcl, contextStore, repository, stdinIsTerminal: () => false,
     inputIo: { statFile: async () => ({ size: Buffer.byteLength(JSON.stringify(raw)) }), readFile: async () => Buffer.from(JSON.stringify(raw)), stdin: { async *[Symbol.asyncIterator]() {} } },
     targetSessionResolver: { resolve: async () => ({ origin: client.origin, gitlab: client, project, identity: { host: "gitlab.example.test", path: project.fullPath }, targetRemote: "origin", assertNoCredentialExposure: () => {} }) } };
   const defaults = createProductionReadOnlyDefaults({ ...overrides, cliVersion: packageMetadata.version, cwd: root, currentBundle, contextIssueIid: null });

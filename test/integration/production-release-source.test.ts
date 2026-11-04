@@ -241,6 +241,12 @@ test("receipt uses only fixed name and templates tag, returning uninterpreted by
   assert.equal(f.calls.length, 1);
 });
 
+test("Skill receipt uses the fixed name and a skill release tag", async () => {
+  const f = fixture(() => stream().response);
+  assert.deepEqual(await f.source.downloadSkillReceipt({ repository, tag: "skill-v1.2.3" }), payload);
+  assert.match(f.calls[0]!.url, /\/skill-v1\.2\.3\/bundle-receipt\.envelope\.json$/u);
+});
+
 test("receipt enforces 256 KiB on headers and streamed bytes, with exact cap accepted", async () => {
   const input = { repository, tag: "templates-v1.2.3" };
   const full = new Uint8Array(256 * 1024);

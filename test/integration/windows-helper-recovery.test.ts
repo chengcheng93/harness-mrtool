@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { link, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { link, lstat, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import test from "node:test";
@@ -197,4 +197,25 @@ test("Windows rotation rechecks the staged handle identity immediately before re
 
   await recoverWindowsExecutable(paths);
   assert.equal(await readFile(paths.canonical, "utf8"), "old-cli");
+});
+
+test("Windows rotation can retain the marker's private mode across recovery", async (t) => {
+  const directory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-win-marker-"));
+  t.after(async () => rm(directory, { recursive: true, force: true }));
+  const paths: WindowsExecutablePaths = {
+    canonical: resolve(directory, ".harness-mrtool-install.json"),
+    staged: resolve(directory, ".harness-mrtool-install.json.new"),
+    old: resolve(directory, ".harness-mrtool-install.json.old"),
+  };
+  await writeFile(paths.canonical, "old-marker", { mode: 0o600 });
+  await writeFile(paths.staged, "new-marker", { mode: 0o600 });
+
+  await rotateWindowsExecutable(paths, { canonicalMode: 0o600 });
+  assert.equal(await readFile(paths.canonical, "utf8"), "new-marker");
+  if (process.platform !== "win32") assert.equal((await lstat(paths.canonical)).mode & 0o777, 0o600);
+
+  await assert.rejects(
+    rotateWindowsExecutable(paths, { canonicalMode: 0o600 }),
+    /ENOENT|unsafe/u,
+  );
 });

@@ -42,3 +42,30 @@ skips**. Source/artifact receipt and strict codesign verification pass; the
 original runtime's hash is unchanged. This does not qualify a Windows release
 or claim real GitLab/Skill-host acceptance. GitHub CLI authentication is absent
 in this task's environment; no CI run or new signed publication was dispatched.
+
+## Current mandatory-label candidate checkpoint — 2026-09-19
+
+The older 0.1.5 rows above remain historical evidence for that release and must
+not be reused as evidence for the current mandatory-label candidate. Fresh
+current-state evidence is:
+
+- Candidate branch `codex/release-closure-20260918`, commit `850ad97`;
+  exact Node `24.16.0`, Darwin ARM64, `TMPDIR=/private/var/tmp`.
+- Current local SEA rebuild and self-test passed; fresh serial suite returned
+  **2020 tests / 2005 passed / 0 failed / 15 skipped**. The 15 skips are
+  native-Windows-only cases on Darwin and are not counted as passes.
+- Hosted run `35476440174` for SHA
+  `850ad978c4e6650c0a4b60e70671ba40519b3d5d` completed successfully on
+  2026-09-19: Portable, secret scan, macOS ARM64 native, and Windows SEA
+  groups 0, 1, 2, and 3 all passed.
+- Public release state was rechecked on 2026-09-19: the latest formal component
+  releases remain the historical 0.1.5 CLI/Skill/Plugin assets; no current
+  0.1.6/1.1.0 formal release assets have been accepted as the candidate's
+  immutable production release.
+
+Therefore the current status remains **pending external release and real-use
+acceptance**. Missing evidence is protected signing/release authorization and
+immutable dual-platform assets, stable signed channel deployment, real native
+install/update/rollback/recovery on both platforms, current Mac Skill/Plugin
+host activation and discovery, and an authorized isolated GitLab target and
+credential mechanism for the required no-token-in-chat acceptance flow.

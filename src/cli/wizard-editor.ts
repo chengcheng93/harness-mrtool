@@ -178,7 +178,7 @@ function sameFile(left: BigIntStats, right: BigIntStats): boolean {
 
 function sameSnapshot(left: BigIntStats, right: BigIntStats): boolean {
   return sameFile(left, right) && left.size === right.size && left.nlink === right.nlink &&
-    left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
+    (process.platform === "win32" || (left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs));
 }
 
 function assertPrivateDirectory(info: BigIntStats): void {
@@ -243,7 +243,7 @@ export function createNodeWizardTempStore(
         path = resolve(directoryPath, "request.yaml");
         const handle = await open(
           path,
-          constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | (constants.O_NOFOLLOW ?? 0),
+          constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | (process.platform === "win32" ? 0 : (constants.O_NOFOLLOW ?? 0)),
           0o600,
         );
         try {
@@ -307,7 +307,7 @@ export function createNodeWizardTempStore(
         }
         const pathBefore = await lstat(record.path, { bigint: true });
         assertPrivateFile(pathBefore);
-        handle = await open(record.path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+        handle = await open(record.path, constants.O_RDONLY | (process.platform === "win32" ? 0 : (constants.O_NOFOLLOW ?? 0)));
         const opened = await handle.stat({ bigint: true });
         assertPrivateFile(opened);
         if (!sameSnapshot(pathBefore, opened)) {

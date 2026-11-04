@@ -12,12 +12,49 @@ import { ProcessLockError, systemProcessLockProvider as locks } from "../../src/
 async function fixture(t: TestContext): Promise<string> {
   // macOS /var is a symlink; exercise the real security checks with a physical path.
   const directory = await mkdtemp(join(await realpath(tmpdir()), "process-lock-"));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  if (process.platform !== "win32") {
+    t.after(() => rm(directory, { recursive: true, force: true }));
+  } else {
+    // Node test after hooks run in registration order. The fixture hook is
+    // registered before a test can register lease/child cleanup hooks, while
+    // Windows refuses to remove a directory containing a still-open helper
+    // handle. Retry asynchronously so later hooks can release those handles.
+    t.after(() => {
+      void (async () => {
+        const deadline = Date.now() + 10_000;
+        while (Date.now() < deadline) {
+          try {
+            await rm(directory, { recursive: true, force: true });
+            return;
+          } catch (error) {
+            const code = (error as NodeJS.ErrnoException).code;
+            if (code !== "EBUSY" && code !== "EPERM") return;
+            await delay(50);
+          }
+        }
+      })();
+    });
+  }
   return join(directory, "receipt lock ' $;.lock");
 }
 
 function reason(expected: ProcessLockError["reason"]): (error: unknown) => boolean {
   return (error) => error instanceof ProcessLockError && error.reason === expected;
+}
+
+async function terminateTree(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const closed = once(child, "close");
+  if (process.platform === "win32" && child.pid !== undefined) {
+    const killer = spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true });
+    await new Promise<void>((resolve) => {
+      killer.once("close", () => resolve());
+      killer.once("error", () => resolve());
+    });
+  } else {
+    child.kill("SIGKILL");
+  }
+  await Promise.race([closed, delay(2_000)]);
 }
 
 async function owner(t: TestContext, path: string, waiting = false): Promise<ChildProcess> {
@@ -26,18 +63,15 @@ async function owner(t: TestContext, path: string, waiting = false): Promise<Chi
     if (${waiting}) process.send("WAITING");
     const lease = await systemProcessLockProvider.acquire(process.argv[1], 4000);
     process.send("LOCKED");
-    process.on("message", () => process.exit(0));
+    process.on("message", async () => {
+      await lease.release();
+      process.exit(0);
+    });
   `, path], { stdio: ["ignore", "pipe", "pipe", "ipc"] });
   let stderr = "";
   child.stderr!.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
   child.stdout!.resume();
-  t.after(async () => {
-    if (child.exitCode === null && child.signalCode === null) {
-      const exited = once(child, "exit");
-      child.kill("SIGKILL");
-      await exited;
-    }
-  });
+  t.after(() => terminateTree(child));
   await new Promise<void>((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error("lock owner did not start")), 6000);
     child.once("message", (message) => {
@@ -53,6 +87,13 @@ async function owner(t: TestContext, path: string, waiting = false): Promise<Chi
   });
   return child;
 }
+
+test("Windows lock helper binds both volume serial and file index", async () => {
+  const source = await readFile(new URL("../../src/platform/process-lock.ts", import.meta.url), "utf8");
+  assert.match(source, /HMRTOOL_PROCESS_LOCK_DEV/u);
+  assert.match(source, /info\.Volume.*expectedVolume/u);
+  assert.match(source, /info\.Volume.*index.*expectedIno/u);
+});
 
 test("system lock acquires, releases idempotently, and retains the same lock inode", async (t) => {
   const path = await fixture(t);
@@ -89,14 +130,22 @@ test("system lock excludes another process, bounds contention timeout, and leave
 });
 
 for (const signal of [null, "SIGKILL"] as const) {
-  test(`system lock releases on owner ${signal ?? "normal exit"} without deleting the file`, async (t) => {
+  test(`system lock releases on owner ${signal ?? "normal exit"} after exit without awaiting owner close`, async (t) => {
     const path = await fixture(t);
     const child = await owner(t, path);
     const before = await lstat(path, { bigint: true });
     const exited = once(child, "exit");
-    if (signal === null) child.send("exit");
-    else child.kill(signal);
-    await exited;
+    if (signal === null) {
+      child.send("exit");
+      await exited;
+    } else if (process.platform === "win32") {
+      // Windows does not provide POSIX signal semantics for child.kill().
+      // Kill the owner and its PowerShell lock helper as one process tree.
+      await terminateTree(child);
+    } else {
+      child.kill(signal);
+      await exited;
+    }
     const lease = await locks.acquire(path, 3000);
     t.after(() => lease.release());
     lease.assertHeld();
@@ -203,6 +252,29 @@ if (process.platform === "darwin") {
     await exited;
     await until(() => { try { process.kill(pid, 0); return false; } catch { return true; } });
     lease.assertHeld();
+  });
+
+  test("macOS keeps a stable parent-directory fence across marker unlink and recreation", async (t) => {
+    const path = await fixture(t);
+    const lease = await locks.acquire(path, 3000);
+    t.after(() => lease.release());
+    const replacement = `${path}.old`;
+    await rename(path, replacement);
+    await writeFile(path, "replacement");
+
+    let acquired = false;
+    const waiting = locks.acquire(path, 4000).then((next) => {
+      acquired = true;
+      return next;
+    });
+    await delay(150);
+    assert.equal(acquired, false);
+
+    await lease.release();
+    const next = await waiting;
+    t.after(() => next.release());
+    next.assertHeld();
+    assert.equal(acquired, true);
   });
 
   test("macOS refuses a pathname replaced while waiting rather than returning a split lock", async (t) => {

@@ -551,6 +551,18 @@ test("Windows persistence waits for the parent and preserves the business exit o
   assert.equal(result.businessExit, 23);
   assert.equal(result.persistencePending, true);
 
+  const gated: string[] = [];
+  result = await runWindowsPersistence({
+    parentIdentity: { pid: 4242, startKey: "win:123" },
+    waitForParentExit: async (identity) => { gated.push(`wait:${identity.pid}`); },
+    parentExit: async () => { gated.push("parent"); return 7; },
+    rotate: async () => { gated.push("rotate"); },
+    commit: async () => { gated.push("commit"); },
+    isRecoverable: () => false,
+  });
+  assert.deepEqual(gated, ["wait:4242", "parent", "rotate", "commit"]);
+  assert.equal(result.businessExit, 7);
+
 
   result = await runWindowsPersistence({
     parentExit: async () => 0,

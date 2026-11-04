@@ -1,3 +1,4 @@
+import {createHash} from 'node:crypto';
 import {readdirSync} from 'node:fs';
 import {resolve,relative,sep} from 'node:path';
 
@@ -5,9 +6,23 @@ const ROOT = resolve(import.meta.dirname, '..');
 const MAX_FILES = 512;
 const MAX_LINE = 1_000_000;
 const MAX_COUNT = 1_000_000;
+const MAX_ERROR_DEPTH = 4;
+const FAILURE_TYPES = new Set([
+  'testCodeFailure', 'testTimeoutFailure', 'cancelledByParent',
+  'parentAlreadyFinished', 'testAborted', 'subtestsFailed', 'hookFailed',
+  'uncaughtException', 'unhandledRejection',
+]);
+const ERROR_CODES = new Set([
+  'ERR_TEST_FAILURE', 'ERR_ASSERTION', 'ERR_MODULE_NOT_FOUND',
+  'UPDATE_SECURITY_ERROR', 'UPDATE_REQUIRED', 'CONCURRENT_UPDATE', 'INTERNAL_ERROR', 'REPOSITORY_ERROR', 'INPUT_ERROR',
+  'ERR_UNSUPPORTED_ESM_URL_SCHEME', 'ABORT_ERR', 'ETIMEDOUT',
+  'ENOENT', 'EACCES', 'EPERM', 'EBUSY',
+]);
 
 // Only source-controlled-shaped test paths discovered in this checkout may be
-// emitted. Never include test titles, diagnostics, errors, stdout or stderr.
+// emitted. Never include test titles, messages, stacks, stdout or stderr. A
+// bounded digest of a non-sensitive test title is diagnostic-only and cannot
+// reconstruct assertion data or filesystem content.
 function testPaths(root) {
   const result = new Map();
   let scanned = 0;
@@ -36,6 +51,55 @@ function counts(data) {
   return fields.map(key => `${key}=${c[key]}`).join(' ');
 }
 
+function safeTestDigest(data) {
+  const name = ownValue(data, 'name');
+  if (typeof name !== 'string' ||
+      !/^[A-Za-z0-9][A-Za-z0-9 .,:()_/'-]{0,191}$/u.test(name)) {
+    return '';
+  }
+  return ` testDigest=${createHash('sha256').update(name, 'utf8').digest('hex').slice(0, 16)}`;
+}
+
+// Error metadata is untrusted: do not invoke getters or coerce values.
+function ownValue(value, key) {
+  if (value === null || typeof value !== 'object') return undefined;
+  try { return Object.getOwnPropertyDescriptor(value, key)?.value; }
+  catch { return undefined; }
+}
+function failureDetails(data) {
+  let error = ownValue(ownValue(data, 'details'), 'error');
+  let failureType;
+  let code;
+  let diagnostic;
+  for (let depth = 0; depth < MAX_ERROR_DEPTH && error !== undefined; depth++) {
+    const type = ownValue(error, 'failureType');
+    if (failureType === undefined && FAILURE_TYPES.has(type)) failureType = type;
+    const candidate = ownValue(error, 'code');
+    // Prefer the first specific cause code over Node's generic failure wrapper.
+    if (ERROR_CODES.has(candidate) && (code === undefined || code === 'ERR_TEST_FAILURE')) code = candidate;
+    const nestedDetails = ownValue(error, 'details');
+    const directActual = ownValue(nestedDetails, 'actual');
+    const assertedActual = ownValue(error, 'actual');
+    const assertedDetails = ownValue(assertedActual, 'details');
+    const actual = typeof directActual === 'string' ? directActual : ownValue(assertedDetails, 'actual');
+    const reason = ownValue(error, 'reason');
+    const helperDiagnostic = ownValue(error, 'diagnostic') ?? ownValue(assertedActual, 'diagnostic');
+    if (diagnostic === undefined && typeof actual === 'string' && /^(?:windows-helper|native-store|native-readiness|managed-installation|update-state|installation-journal|application-bundle):[a-z0-9-]{1,32}$/u.test(actual)) {
+      diagnostic = actual;
+    }
+    if (diagnostic === undefined && typeof helperDiagnostic === 'string' && /^windows-lock-helper:[a-z-]{1,32}$/u.test(helperDiagnostic)) {
+      diagnostic = helperDiagnostic;
+    }
+    if (diagnostic === undefined && typeof reason === 'string' && /^(?:timeout|unsafe|unavailable)$/u.test(reason)) {
+      diagnostic = `process-lock:${reason}`;
+    }
+    error = ownValue(error, 'cause');
+  }
+  return (failureType === undefined ? '' : ` failureType=${failureType}`)
+    + (code === undefined ? '' : ` code=${code}`)
+    + (diagnostic === undefined ? '' : ` diagnostic=${diagnostic}`);
+}
+
 /** Streaming CI diagnostics only. Node's test runner retains exit-code authority. */
 export function createProgressReporter(root = ROOT) {
   const paths = testPaths(resolve(root));
@@ -53,7 +117,7 @@ export function createProgressReporter(root = ROOT) {
       } else if (event?.type === 'test:fail' && path !== undefined && !failed.has(path)) {
         failed.add(path);
         const line = Number.isSafeInteger(data.line) && data.line > 0 && data.line <= MAX_LINE ? ` line=${data.line}` : '';
-        yield `::error::Native suite FAIL ${path}${line}\n`;
+        yield `::error::Native suite FAIL ${path}${line}${safeTestDigest(data)}${failureDetails(data)}\n`;
       } else if (event?.type === 'test:summary') {
         const summary = counts(data);
         if (summary === null) continue;

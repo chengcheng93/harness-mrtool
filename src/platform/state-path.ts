@@ -65,7 +65,7 @@ function powershellSingleQuoted(value: string): string {
 
 
 
-export function resolveWindowsPowerShellPath(environment: NodeJS.ProcessEnv = process.env): string {
+function resolveWindowsSystemDirectory(environment: NodeJS.ProcessEnv): string {
   const systemRoot = environment.SystemRoot;
   if (systemRoot === undefined ||
       !/^[A-Za-z]:\\[^\\/:*?"<>|]+(?:\\[^\\/:*?"<>|]+)*$/u.test(systemRoot) ||
@@ -73,7 +73,15 @@ export function resolveWindowsPowerShellPath(environment: NodeJS.ProcessEnv = pr
       !win32.isAbsolute(systemRoot)) {
     throw stateError("SystemRoot is unavailable or untrusted");
   }
-  return win32.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  return win32.join(systemRoot, "System32");
+}
+
+export function resolveWindowsPowerShellPath(environment: NodeJS.ProcessEnv = process.env): string {
+  return win32.join(resolveWindowsSystemDirectory(environment), "WindowsPowerShell", "v1.0", "powershell.exe");
+}
+
+export function resolveWindowsIcaclsPath(environment: NodeJS.ProcessEnv = process.env): string {
+  return win32.join(resolveWindowsSystemDirectory(environment), "icacls.exe");
 }
 
 
@@ -94,8 +102,8 @@ export const systemWindowsAclVerifier: WindowsAclVerifier = {
       "$allow = [System.Security.AccessControl.AccessControlType]::Allow",
       "$rights = [System.Security.AccessControl.FileSystemRights]::FullControl",
       "$currentValue = $current.Value",
-      "$args = @($path, '/inheritance:r', '/grant:r', \"*$currentValue`:(OI)(CI)(F)\", '*S-1-5-18:(OI)(CI)(F)', '*S-1-5-32-544:(OI)(CI)(F)')",
-      "& icacls.exe @args | Out-Null",
+      "$aclArguments = @($path, '/inheritance:r', '/grant:r', \"*$currentValue`:(OI)(CI)(F)\", '*S-1-5-18:(OI)(CI)(F)', '*S-1-5-32-544:(OI)(CI)(F)')",
+      `& ${powershellSingleQuoted(resolveWindowsIcaclsPath())} @aclArguments | Out-Null`,
       "if ($LASTEXITCODE -ne 0) { exit 24 }",
       "$acl = Get-Acl -LiteralPath $path",
       "$allowed = @($current.Value, $tokenOwner.Value, $system.Value, $admins.Value)",
@@ -117,7 +125,9 @@ export const systemWindowsAclVerifier: WindowsAclVerifier = {
       await execFileAsync(
         resolveWindowsPowerShellPath(),
         ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
-        { windowsHide: true, timeout: 5_000, encoding: "utf8" },
+        { windowsHide: true, timeout: 5_000, encoding: "utf8",
+          // PowerShell otherwise treats .exe files as documents when PATHEXT is absent.
+          env: { ...process.env, PATHEXT: ".EXE" } },
       );
     } catch (error) {
       const code = typeof error === "object" && error !== null && "code" in error

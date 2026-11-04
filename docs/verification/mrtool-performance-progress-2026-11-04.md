@@ -298,7 +298,7 @@ request.intent === "draft"
 - 事务层的字段一致性、结构和身份检查。
 - 标签实际增加 / 删除。
 - 描述渲染、写入与验证回执相关流程。
-- Ready 的 CI、review、讨论状态检查所依赖的完整快照读取。
+- Ready / Verify 所依赖的完整快照读取。Ready 切换检查标签唯一性和合格 reviewer 数量；CI、审批、讨论状态属于 verify --level merge 的检查。
 - 失败后的恢复、补偿和审计流程。
 
 因此这是一轮“消除多层重复发现”的实现，尚未把完整提交事务压缩为一次请求。
@@ -628,3 +628,114 @@ git log -1 --oneline
 git show --stat HEAD
 git status --short
 ```
+
+
+## 15. 本轮修复目标与验收标准
+
+完成 harness-mrtool 的 MR 提交性能修复并交付可复核的本机版本，按以下目标和验收条件逐项完成：
+
+1. 基线与改动隔离：刷新 GitHub 远端；以 codex/release-closure-20260918 的 0.1.7 候选（704a9dd）为基线建立本地 codex/mr-submit-performance-fix，移入 ebf9fc9 的必要工作；保留原分支，记录基线、差异和最终工作区状态，避免丢失 175 个发布候选提交。
+
+2. 修复写前新鲜度回归：去除跨异步步骤复用的前置/后置校验缓存。每次 MR mutation 前重新发现仓库、校验远端源 SHA、规范化 diff 和候选身份。覆盖首次写前、候选消费后、首次写后及后续写入时的 HEAD/diff/工作区/远端变化；Draft 与 Ready 都必须拒绝过期输入，并准确返回未写入或部分写入状态。
+
+3. 修复 Draft 快照过期：去除沿用旧 labelCandidates/userCandidates/review/Issue 的合成路径。每次独立 MR 前读/后读仍读取实时标签、成员资格、Issue、review、项目及目标分支；新增同名未应用标签、标签同名重建、人员身份或资格变化、目标分支漂移都必须被发现。保留 MR REST 标签 ID 与全局 ID 交叉验证。
+
+4. 安全提速：将复用限定为单次完整上下文发现中刚获得的、项目 ID 与 IID 精确匹配的一个 MR 响应；复制并冻结输入，后续读取及其他请求仍访问原客户端，各次/并发调用互不污染。并发执行同一固定仓库快照上的只读 push plan 与 diff 读取。不得把未重验的旧结果当成最新结果。
+
+5. 打通 Windows 默认路径：修复 ACL 校验子进程在缺少 PATHEXT 时无法执行 icacls 的问题，使用可信绝对系统路径和仅子进程环境设置；保留 owner、访问规则、继承、重解析点校验。真实原生测试必须通过，过宽 Everyone 权限仍须被拒绝。
+
+6. 测试验收：使用精确 Node 24.16.0；修复前后运行同一 Git 漂移回归，证明旧提速补丁失败、修复版通过。覆盖默认 CLI create、update、upsert、Draft、Ready、dry-run、verify、标签歧义、人员变更、远端写后回读及错误/部分状态。新增单次 MR 响应复用的隔离、冻结、身份、实时 metadata 和调用计数测试；运行相关既有事务、适配器、外部上下文、真实 Git 和权限回归，给出实际 pass/fail/skip 数量。
+
+7. 性能证据：记录可重复 fixture 中每类完整上下文读取、独立 MR receipt、额外 MR details、标签 inventory、用户和 review 查询，以及每次写前 Git 检查次数。确认重复 MR details/附带项目查询减少，实时校验与回读保持；至少给出 Draft 和 Ready 的具体计数，说明测试范围。区分 fixture 耗时与真实 GitLab 网络耗时，不编造线上加速比例。
+
+8. 构建与可用性：类型检查、diff 空白检查、标准构建通过；验证构建产物的 version/schema/只读或 dry-run 入口。条件允许时生成并验证 Windows 本机可运行产物；确认其源码包含修复且版本/模板信息一致，不以源码测试替代产物检查。
+
+9. 文档与交付：更新仓库进度文档，写明已修复问题、最终 MR 工具自身流程、优化边界、复现命令、测试和请求计数、产物位置与剩余外部验证项。交付本地修复代码、可审阅差异和构建/验证证据。明确真实 GitLab 耗时尚未测得的限制；本轮完成本地修复交付，不自动推送、合并或正式发布。
+
+完成标准：上述本地可执行事项全部有代码/测试/构建证据；没有尚未解释的相关失败；两处已知回归均关闭；不得仅凭若干单测通过或一份进度文档标记完成。
+
+
+## 16. 0.1.7 基线上的本轮修复与验证
+
+本轮本地分支为 `codex/mr-submit-performance-fix`，基于 `704a9dd0ee4b4044541ae48440c93559d784c589`（CLI 0.1.7），保留发布候选的 175 个提交；原 `codex/mr-submit-performance @ ebf9fc9` 保留。第 1–14 节是此前历史记录，当前实现以本节为准。
+
+### 16.1 实际修复
+
+- 移除了跨异步阶段的前置/后置检查缓存；每次 binding、候选校验和 mutation guard 都重新检查仓库、源分支推送状态、规范化 diff 和完整外部上下文，适用于 Draft 与 Ready。
+- 移除了沿用旧候选/资格/Issue/review 的 Draft 快照合成。每次独立 MR 读取仍走完整发现，保留实时 inventory、成员、Issue、review、项目及目标分支 fence 与标签 REST ID 交叉验证。
+- 复用仅发生在单次 readExternalContext 内：独立 MR receipt 已取得的对象经过复制和深度冻结，只能满足一次精确的项目 ID + IID 请求；其他读取与后续/并发调用仍访问原客户端。
+- 同一已发现仓库快照上的只读 planPush/readChangeSet 改为并发；检查条件保持。两项使用 Promise.allSettled 等待全部结束，再按原顺序传播错误，防止一项失败时另一项 Git 读取仍占用工作区。
+- Windows ACL 子进程改用可信绝对 PowerShell/icacls 路径，并仅给子进程指定 PATHEXT=.EXE；owner、规则、继承和重解析点要求保留。
+
+### 16.2 调用计数证据
+
+以下是默认 CLI + 真实 adapter/domain/store/receipt + fake GitLabClient fixture 的成功创建计数；不是分页后的 HTTP 请求总数，也不是实际 GitLab 网络计时。完整上下文发现次数保留，本轮减少的是读回附带的重复 MR 获取。
+
+| 方法 | Draft | Ready |
+| --- | ---: | ---: |
+| MR 独立 receipt 读取 | 7 | 13 |
+| 完整发现额外重复 MR GET | 0 | 0 |
+| labelInventory / listUsers | 各 15 | 各 24 |
+| getReviewState | 7 | 13 |
+| getProject | 30 | 48 |
+| discover / planPush / readChangeSet | 各 8 | 各 11 |
+
+对应重复 MR 获取在未复用路径中仍会执行；专项测试用同一客户端对照确认只跳过精确 MR 请求，其他实时请求保持。真实 GitLabClient 的 getMergeRequest 内还会先读取项目，故可避免其附带的重复项目请求；该底层 HTTP 减少量不由上述 facade 计数直接测得。
+
+### 16.3 当前 MR 工具自身流程
+
+```mermaid
+flowchart TD
+  A[读取仓库信息与已提交 diff] --> B[读取 GitLab 项目、标签、人员与 MR]
+  B --> C[校验输入、身份、代码状态并计算自动标签]
+  C --> D{预览还是正式执行}
+  D -->|preview / dry-run| E[输出计划，不写远端、不消费候选]
+  D -->|正式执行| F[创建或更新 Draft MR]
+  F --> G[同步标签、人员、标题、描述和回执；每步写前重验、写后回读]
+  G --> H{目标为 Ready}
+  H -->|否| I[返回 MR 链接、处理结果和事务记录]
+  H -->|是| J[检查标签唯一性和合格 reviewer 数量]
+  J --> K[切换 Ready 并回读确认]
+  K --> I
+```
+
+Ready 的上述放行条件与 verify --level merge 的 CI、审批、讨论检查不同。本图只记录 MR 工具工作。
+
+### 16.4 构建与外部边界
+
+使用 SHA256 校验过的官方 Node 24.16.0，类型检查、标准构建、Windows SEA 构建通过；EXE 在仓库外运行 version/schema show 成功，报告 CLI 0.1.7 / Template 1.1.0；离线 create 正确拒绝且未写远端。构建回执校验 163 个输入均与当前源码匹配。
+
+尚未对用户的真实 GitLab 项目做网络耗时前后测量，也没有自动推送、合并、替换用户安装或正式发布。本机只有 Codex 缓存中的 Git，生产 GitRunner 的系统可信安装目录要求仍保留；真实 Git 测试需显式给出受控的测试 Git 根和直接原生进程委托，不允许生产回退到任意 PATH 程序。
+
+
+### 16.5 最终相关验证结果
+
+| 分组 | 用例 | 通过 | 跳过 |
+| --- | ---: | ---: | ---: |
+| 既有适配器、事务、默认服务、外部上下文回归（不含真实 Git 文件） | 103 | 103 | 0 |
+| 真实 Git 创建、dry-run 复用、HEAD/tracking/worktree 漂移 | 5 | 5 | 0 |
+| 默认生产标签完整流程 | 20 | 20 | 0 |
+| 新增默认生产性能/漂移/并发收尾回归 | 10 | 10 | 0 |
+| MR 响应单次复用与 metadata 新鲜度 | 12 | 12 | 0 |
+| ACL 与 context store | 51 | 50 | 1 |
+| 原始写前漂移隔离回归修复复跑 | 1 | 1 | 0 |
+| 真实 Windows ACL 的完整 update 漂移复现 | 1 | 1 | 0 |
+| 合计 | 203 | 202 | 1 |
+
+按最终有效用例合并；包含针对失败项的复跑，不表示一次运行的全量测试。真实 Git 文件先有 4 项通过、HEAD 清理 EBUSY 失败；修复并发任务收尾后仅重跑 HEAD，1/1 通过。性能计数两例是上述 10 例的子集，不重复计数。权限测试唯一跳过项为 POSIX 专属。
+
+类型检查和 git diff --cached --check 通过。Windows SEA 构建通过，并在交付目录外运行 version / schema show 成功；offline create 正确拒绝，remoteWrite 为 not-attempted。编译器仍有 2 条既有 import.meta/CJS 警告，产物 smoke 通过；本地 SEA 注入记录签名变化提示，不是正式签名发布件。
+
+测试使用 Node 24.16.0；主要复现入口：
+
+```text
+node node_modules/typescript/bin/tsc --noEmit
+node --test --import tsx --test-concurrency=1 test/integration/production-default-label-flow.test.ts
+node --test --import tsx --test-concurrency=1 test/integration/default-write-performance.test.ts
+node --test --import tsx test/unit/transaction-snapshot.test.ts
+node --test --import tsx test/unit/windows-acl-verifier.test.ts test/unit/context-store.test.ts
+node --test --import tsx test/integration/production-real-git-label-flow.test.ts
+node scripts/build-sea.mjs
+```
+
+本机真实 Git 测试需设置 HARNESS_MRTOOL_TEST_GIT_EXECUTABLE 为经过确认的绝对 Git.exe 路径；该变量只由测试 fixture 使用，生产工具不消费它。

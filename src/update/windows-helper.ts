@@ -3,6 +3,8 @@ import { constants, type BigIntStats } from "node:fs";
 import { chmod, lstat, open, realpath, rename, rm } from "node:fs/promises";
 import { dirname, isAbsolute, resolve } from "node:path";
 
+import { waitForProcessExit, type ProcessIdentity } from "../platform/process-identity.ts";
+
 
 import { canonicalizeJson } from "../contracts/jcs.ts";
 import { parseStrictJson } from "../input/strict-json.ts";
@@ -18,6 +20,10 @@ export interface WindowsPersistenceResult {
 
 export interface WindowsPersistenceOptions {
   readonly parentExit: () => Promise<number>;
+  /** When supplied, the helper proves this exact parent instance has exited before mutation. */
+  readonly parentIdentity?: ProcessIdentity;
+  /** Test/native seam for the exact parent-instance wait; production defaults to process identity inspection. */
+  readonly waitForParentExit?: (identity: ProcessIdentity) => Promise<void>;
   readonly rotate: () => Promise<void>;
   readonly commit: () => Promise<void>;
   readonly isRecoverable: (error: unknown) => boolean;
@@ -32,6 +38,9 @@ export interface WindowsPersistenceOptions {
 export async function runWindowsPersistence(
   options: WindowsPersistenceOptions,
 ): Promise<WindowsPersistenceResult> {
+  if (options.parentIdentity !== undefined) {
+    await (options.waitForParentExit ?? ((identity: ProcessIdentity) => waitForProcessExit(identity)))(options.parentIdentity);
+  }
   const businessExit = await options.parentExit();
   try {
     await options.rotate();
@@ -87,6 +96,13 @@ export interface WindowsExecutableFaultInjector {
 
 export interface WindowsExecutableRotationOptions {
   readonly faultInjector?: WindowsExecutableFaultInjector;
+  /** POSIX mode for the canonical file; Windows ACLs are enforced separately. */
+  readonly canonicalMode?: 0o600 | 0o755;
+}
+
+export interface WindowsExecutableRecoveryOptions {
+  /** POSIX mode for the canonical file when recovery accepts the new image. */
+  readonly canonicalMode?: 0o600 | 0o755;
 }
 
 
@@ -120,7 +136,7 @@ const SHA256 = /^[a-f0-9]{64}$/u;
 const DECIMAL = /^(?:0|[1-9][0-9]*)$/u;
 const SIGNED_DECIMAL = /^-?(?:0|[1-9][0-9]*)$/u;
 const READ_ONLY_FLAGS = constants.O_RDONLY |
-  ((constants as { readonly O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0);
+  (process.platform === "win32" ? 0 : ((constants as { readonly O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0));
 
 
 function windowsPathKey(path: string): string {
@@ -159,8 +175,8 @@ function validatePaths(paths: WindowsExecutablePaths): void {
 
 
 function sameStats(left: BigIntStats, right: BigIntStats): boolean {
-  return left.dev === right.dev && left.ino === right.ino && left.size === right.size &&
-    left.mtimeNs === right.mtimeNs;
+  return left.ino > 0n && right.ino > 0n && left.ino === right.ino && left.size === right.size &&
+    (process.platform === "win32" || (left.dev === right.dev && left.mtimeNs === right.mtimeNs));
 }
 
 
@@ -176,8 +192,8 @@ function identity(stats: BigIntStats): FileIdentity {
 
 function identityMatches(stats: BigIntStats, expected: FileIdentity): boolean {
   const actual = identity(stats);
-  return actual.dev === expected.dev && actual.ino === expected.ino &&
-    actual.size === expected.size && actual.mtimeNs === expected.mtimeNs;
+  return actual.ino !== "0" && actual.ino === expected.ino && actual.size === expected.size &&
+    (process.platform === "win32" || (actual.dev === expected.dev && actual.mtimeNs === expected.mtimeNs));
 }
 
 
@@ -495,8 +511,12 @@ function fileMatches(
 
 
 /** Repair a durable pending rotation without accepting an unjournaled executable. */
-export async function recoverWindowsExecutable(paths: WindowsExecutablePaths): Promise<"old" | "new" | null> {
+export async function recoverWindowsExecutable(
+  paths: WindowsExecutablePaths,
+  options: WindowsExecutableRecoveryOptions = {},
+): Promise<"old" | "new" | null> {
   validatePaths(paths);
+  const canonicalMode = options.canonicalMode ?? 0o755;
   await assertPlainDirectory(dirname(paths.canonical));
   const journal = await readJournal(paths);
   if (journal === null) return null;
@@ -509,7 +529,7 @@ export async function recoverWindowsExecutable(paths: WindowsExecutablePaths): P
 
   if (fileMatches(canonical, journal.stagedIdentity, journal.stagedSha256) && staged === null &&
       fileMatches(old, journal.canonicalIdentity, journal.canonicalSha256)) {
-    await chmod(paths.canonical, 0o755).catch(() => undefined);
+    await chmod(paths.canonical, canonicalMode).catch(() => undefined);
     await removeJournal(paths);
     return "new";
   }
@@ -539,9 +559,10 @@ export async function rotateWindowsExecutable(
   options: WindowsExecutableRotationOptions = {},
 ): Promise<void> {
   validatePaths(paths);
+  const canonicalMode = options.canonicalMode ?? 0o755;
   const parent = dirname(paths.canonical);
   await assertPlainDirectory(parent);
-  await recoverWindowsExecutable(paths);
+  await recoverWindowsExecutable(paths, { canonicalMode });
   const staged = await openVerifiedFile(paths.staged);
   let canonical: VerifiedFile | undefined;
   try {
@@ -580,7 +601,7 @@ export async function rotateWindowsExecutable(
     await syncDirectory(parent);
     await writeJournal(paths, { ...base, phase: "staged-installed" });
     await options.faultInjector?.hit("after-staged-installed");
-    await chmod(paths.canonical, 0o755).catch(() => undefined);
+    await chmod(paths.canonical, canonicalMode).catch(() => undefined);
     await removeJournal(paths);
   } finally {
     await canonical?.handle.close().catch(() => undefined);

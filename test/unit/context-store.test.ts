@@ -531,6 +531,48 @@ test("lock contention fails closed within the configured timeout", async (contex
   assert.equal(Date.now() - started < 500, true);
 });
 
+test("process-lock helper failures preserve only a bounded diagnostic", async (context) => {
+  const { directory, clock } = await fixture(context);
+  const store = new CandidateContextStore({
+    stateDirectory: directory,
+    clock,
+    random: new CounterRandom(),
+    processLockProvider: {
+      acquire: async () => {
+        throw new ProcessLockError("unavailable", "windows-lock-helper:compile");
+      },
+    },
+    windowsAclVerifier: allowTestAcl,
+  });
+  await assert.rejects(
+    store.issue(issueInput),
+    (error: unknown) => isToolError(error, "INTERNAL_ERROR") &&
+      error.details.actual === "windows-lock-helper:compile" &&
+      error.diagnostic === "windows-lock-helper:compile",
+  );
+});
+
+test("process-lock reason diagnostics remain bounded when the helper has no stage", async (context) => {
+  const { directory, clock } = await fixture(context);
+  const store = new CandidateContextStore({
+    stateDirectory: directory,
+    clock,
+    random: new CounterRandom(),
+    processLockProvider: {
+      acquire: async () => {
+        throw new ProcessLockError("unsafe");
+      },
+    },
+    windowsAclVerifier: allowTestAcl,
+  });
+  await assert.rejects(
+    store.issue(issueInput),
+    (error: unknown) => isToolError(error, "INTERNAL_ERROR") &&
+      error.details.actual === "native-store:process-lock-unsafe" &&
+      error.diagnostic === "native-store:process-lock-unsafe",
+  );
+});
+
 test("system process lock serializes independent child processes", async (context) => {
   const { directory } = await fixture(context);
   const lockPath = resolve(directory, "cross-process.oslock");
