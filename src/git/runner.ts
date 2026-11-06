@@ -1,11 +1,10 @@
 import { spawn } from "node:child_process";
-import { access, realpath, rm, stat } from "node:fs/promises";
+import { realpath, rm, stat } from "node:fs/promises";
 import {
-  constants as fsConstants,
   realpathSync,
   statSync,
 } from "node:fs";
-import { isAbsolute, relative, resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
@@ -266,13 +265,7 @@ export interface GitRunnerOptions {
   readonly environment?: Readonly<Record<string, string | undefined>>;
   readonly gitExecutable?: string;
   readonly maxOutputBytes?: number;
-  readonly trustedGitRoots?: readonly string[];
   readonly timeoutMs?: number;
-}
-
-interface ResolvedExecutable {
-  readonly identity: FileIdentity;
-  readonly path: string;
 }
 
 function validateAbsolutePath(value: string, subject: string): string {
@@ -282,62 +275,10 @@ function validateAbsolutePath(value: string, subject: string): string {
   return resolve(value);
 }
 
-async function validateExecutable(value: string): Promise<ResolvedExecutable> {
-  const canonical = await realpath(validateAbsolutePath(value, "Git executable"));
-  const metadata = await stat(canonical);
-  if (!metadata.isFile()) {
-    throw new TypeError("Git executable must identify a regular file");
-  }
-  await access(canonical, process.platform === "win32" ? fsConstants.F_OK : fsConstants.X_OK);
-  return Object.freeze({
-    identity: identityFromStat(canonical, metadata),
-    path: canonical,
-  });
-}
-
-function defaultTrustedGitRoots(): readonly string[] {
-  if (process.platform !== "win32") {
-    return Object.freeze([
-      "/usr/bin",
-      "/usr/local/bin",
-      ...(process.platform === "darwin" ? ["/opt/homebrew/bin", "/opt/local/bin"] : []),
-    ]);
-  }
-  return Object.freeze([
-    "C:\\Program Files\\Git\\cmd",
-    "C:\\Program Files\\Git\\bin",
-  ]);
-}
-
-function pathIsWithin(root: string, candidate: string): boolean {
-  const comparisonRoot = process.platform === "win32" ? root.toLowerCase() : root;
-  const comparisonCandidate = process.platform === "win32" ? candidate.toLowerCase() : candidate;
-  const remainder = relative(comparisonRoot, comparisonCandidate);
-  return remainder === "" || (!remainder.startsWith("..") && !isAbsolute(remainder));
-}
-
-async function resolveGitExecutable(trustedRoots: readonly string[]): Promise<ResolvedExecutable> {
-  const executableName = process.platform === "win32" ? "git.exe" : "git";
-  for (const rawRoot of trustedRoots) {
-    try {
-      const requestedRoot = validateAbsolutePath(rawRoot, "Trusted Git root");
-      const canonicalRoot = await realpath(requestedRoot);
-      const canonicalExecutable = await validateExecutable(resolve(canonicalRoot, executableName));
-      if (pathIsWithin(canonicalRoot, canonicalExecutable.path)) {
-        return canonicalExecutable;
-      }
-    } catch {
-      // Keep searching the explicitly trusted roots.
-    }
-  }
-  throw new Error("Git executable could not be resolved from trusted installation roots");
-}
-
 export class GitRunner {
   readonly cwd: string;
   private readonly processRunner: ProcessRunner;
   private readonly options: GitRunnerOptions;
-  private gitExecutableResolution: Promise<ResolvedExecutable> | null = null;
 
   constructor(
     cwd: string,
@@ -347,26 +288,6 @@ export class GitRunner {
     this.cwd = cwd;
     this.processRunner = processRunner;
     this.options = options;
-  }
-
-  private executable(): Promise<ResolvedExecutable> {
-    if (this.options.gitExecutable !== undefined) {
-      if (this.processRunner === nodeProcessRunner) {
-        throw new TypeError("An injected Git executable is allowed only with a test process runner");
-      }
-      this.gitExecutableResolution ??= validateExecutable(this.options.gitExecutable);
-      return this.gitExecutableResolution;
-    }
-    if (
-      this.options.trustedGitRoots !== undefined &&
-      this.processRunner === nodeProcessRunner
-    ) {
-      throw new TypeError("Injected trusted Git roots are allowed only with a test process runner");
-    }
-    this.gitExecutableResolution ??= resolveGitExecutable(
-      this.options.trustedGitRoots ?? defaultTrustedGitRoots(),
-    );
-    return this.gitExecutableResolution;
   }
 
   async run(
@@ -382,13 +303,8 @@ export class GitRunner {
       ...(this.options.environment ?? {}),
       ...validateGitEnvironmentOverride(environmentOverride),
     };
-    const executable = await this.executable();
-    const currentExecutable = await validateExecutable(executable.path);
-    if (!fileIdentityMatches(executable.identity, currentExecutable.identity, true)) {
-      throw new Error("Git executable filesystem identity changed before process spawn");
-    }
     return this.processRunner.run({
-      executable: executable.path,
+      executable: this.options.gitExecutable ?? "git",
       arguments: Object.freeze([...arguments_]),
       cwd: this.cwd,
       environment: {
@@ -404,10 +320,6 @@ export class GitRunner {
         LC_ALL: "C",
       },
       fileIdentityGuards: Object.freeze([
-        Object.freeze({
-          compareContentMetadata: true,
-          identity: executable.identity,
-        }),
         ...fileIdentityGuards.map((identity) => Object.freeze({
           compareContentMetadata: false,
           identity,

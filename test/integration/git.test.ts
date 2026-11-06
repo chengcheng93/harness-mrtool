@@ -3,7 +3,6 @@ import { spawn, type ChildProcess } from "node:child_process";
 import {
   access,
   chmod,
-  copyFile,
   mkdir,
   readFile,
   realpath,
@@ -12,7 +11,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { delimiter, dirname, isAbsolute, resolve } from "node:path";
+import { dirname, isAbsolute, resolve } from "node:path";
 import test, { type TestContext } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
@@ -26,7 +25,6 @@ import {
 } from "../../src/git/repository.ts";
 import {
   GitRunner,
-  type GitRunnerOptions,
   nodeProcessRunner,
   type ProcessRequest,
   type ProcessResult,
@@ -190,12 +188,7 @@ test("GitRunner always invokes git with an argv array and shell disabled", async
   assert.equal(requests[0]?.environment.GIT_ATTR_NOSYSTEM, "1");
   assert.equal(requests[0]?.environment.GIT_NO_REPLACE_OBJECTS, "1");
   assert.equal(requests[0]?.environment.GIT_TERMINAL_PROMPT, "0");
-  assert.equal(requests[0]?.fileIdentityGuards.length, 1);
-  assert.equal(
-    requests[0]?.fileIdentityGuards[0]?.identity.path,
-    trustedExecutable,
-  );
-  assert.equal(requests[0]?.fileIdentityGuards[0]?.compareContentMetadata, true);
+  assert.deepEqual(requests[0]?.fileIdentityGuards, []);
 });
 
 test("GitRunner scrubs executable ambient Git transport and prompt hooks", async () => {
@@ -251,179 +244,28 @@ test("GitRunner scrubs executable ambient Git transport and prompt hooks", async
   }
 });
 
-test("GitRunner does not execute a repository-local git.exe on Windows", {
-  skip: process.platform !== "win32",
-}, async (t) => {
+test("repository discovery preserves a caller-selected Git executable", async (t) => {
   const fixture = await fixtureFor(t);
-  const systemRoot = process.env.SystemRoot;
-  assert.notEqual(systemRoot, undefined);
-  await copyFile(
-    resolve(systemRoot as string, "System32", "where.exe"),
-    resolve(fixture.worktreePath, "git.exe"),
-  );
-  const processRunner = new RecordingProcessRunner();
-
-  const result = await new GitRunner(fixture.worktreePath, processRunner, {
-    environment: {
-      PATH: fixture.worktreePath,
-      ProgramFiles: fixture.worktreePath,
-      ProgramW6432: fixture.worktreePath,
-    },
-  }).run(["--version"]);
-
-  assert.equal(result.exitCode, 0);
-  assert.match(result.stdout.toString("utf8"), /^git version /u);
-  assert.equal(isAbsolute(processRunner.requests[0]?.executable ?? ""), true);
-  assert.notEqual(
-    processRunner.requests[0]?.executable.toLowerCase(),
-    resolve(fixture.worktreePath, "git.exe").toLowerCase(),
-  );
-});
-
-test("GitRunner ignores arbitrary absolute PATH entries outside its trusted roots", async (t) => {
-  const fixture = await fixtureFor(t);
-  const untrustedRoot = resolve(fixture.root, "untrusted-git");
-  const trustedRoot = resolve(fixture.root, "trusted-git");
-  await mkdir(untrustedRoot);
-  await mkdir(trustedRoot);
-  const executableName = process.platform === "win32" ? "git.exe" : "git";
-  const untrustedExecutable = resolve(untrustedRoot, executableName);
-  const trustedExecutable = resolve(trustedRoot, executableName);
-  await copyFile(process.execPath, untrustedExecutable);
-  await copyFile(process.execPath, trustedExecutable);
-  if (process.platform !== "win32") {
-    await chmod(untrustedExecutable, 0o755);
-    await chmod(trustedExecutable, 0o755);
-  }
-  const processRunner = new RecordingProcessRunner();
-  const options = {
-    environment: { PATH: [untrustedRoot, process.env.PATH ?? ""].join(delimiter) },
-    trustedGitRoots: [trustedRoot],
-  } satisfies GitRunnerOptions;
-
-  await new GitRunner(fixture.worktreePath, processRunner, options).run(["--version"]);
-
-  assert.equal(processRunner.requests[0]?.executable, await realpath(trustedExecutable));
-  assert.notEqual(processRunner.requests[0]?.executable, await realpath(untrustedExecutable));
-});
-
-test("GitRunner rejects replacement of its resolved executable at the spawn boundary", async (t) => {
-  const fixture = await fixtureFor(t);
-  const executableRoot = resolve(fixture.root, "replaceable-git");
-  const movedRoot = resolve(fixture.root, "original-git");
-  await mkdir(executableRoot);
-  const executableName = process.platform === "win32" ? "git.exe" : "git";
-  const executable = resolve(executableRoot, executableName);
-  await copyFile(process.execPath, executable);
-  if (process.platform !== "win32") await chmod(executable, 0o755);
-  let runCount = 0;
+  const selectedExecutable = "caller-selected-git";
+  const requests: ProcessRequest[] = [];
   const processRunner: ProcessRunner = {
     async run(request) {
-      runCount += 1;
-      if (runCount === 2) {
-        await rename(executableRoot, movedRoot);
-        await mkdir(executableRoot);
-        await copyFile(
-          process.platform === "win32"
-            ? resolve(process.env.SystemRoot ?? "C:\\Windows", "System32", "where.exe")
-            : process.execPath,
-          executable,
-        );
-        if (process.platform !== "win32") await chmod(executable, 0o755);
-      }
-      if (runCount === 1) {
-        return {
-          exitCode: 0,
-          signal: null,
-          stderr: Buffer.alloc(0),
-          stdout: Buffer.alloc(0),
-          timedOut: false,
-        };
-      }
-      return nodeProcessRunner.run(request);
+      requests.push(request);
+      // Keep discovery real while distinguishing the caller's executable choice.
+      return nodeProcessRunner.run({ ...request, executable: "git" });
     },
   };
-  const runner = new GitRunner(fixture.worktreePath, processRunner, {
-    gitExecutable: executable,
-  });
-  await runner.run(["--version"]);
-
-  await assert.rejects(runner.run(["--version"]), /filesystem identity changed/i);
-});
-
-test("GitRunner rejects in-place modification of its resolved executable", async (t) => {
-  const fixture = await fixtureFor(t);
-  const executableRoot = resolve(fixture.root, "mutable-git");
-  await mkdir(executableRoot);
-  const executable = resolve(
-    executableRoot,
-    process.platform === "win32" ? "git.exe" : "git",
-  );
-  await copyFile(process.execPath, executable);
-  if (process.platform !== "win32") await chmod(executable, 0o755);
-  const processRunner: ProcessRunner = {
-    async run() {
-      return {
-        exitCode: 0,
-        signal: null,
-        stderr: Buffer.alloc(0),
-        stdout: Buffer.alloc(0),
-        timedOut: false,
-      };
-    },
-  };
-  const runner = new GitRunner(fixture.worktreePath, processRunner, {
-    gitExecutable: executable,
-  });
-  await runner.run(["--version"]);
-  await writeFile(executable, "modified executable bytes\n");
-
-  await assert.rejects(runner.run(["--version"]), /filesystem identity changed/i);
-});
-
-test("production process runner rejects injected Git executable authority", async (t) => {
-  await assert.rejects(
-    new GitRunner(process.cwd(), nodeProcessRunner, {
-      gitExecutable: process.execPath,
-    }).run(["--version"]),
-    /test process runner|injected Git executable/i,
-  );
-
-  const fixture = await fixtureFor(t);
-  const injectedRoot = resolve(fixture.root, "injected-trusted-root");
-  await mkdir(injectedRoot);
-  const executable = resolve(
-    injectedRoot,
-    process.platform === "win32" ? "git.exe" : "git",
-  );
-  await copyFile(process.execPath, executable);
-  if (process.platform !== "win32") await chmod(executable, 0o755);
-  await assert.rejects(
-    new GitRunner(fixture.worktreePath, nodeProcessRunner, {
-      trustedGitRoots: [injectedRoot],
-    }).run(["--version"]),
-    /test process runner|trusted Git roots/i,
-  );
-});
-
-test("repository discovery preserves an explicitly trusted Git executable", async (t) => {
-  const fixture = await fixtureFor(t);
-  const resolver = new RecordingProcessRunner();
-  await new GitRunner(fixture.worktreePath, resolver).run(["--version"]);
-  const trustedExecutable = resolver.requests[0]?.executable;
-  assert.notEqual(trustedExecutable, undefined);
-  const processRunner = new RecordingProcessRunner();
 
   await discoverRepository({
     cwd: fixture.worktreePath,
-    gitRunnerOptions: { gitExecutable: trustedExecutable as string },
+    gitRunnerOptions: { gitExecutable: selectedExecutable },
     processRunner,
     targetBranch: "main",
   });
 
-  assert.equal(processRunner.requests.length > 0, true);
+  assert.equal(requests.length > 0, true);
   assert.equal(
-    processRunner.requests.every((request) => request.executable === trustedExecutable),
+    requests.every((request) => request.executable === selectedExecutable),
     true,
   );
 });
