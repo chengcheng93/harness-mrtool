@@ -49,7 +49,16 @@ test("Codex plugin packaging emits a bounded, self-contained archive", async (t)
       assert.match(readme, /codex plugin add harness-mrtool@harness-mrtool/u);
       assert.doesNotMatch(readme, /--ref release-candidate-0\.1\.0/u);
     });
-    await t.test("packaged README documents SSH MR refusal before push and the API alternative", () => {
+    await t.test("packaged README makes API MR creation the default without automatic SSH fallback", () => {
+      assert.match(readme, /The default CLI and Skill flow uses the GitLab API/u);
+      assert.match(readme, /context --auth api -> structured Request -> preview -> user confirmation -> create\/update -> verify/u);
+      assert.match(readme, /Missing credentials or API failures stop the flow; never automatically fall back to SSH or manual handoff/u);
+      assert.match(readme, /`--auth auto` remains a compatibility alias for API selection without SSH fallback/u);
+      assert.doesNotMatch(readme, /default Skill path is SSH-first|optional API invocation|A GitLab token is optional/u);
+    });
+    await t.test("packaged README limits manual handoff to an explicit human request and refuses SSH MR creation", () => {
+      assert.match(readme, /Use `manual --auth ssh` only after an explicit human request for manual handoff/u);
+      assert.match(readme, /Git may still use SSH to push the source branch before the API flow/u);
       assert.match(readme, /`manual --auth ssh --ssh-mr --push` is rejected with `LABEL_ERROR` before push planning or execution/u);
       assert.match(readme, /Use the API flow for mandatory-label-verified MR creation/u);
       assert.doesNotMatch(readme, /explicit opt-in basic Push Options request/u);

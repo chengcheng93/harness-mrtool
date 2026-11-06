@@ -55,7 +55,7 @@ export function createDefaultWriteServices(
     }
     if (invocation.options.offline) throw new ToolError("INPUT_ERROR", "Live MR commands are unavailable in offline mode", {
       field: "--offline", expected: "online live candidate and MR readback verification", actual: "offline",
-      safeNextStep: "Use manual for a local handoff, or retry without --offline when GitLab is reachable.",
+      safeNextStep: "Retry without --offline when GitLab is reachable.",
     });
     const reader = readOnly.externalContextReader ?? defaultExternalContextReader;
     const repository = options.repository ?? defaultReadOnlyRepository;
@@ -97,7 +97,7 @@ export function createDefaultWriteServices(
       const repo = await repository.discover({ cwd: options.cwd,
         expectedTargetProject: { host: url.host, path: planned.options.targetProject },
         targetBranch: git.targetBranch, targetRemote: git.targetRemote });
-      if (!repo.worktree.clean || repo.targetProject?.host !== url.host ||
+      if (repo.targetProject?.host !== url.host ||
           repo.targetProject.path !== planned.options.targetProject || repo.targetRemote !== git.targetRemote ||
           repo.sourceRemote !== git.sourceRemote || repo.sourceRemoteRef !== git.sourceRemoteRef) throw changed();
       const [pushResult, diffResult] = await Promise.allSettled([
@@ -151,7 +151,7 @@ export function createDefaultWriteServices(
     if (request !== null && planned.pushPlan.kind !== "up-to-date") {
       throw new ToolError("REPOSITORY_ERROR", "The source branch must match the committed diff on the remote before MR writes", {
         field: "pushPlan", expected: "the remote source branch at the selected source SHA", actual: planned.pushPlan.kind,
-        safeNextStep: "Push the branch with manual --push or the displayed push command, then refresh context and retry; API MR commands do not push implicitly.",
+        safeNextStep: "Push the branch with the displayed ordinary Git push command, then refresh context and retry; API MR commands do not push implicitly.",
       });
     }
     const rawRemote = new GitLabMergeRequestRemote({

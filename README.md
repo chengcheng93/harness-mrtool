@@ -15,11 +15,14 @@ AI/人负责填写变更说明，工具负责输入校验、自动标签、写�
 
 | 需求 | 路径 | 是否需要 GitLab API Token | 保证范围 |
 | --- | --- | --- | --- |
-| 生成标题/正文，自己在 GitLab 创建 MR | `manual --auth ssh` | 否 | 本地交接材料；可显式推送普通分支，**不保证网页创建的 MR 标签** |
-| 工具自动选择标签、创建/更新 MR、回读确认 | `create` / `update` / `verify --auth api` | 是 | 经过强制标签和事务验证的 MR 操作 |
+| 默认：工具自动选择标签、创建/更新 MR、回读确认 | `context` → `preview` → `create/update` → `verify`（默认 `--auth api`） | 是 | 经过强制标签和事务验证的 MR 操作 |
 | 看将要写入什么，不提交 | `preview` 或 API `create/update --dry-run` | API 路径需要 | 零远端写入，不消费候选上下文；仍可能读网络 |
+| 仅在人类明确要求手工交接时：生成标题/正文，自己在 GitLab 创建 MR | `manual --auth ssh` | 否 | 本地交接材料；可显式推送普通分支，**不保证网页创建的 MR 标签** |
 
-要使用本次的**自动标签完整功能，选择 API 路径**。`manual --ssh-mr` 已被禁用，
+CLI 与 Skill 默认通过 API 完成自动 MR 流程。未传 `--auth` 时使用 `api`；
+`--auth auto` 仅保留为 API 选择的兼容写法，不会回退 SSH。缺少 Token 或 API
+请求失败时停止并报告问题，不自动切换到 manual/SSH 交接；只有人类明确要求
+手工交接时才使用 `manual --auth ssh`。`manual --ssh-mr` 已被禁用，
 返回 `LABEL_ERROR` 并在 push 前停止；它不是 API 标签验证的替代方案。
 
 ## 2. 安装与源码运行
@@ -63,7 +66,7 @@ hmr schema show --output json
 ### 已发布安装包与 AI 插件
 
 已有 Windows x64 安装包及安装脚本见 [发布页](https://github.com/chengcheng93/harness-mrtool/releases)
-和 [SSH-first 操作手册](docs/usage/ssh-first-operation-manual.md)。按发布流程验证归档、
+和 [API 默认流程与操作手册](docs/usage/ssh-first-operation-manual.md)。按发布流程验证归档、
 SHA256SUMS 和签名 receipt；不要把本机生成的 Darwin `dist/harness-mrtool.exe` 当成 Windows EXE。
 
 [Plugin 源码](plugins/harness-mrtool/) 和 [独立 Skill](skill/harness-mr/SKILL.md)
@@ -74,7 +77,8 @@ SHA256SUMS 和签名 receipt；不要把本机生成的 Darwin `dist/harness-mrt
 
 ### Git 前置条件
 
-- 当前位于自己的功能分支，工作区干净；先检查、提交属于此次 MR 的改动。
+- 当前位于自己的功能分支；MR diff 与分支推送只使用已提交的 `HEAD`。
+- staged、unstaged 和 untracked 文件（包括 `.superpowers` 报告）均可保留，不要求工作区干净；工具不自动 add、stash、clean 或删除文件。
 - remote 指向正确的 GitLab 项目，目标项目/默认目标分支能够识别，目标跟踪引用保持最新。
 - **API MR 命令不自动 push**：源分支必须已经发布，并且远端源 SHA 与当前提交一致。
 - `request.targetBranch` 必须与工具发现的目标分支一致，不要直接照抄示例中的 `develop`。
@@ -89,6 +93,7 @@ hmr doctor --auth api --output json
 ```
 
 `git push` 是实际远端写入；确认目标后再执行。后续每次代码或远端引用变化，都重新获取 context。
+Git remote 可以继续使用 SSH 推送分支；Git 传输方式与创建 MR 的 API 认证方式相互独立。
 
 ### API Token（自动 MR 功能必须配置）
 
@@ -122,8 +127,9 @@ $env:HARNESS_MRTOOL_GITLAB_TOKEN = Read-Host 'GitLab API token' -MaskInput
 使用 `Remove-Item Env:HARNESS_MRTOOL_GITLAB_TOKEN, Env:HARNESS_MRTOOL_GITLAB_HOST`。
 不要打印这些变量。环境中的秘密仍需由本机账号/进程安全边界保护。
 
-SSH-only 模式不需要 API Token，但需事先把自己的 SSH 公钥配置到 GitLab，并验证
-`ssh -T git@gitlab.example.com`；不要上传私钥。
+只有人类明确要求的 `manual --auth ssh` 手工交接不需要 API Token。若 Git 传输
+使用 SSH，需事先把自己的 SSH 公钥配置到 GitLab，并验证
+`ssh -T git@gitlab.example.com`；不要上传私钥。API 认证失败不会授权改走此路径。
 
 ## 4. 第一次使用：推荐交互向导
 
@@ -186,7 +192,7 @@ cp "$MRTOOL_HOME/examples/request.draft.json" /absolute/private/mr-input/request
 | `mergeRequest.assigneeCandidateToken`、`review.reviewerCandidateTokens` | 来自本次 context；按策略填写人员 |
 | `mergeRequest.labelCandidateTokens` | 保持 `[]`，CLI 自动选标签 |
 
-把输入文件放在业务仓库外，避免它使工作区变脏，或把人员信息/说明误提交进仓库。
+输入文件可放在私有目录，避免把人员信息/说明误提交进仓库；它不影响基于已提交 `HEAD` 的 MR 流程。
 完整合同以当前 `schema show`、`profiles list` 和验证错误为准。
 
 ### 5.3 预览 → dry-run → 创建 → 验证
@@ -261,9 +267,10 @@ hmr update 88 --migrate-template --confirm-migration <oldHash>:<newHash> --auth 
 非交互迁移必须提供准确的 old:new 确认；TTY 向导会展示并要求确认。
 历史资产不可用、无签名锚点或文件被篡改时停止，不以当前模板冒充旧模板。
 
-## 8. 不需要 API 的 SSH 交接
+## 8. 仅在人类明确要求时使用手工 SSH 交接
 
-准备符合 Schema 的 JSON 后执行：
+默认不启用此路径。只有人类明确要求手工交接后，才准备符合 Schema 的 JSON 并执行
+`manual --auth ssh`；`manual` 省略认证选项时不会自动选择 SSH：
 
 ```sh
 hmr manual --auth ssh --input /absolute/private/mr-input/request.json --output json
@@ -279,8 +286,8 @@ hmr manual --auth ssh --input /absolute/private/mr-input/request.json --push --o
 
 | 现象 | 处理 |
 | --- | --- |
-| `AUTH_ERROR` | 核对 host 与 remote 一致、Token 有效且有项目权限；不要把 Token 打印出来 |
-| `REPOSITORY_ERROR` | 检查功能分支、工作区、目标引用；源提交未发布就先 push，再刷新 context |
+| `AUTH_ERROR` | 停止 API 流程，核对 host 与 remote 一致、Token 有效且有项目权限；不自动回退 manual/SSH，不打印 Token |
+| `REPOSITORY_ERROR` | 检查功能分支、目标引用和已提交的源 SHA；源提交未发布就先 push，再刷新 context |
 | `LABEL_ERROR` | 检查所需远端标签是否存在/唯一；仅对未知类型按当前 digest 显式确认 |
 | `CONCURRENT_UPDATE` | 代码、引用、人员或标签已经漂移；重新读取 context 和计划，不复用旧授权 |
 | `MANUAL_DESCRIPTION_CHANGE` / `UNMANAGED_MR` | 核对正文所有权和历史 receipt；不要盲目强制覆盖 |
@@ -289,6 +296,7 @@ hmr manual --auth ssh --input /absolute/private/mr-input/request.json --push --o
 | `Structured input is required` | 当前不是 TTY；提供 `--input` 和完整 JSON，或在真实终端运行向导 |
 
 自动化调用同时检查退出码、`ok`、`code`、`remoteWrite` 和审计结果。
+API 错误按输出的安全下一步处理；不得以网络、权限或凭据问题为由自动改走 SSH 交接。
 `doctor` 的命令成功不代表所有诊断项通过，必须看 `data.checks`。
 `--offline` 不支持 live create/update/verify；`--no-update` 不代表跳过业务/签名/标签校验。
 
@@ -328,7 +336,7 @@ Windows CI、正式签名发布、真实 GitLab 与真实插件宿主验收属�
 
 - [完整命令说明](docs/commands/reference.md)
 - [标签选择策略](docs/usage/label-selection-policy.md)
-- [SSH-first 操作手册](docs/usage/ssh-first-operation-manual.md)
+- [API 默认流程与操作手册](docs/usage/ssh-first-operation-manual.md)
 - [认证与信任边界](docs/security/authentication.md)
 - [架构](docs/architecture/harness-mrtool-architecture.md)
 - [本次逐需求验收与外部边界](docs/verification/mandatory-labels-2026-09-14.md)

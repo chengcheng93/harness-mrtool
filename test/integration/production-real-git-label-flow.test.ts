@@ -85,8 +85,8 @@ async function setup(t: test.TestContext) {
     assert.deepEqual(transport.unexpected, [], stdout + stderr);
     return { code, stdout, stderr, json: JSON.parse(stdout) };
   }
-  async function issue() {
-    const result = await run(["context"]);
+  async function issue(iid: number | null = null) {
+    const result = await run(["context", ...(iid === null ? [] : ["--mr", String(iid)])]);
     assert.equal(result.code, 0, result.stdout + result.stderr);
     const context = result.json.data;
     raw.contextId = context.contextId;
@@ -135,7 +135,7 @@ test("real default Git dry-run writes nothing and leaves its context reusable fo
   assert.equal(f.raw.contextId, contextId);
 });
 
-for (const drift of ["HEAD", "tracking", "worktree"] as const) {
+for (const drift of ["HEAD", "tracking"] as const) {
   test(`real default Git gate rejects actual ${drift} drift after preflight before any HTTP mutation`, async (t) => {
     const f = await setup(t);
     await f.issue();
@@ -145,12 +145,9 @@ for (const drift of ["HEAD", "tracking", "worktree"] as const) {
         await f.git.git(["update-ref", "HEAD", f.targetSha]);
         await f.git.git(["reset", "--hard", f.targetSha]);
         assert.equal(await f.git.head(), f.targetSha);
-      } else if (drift === "tracking") {
+      } else {
         await f.git.git(["update-ref", "refs/remotes/origin/main", f.sourceSha]);
         assert.equal(await f.git.targetHead(), f.sourceSha);
-      } else {
-        await f.git.write("src/boundary.ts", "if (attempts > max) { return false; }\n");
-        assert.match(await f.git.git(["status", "--porcelain"]), / M src\/boundary\.ts/u);
       }
       changed = true;
     };
@@ -162,3 +159,30 @@ for (const drift of ["HEAD", "tracking", "worktree"] as const) {
     assert.equal(f.transport.mr, null);
   });
 }
+
+test("real default Git create and update preserve staged, unstaged and untracked local files", async (t) => {
+  const f = await setup(t);
+  await f.git.write("src/boundary.ts", "local staged work\n");
+  await f.git.git(["add", "src/boundary.ts"]);
+  await f.git.write("src/boundary.ts", "local unstaged work\n");
+  await f.git.write(".superpowers/progress.md", "untracked local report\n");
+  const localState = async () => ({
+    status: await f.git.git(["status", "--porcelain"]),
+    staged: await f.git.git(["diff", "--cached", "--binary"]),
+    unstaged: await f.git.git(["diff", "--binary"]),
+    report: await readFile(resolve(f.git.worktreePath, ".superpowers/progress.md"), "utf8"),
+  });
+  const before = await localState();
+  await f.issue();
+  const created = await f.run(["create"]);
+  assert.equal(created.code, 0, created.stdout + created.stderr);
+  assert.deepEqual(created.json.data.mandatoryLabels.names, ["type::bug", "priority::p2", "status::doing"]);
+  await f.issue(88);
+  const updated = await f.run(["update", "88"]);
+  assert.equal(updated.code, 0, updated.stdout + updated.stderr);
+  const verified = await f.run(["verify", "88", "--level", "structure"]);
+  assert.equal(verified.code, 0, verified.stdout + verified.stderr);
+  assert.equal(f.transport.mr!.sha, f.sourceSha);
+  assert.equal(await f.git.head(), f.sourceSha);
+  assert.deepEqual(await localState(), before);
+});

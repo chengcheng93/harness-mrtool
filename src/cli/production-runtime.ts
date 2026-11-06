@@ -287,7 +287,7 @@ function profileDetection(
   });
 }
 
-function localChecks(repository: RepositorySnapshot) {
+function localChecks() {
   return Object.freeze({
     commitConvention: Object.freeze({
       status: "not-run" as const,
@@ -298,10 +298,8 @@ function localChecks(repository: RepositorySnapshot) {
       evidence: "Secret scan is not configured for this read-only invocation.",
     }),
     repositoryHygiene: Object.freeze({
-      status: repository.worktree.clean ? "passed" as const : "failed" as const,
-      evidence: repository.worktree.clean
-        ? "Git worktree is clean."
-        : "Git worktree has local changes.",
+      status: "not-run" as const,
+      evidence: "Repository hygiene is not evaluated by MR submission; the diff uses committed HEAD only.",
     }),
   });
 }
@@ -863,7 +861,7 @@ export function createProductionReadOnlyDefaults(
               targetBranch: session.project.defaultBranch,
               targetRemote: snapshot.targetRemote,
               targetRef: snapshot.targetRef,
-              localChecks: localChecks(snapshot),
+              localChecks: localChecks(),
             }),
             bundle: selection.bundle,
             release: Object.freeze({

@@ -4,7 +4,6 @@ import { join } from "node:path";
 
 import { isToolError, ToolError } from "../contracts/errors.ts";
 import {
-  assertCleanWorktree,
   assertObjectId,
   assertRepositoryUnchanged,
   readGitText,
@@ -789,7 +788,6 @@ export async function executeSourceBranchPush(
 ): Promise<PushResult> {
   assertPushPlan(repository, plan);
   if (plan.kind === "up-to-date") {
-    await assertCleanWorktree(repository);
     await assertRepositoryUnchanged(repository);
     const remoteSha = await withRemoteTransactionView(
       repository,
@@ -815,7 +813,6 @@ export async function executeSourceBranchPush(
       afterSha: plan.beforeSha,
     });
   }
-  await assertCleanWorktree(repository);
   await assertRepositoryUnchanged(repository);
   const exactCommand = commandFor(repository, plan.pushOptions ?? []);
   const remoteView = await createRemoteTransactionView(repository);

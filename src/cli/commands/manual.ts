@@ -62,7 +62,7 @@ export interface ManualCommandDependencies {
 }
 
 function manualError(
-  code: "INPUT_ERROR" | "REPOSITORY_ERROR" | "RENDER_ERROR" | "LABEL_ERROR",
+  code: "AUTH_ERROR" | "INPUT_ERROR" | "REPOSITORY_ERROR" | "RENDER_ERROR" | "LABEL_ERROR",
   message: string,
   field: string | null,
   expected: string,
@@ -234,8 +234,8 @@ function manualSnapshot(
       commitConvention: { status: "not-run" as const, evidence: "Commit convention was not run in manual handoff mode." },
       secretScan: { status: "not-run" as const, evidence: "Secret scan was not run in manual handoff mode." },
       repositoryHygiene: {
-        status: repository.worktree.clean ? "passed" as const : "failed" as const,
-        evidence: repository.worktree.clean ? "Git worktree is clean." : "Git worktree has local changes.",
+        status: "not-run" as const,
+        evidence: "Repository hygiene is not evaluated by MR submission; the diff uses committed HEAD only.",
       },
     },
     metadataRead: { status: "unavailable" as const, evidence: "GitLab metadata was not read because no API credential was supplied." },
@@ -344,16 +344,6 @@ export function createManualCommandServices(
   const repositoryRuntime = dependencies.repository ?? defaultManualRepository;
   return {
     manual: async (invocation) => {
-      if (invocation.command.kind === "manual" && invocation.command.sshMergeRequest && invocation.options.authMode === "api") {
-        throw manualError(
-          "REPOSITORY_ERROR",
-          "SSH merge request push options cannot be combined with API auth mode",
-          "authMode",
-          "ssh or auto",
-          "api",
-          "Use manual --auth ssh --ssh-mr, or use the API create flow without --ssh-mr.",
-        );
-      }
       if (invocation.command.kind === "manual" && invocation.command.sshMergeRequest) {
         throw manualError(
           "LABEL_ERROR",
@@ -364,7 +354,17 @@ export function createManualCommandServices(
           "Use the API create flow; manual remains a draft handoff and cannot create an unlabeled MR.",
         );
       }
-      if (invocation.options.authMode === "ssh" && invocation.options.input === null) {
+      if (invocation.options.authMode !== "ssh") {
+        throw manualError(
+          "AUTH_ERROR",
+          "Manual SSH handoff requires explicit opt-in",
+          "authMode",
+          "--auth ssh for an explicitly requested manual handoff",
+          invocation.options.authMode,
+          "Use API create/update by default. Only when the user explicitly requests manual handoff, rerun manual --auth ssh.",
+        );
+      }
+      if (invocation.options.input === null) {
         throw manualError(
           "INPUT_ERROR",
           "SSH manual mode requires structured request input",
@@ -439,10 +439,10 @@ export function createManualCommandServices(
         }
       }
       if (invocation.options.push && plan !== null) {
-        if (invocation.options.authMode !== "api" && !isSshPushUrl(repository.sourcePushUrl)) {
+        if (!isSshPushUrl(repository.sourcePushUrl)) {
           throw manualError(
             "REPOSITORY_ERROR",
-            "SSH-first mode requires an SSH source remote",
+            "Manual SSH mode requires an SSH source remote",
             "remote",
             "a GitLab SSH push URL",
             repository.sourcePushUrl,

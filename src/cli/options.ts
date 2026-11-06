@@ -267,7 +267,7 @@ export function parseCliOptions(arguments_: readonly string[]): CliOptions {
     nonInteractive: false,
     output: null,
     client: "manual",
-    authMode: "auto",
+    authMode: "api",
     clientVersion: null,
     skillProtocol: null,
     push: false,

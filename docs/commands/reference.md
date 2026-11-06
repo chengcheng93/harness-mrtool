@@ -9,22 +9,27 @@ installation-path material.
 | `doctor` | Read-only repository, GitLab, Bundle, capability, and update diagnostics. |
 | `context` | Resolve real project/group label candidates from the fixed pool; default priority is p2. Existing-MR context requires a trusted exact Bundle. |
 | `preview` | Produce a deterministic write plan without consuming candidates or mutating GitLab. |
-| `manual` | Render a local draft handoff and ordinary branch push plan. `--ssh-mr` is rejected with LABEL_ERROR; no unverified MR creation is allowed. |
+| `manual --auth ssh` | Render a local handoff and ordinary branch push plan only after an explicit human request. `--ssh-mr` is rejected with LABEL_ERROR; no unverified MR creation is allowed. |
 | `create` | Create or upsert a merge request through the verified transaction path. |
 | `update <iid>` | Update an existing merge request with readback and journal evidence. |
-| `verify <iid>` | Verify stored merge-request state and historical Bundle evidence. |
+| `verify <iid> --level structure` | Verify stored merge-request state and historical Bundle evidence; `ready` and `merge` request additional checks. |
 | `profiles detect` | Detect profiles from the local committed-diff baseline. |
 | `labels list` | Read the live label inventory. |
 | `self-update check/status` | Check or inspect a verified release set. |
 | `skill install/activate/status` | Stage, explicitly activate, or inspect a standalone Skill. |
 
-`--auth auto|ssh|api` selects the authentication path. `auto` is the default
-backward-compatible mode: the Codex Skill's `manual` path is SSH-first, while
-direct API-only commands retain their legacy API behavior. Use `--auth api` to
-make the Token-backed path explicit, or `--auth ssh` to reject API-only
+`--auth auto|ssh|api` selects the authentication path. `api` is the default for
+the CLI and Codex Skill: `context -> preview -> create/update -> verify` uses
+GitLab credentials and verified readback. `--auth auto` remains a compatibility
+selection of API without SSH fallback. Missing credentials or API errors stop
+the flow; they do not authorize automatic manual handoff.
+
+Use `manual --auth ssh` only after an explicit human request for manual handoff;
+omitting `--auth ssh` does not enable this path. SSH mode rejects API-only
 commands. `manual --ssh-mr` is rejected with `LABEL_ERROR` before push planning or
-execution, including when `--push` is supplied. Ordinary `manual` handoff or
-branch push is not a verified MR.
+execution for every auth selection, including when `--push` is supplied.
+Ordinary manual handoff or branch push is not a verified MR. Git may still use
+SSH to publish the source branch before the default API flow.
 
 `--offline` uses only verified local state. `--no-update` skips network update
 work but does not bypass command or trust validation. Tokens and update URLs
@@ -79,4 +84,12 @@ constrain raw Git/API calls or manual GitLab UI operations.
 Source/development builds pin Node `24.16.0`. The macOS native process lock
 requires Perl for `flock`; release-platform acceptance remains a separate gate.
 
-API MR writes require the source branch to be already published at the selected commit. If the push plan is missing/behind, first use `manual --push` (ordinary Git transport) or the displayed push command, then refresh context. API MR commands never push implicitly. `--offline` is rejected for live create/update/verify; use `manual` for a local handoff.
+API MR writes require the source branch to be already published at the selected
+commit. If the push plan is missing/behind, review and execute the ordinary Git
+push command, then refresh context. API MR commands never push implicitly.
+MR diffs and pushes use committed `HEAD` only. Staged, unstaged, and untracked
+files, including `.superpowers` reports, may remain for push, create, update,
+and manual handoff; a clean worktree is not required. The tool does not
+automatically add, stash, clean, or delete local files.
+`--offline` is rejected for live create/update/verify; a local handoff still
+requires an explicit human request and `manual --auth ssh`.

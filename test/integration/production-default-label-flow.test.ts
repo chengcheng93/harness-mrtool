@@ -307,6 +307,9 @@ test("API create refuses offline mode before any live mutation", async (t) => {
   const f = await setup(t); await f.issue();
   const result = await f.run(["create", "--offline"]);
   assert.notEqual(result.code, 0); assert.deepEqual(f.state.writes, []);
+  const { error } = JSON.parse(result.stdout);
+  assert.match(error.safeNextStep, /retry without --offline/iu);
+  assert.doesNotMatch(error.safeNextStep, /manual/iu);
 });
 
 test("default production migration consumes migration-bound context only after exact hash confirmation", async (t) => {
@@ -327,12 +330,26 @@ test("default API create rejects an unpublished source branch before MR mutation
   const result = await f.run(["create"]);
   assert.notEqual(result.code, 0); assert.deepEqual(f.state.writes, []);
   assert.match(result.stdout, /REPOSITORY_ERROR/);
+  const { error } = JSON.parse(result.stdout);
+  assert.match(error.safeNextStep, /displayed (?:ordinary )?Git push command/iu);
+  assert.match(error.safeNextStep, /refresh context and retry/iu);
+  assert.doesNotMatch(error.safeNextStep, /manual/iu);
 });
 
-for (const flag of ["sourceMissingOnFind", "dirtyOnFind"] as const) {
-  test(`production rechecks ${flag} after preflight without any MR mutation`, async (t) => {
-    const f = await setup(t); await f.issue(); f.state[flag] = true;
-    const result = await f.run(["create"]);
-    assert.notEqual(result.code, 0); assert.deepEqual(f.state.writes, []);
-  });
-}
+test("production rechecks unpublished source after preflight without any MR mutation", async (t) => {
+  const f = await setup(t); await f.issue(); f.state.sourceMissingOnFind = true;
+  const result = await f.run(["create"]);
+  assert.notEqual(result.code, 0); assert.deepEqual(f.state.writes, []);
+});
+
+test("production allows local worktree changes after preflight for create and update", async (t) => {
+  const f = await setup(t); await f.issue(); f.state.dirtyOnFind = true;
+  const created = await f.run(["create"]);
+  assert.equal(created.code, 0, created.stdout + created.stderr);
+  await f.issue(88);
+  f.raw.changes.summary = ["Update the committed change while local work continues."];
+  const updated = await f.run(["update", "88"]);
+  assert.equal(updated.code, 0, updated.stdout + updated.stderr);
+  const verified = await f.run(["verify", "88", "--level", "structure"]);
+  assert.equal(verified.code, 0, verified.stdout + verified.stderr);
+});

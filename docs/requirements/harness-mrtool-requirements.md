@@ -748,7 +748,7 @@ harness-mrtool create --profile auto
 
 CLI 的规范组合语法使用 `+`，例如 `code+docs`；Request 中始终使用排序后的数组 `"profileIds": ["code", "docs"]`。逗号不作为 Profile 分隔符。
 
-`auto` 使用 Template Bundle 中的版本化路径规则和 canonical ChangeSet 确定性判断。`create`/`update` 要求工作区无 staged、unstaged 或未跟踪的业务文件；ChangeSet 是目标分支本地 tracking ref 与 source HEAD 的 merge-base 到 source HEAD 的 committed diff。命令记录 target ref SHA、merge-base SHA 和 source HEAD SHA：
+`auto` 使用 Template Bundle 中的版本化路径规则和 canonical ChangeSet 确定性判断。push/create/update/manual 均允许工作区保留 staged、unstaged 和 untracked 文件，包括 `.superpowers` 报告，不要求工作区干净。MR diff 和推送只使用已提交的 `HEAD`，工具不自动 add、stash、clean 或删除文件。ChangeSet 是目标分支本地 tracking ref 与 source HEAD 的 merge-base 到 source HEAD 的 committed diff。命令记录 target ref SHA、merge-base SHA 和 source HEAD SHA：
 
 - 只有文档路径或文档扩展名：`docs`；
 - 只有代码及代码测试：`code`；
@@ -766,7 +766,7 @@ V1 初始匹配规则至少包括：
 | `code` | `src/**`、`test/**`、`tests/**` 及 Bundle registry 中声明的源代码/测试扩展名 |
 | `general` | 全部文件均未命中 `code`/`docs`/`ops`，但命中版本化 general 规则的其他已知变更 |
 
-rename 同时按旧路径和新路径分类，delete 按旧路径分类。一个文件或多个文件命中多个 Profile 时取组合。任意 diff item 未命中版本化 registry、属于未知二进制或 unsupported submodule change 时，整个 auto detection 结果为 `ambiguous`：交互要求选择，非交互返回 `PROFILE_REQUIRED`；不得忽略未知项，也不得自动把 `general` 与其他 Profile 组合。只有所有 item 都能被 registry 分类时，才应用组合规则。精确扩展名与优先级以版本化 Profile fixture 为准，发布校验必须覆盖 known+unknown 混合、rename、delete、大小写和路径分隔符归一化。`context`/`preview` 可以在 dirty worktree 上提供建议，但不得把未提交内容视为即将写入 GitLab 的 MR diff。
+rename 同时按旧路径和新路径分类，delete 按旧路径分类。一个文件或多个文件命中多个 Profile 时取组合。任意 diff item 未命中版本化 registry、属于未知二进制或 unsupported submodule change 时，整个 auto detection 结果为 `ambiguous`：交互要求选择，非交互返回 `PROFILE_REQUIRED`；不得忽略未知项，也不得自动把 `general` 与其他 Profile 组合。只有所有 item 都能被 registry 分类时，才应用组合规则。精确扩展名与优先级以版本化 Profile fixture 为准，发布校验必须覆盖 known+unknown 混合、rename、delete、大小写和路径分隔符归一化。所有命令均以 committed diff 处理 MR，未提交内容不参与 MR diff 或推送。
 
 组合规则：
 
@@ -1269,7 +1269,7 @@ CLI 从当前 Git 仓库确定：
 - 已存在且 SHA 相同：继续；
 - 远端分支不存在或严格落后于本地、可以 fast-forward：交互模式展示 remote、ref、commit range 和 exact push command，获得明确确认后执行普通 push；非交互模式只有显式 `--push` 才执行；
 - 远端领先、diverged、目标 remote/project 不唯一或 branch 受保护拒绝写入：失败并说明原因；
-- V1 不执行 force push、tag push、其他分支 push，也不在 dirty worktree 上 push；
+- V1 不执行 force push、tag push 或其他分支 push；工作区可保留 staged、unstaged 和 untracked 文件，普通 push 只发送已提交的 `HEAD`；
 - push 完成后必须重新读取远端 source SHA，只有与本地 HEAD 完全一致才进入 MR 查询/创建；
 - `preview` 默认只报告 push plan，不执行 push；`--dry-run` 对任何命令都不得发生远端写入。
 
@@ -1360,7 +1360,7 @@ harness-mrtool create
 harness-mrtool update [iid]
 harness-mrtool verify [iid] --level structure|ready|merge
 harness-mrtool preview
-harness-mrtool manual [--ssh-mr]
+harness-mrtool manual --auth ssh
 harness-mrtool schema show [--from-mr <iid>]
 harness-mrtool profiles list
 harness-mrtool profiles detect
@@ -1397,12 +1397,14 @@ harness-mrtool version
 --no-update
 ```
 
-`--auth auto` 是默认兼容模式。Codex Skill 的默认业务路径是
-`schema show -> profiles list -> manual --auth ssh`，不读取 GitLab API
-或 Token；直接调用 API-only 命令时，`auto` 保留旧的 API 行为，推荐显式写
-`--auth api`。`--auth ssh` 才是强制禁止 API-only 命令的模式。
-`manual` 额外支持显式 `--ssh-mr` 请求 GitLab 基础 MR（Draft 请求会附带
-Draft 选项），且结果必须经过网页确认，不得当作 API 回读成功。
+`--auth api` 是 CLI 与 Codex Skill 的默认认证方式，默认业务路径为
+`schema show -> profiles list -> context -> Request -> preview -> create/update -> verify`。
+`--auth auto` 只保留为 API 选择的兼容写法，不自动回退 SSH；缺少 Token、
+认证失败或 API 请求失败时停止，并按错误和安全下一步处理。
+仅在人类明确要求手工交接时，才使用 `manual --auth ssh`，生成本地材料和
+普通分支推送计划；省略 `--auth ssh` 不会启用此路径。`--auth ssh` 禁止
+API-only 命令。`manual --ssh-mr` 对所有认证选择均返回 `LABEL_ERROR`，
+包括同时传入 `--push` 时，也必须在 push 规划或执行前停止，不能创建基础 MR。
 
 `--offline` 完全跳过本次网络更新检查并明确输出 `latestVersionConfirmed:false`，只使用 last-known-good；它不跳过 GitLab 业务 API。`--no-update` 仍检查 manifest，但不自动安装新版；若已验证 manifest 声明当前版本被撤销或不再兼容，有副作用命令仍失败。两者不能用于掩盖签名失败或已知撤销。
 
@@ -1435,7 +1437,7 @@ JSON 输出必须包含稳定的：
 - 当前目录是否为 Git 仓库；
 - remote 和 GitLab Host 是否可识别；
 - Git identity 是否有效；
-- 使用 `--auth api` 时检查 GitLab 认证和最小权限；SSH-first 手工模式不调用 API；
+- 默认 API 模式检查 GitLab 认证和最小权限；仅人类明确要求的 `--auth ssh` 手工模式不调用 API；
 - Labels、Issue、MR REST 与所需 GraphQL mutation；
 - 当前 release set 和签名缓存；
 - Template Bundle 完整性；
@@ -1481,13 +1483,13 @@ Skill 是可选的自然语言适配层，不是核心控制器。OpenAI Skill �
 Skill 名建议为 `harness-mr`，职责为：
 
 1. 调用本地 `schema show` 和 `profiles list`；
-2. 分析 diff、commits 和实际测试输出；
-3. 依据 CLI 返回的 Schema 组织 Request；
+2. 默认获取 API `context`，分析 diff、commits 和实际测试输出；
+3. 依据 CLI 返回的 Schema 和当前 context 组织 Request；
 4. 对无法从仓库确定的信息逐项询问用户；
-5. 默认调用 `manual --auth ssh`，展示标题、正文和推送计划；
-6. 用户确认后才执行 SSH branch push，由用户在 GitLab 网页创建 MR；
-7. 只有用户显式选择 API 模式时，才调用 `context --auth api -> preview -> create/update -> verify`；
-8. 只根据 CLI JSON 结果报告成功或失败，未回读的 SSH MR 只能报告为 requested-unverified。
+5. 默认调用 API `preview`，展示标题、正文、标签和人员计划；
+6. 审查后执行 `create/update` 并 `verify` 回读；源分支应提前发布，Git 可以使用 SSH 传输；
+7. 只有人类明确要求手工交接时，才使用 `manual --auth ssh`，审查后可显式普通分支 push，再由用户在 GitLab 网页创建 MR；`--ssh-mr` 禁用并返回 `LABEL_ERROR`；
+8. 只根据 CLI JSON 结果报告成功或失败；缺少凭据或 API 失败时停止，不自动回退；普通 handoff/push 不得报告为已创建或已验证 MR。
 
 ### 14.2 每次 Skill 调用
 
@@ -1498,7 +1500,7 @@ harness-mrtool schema show --output json
 harness-mrtool profiles list --output json
 ```
 
-只有 API 模式才调用下面的上下文入口；这次 CLI 调用本身已经执行统一更新 preflight，因此不需要 Skill 再维护第二套版本检查脚本。
+默认 API 流程接着调用下面的上下文入口；这次 CLI 调用本身已经执行统一更新 preflight，因此不需要 Skill 再维护第二套版本检查脚本。
 
 ```text
 harness-mrtool context \
@@ -1523,10 +1525,11 @@ CLI 尚未安装时，Skill 可调用其 bundled bootstrap script 安装公开 R
 
 ## 15. GitLab 认证与安全
 
-- CLI 的默认人工提交路径使用 Git SSH，不依赖 GitLab Token；
-- CLI 直接调用 GitLab API 的完整能力只在显式 `--auth api` 下启用，不依赖用户安装 `glab`；
-- SSH Push Options 只在显式 `manual --auth ssh --ssh-mr` 下启用，且仅发送 create、target、title、description 和可选 draft；
-- SSH 模式不自动选择或创建标签、不设置负责人/审核人、不执行自动合并，MR 创建结果必须由 GitLab 网页回读确认；
+- CLI 与 Skill 默认通过 GitLab API 自动创建/更新并回读 MR，需要当前 Host 的 API Token，不依赖用户安装 `glab`；
+- `--auth auto` 仅兼容选择 API；缺少 Token 或 API 失败时停止，不自动回退 SSH 或手工交接；
+- 仅在人类明确要求手工交接时使用 `manual --auth ssh`，不读取 API Token、不选择实时标签或人员，也不声称 MR 已创建；
+- `manual --ssh-mr` 对所有认证选择均返回 `LABEL_ERROR`，在 push 规划或执行前停止，即使同时传入 `--push` 也不能创建基础 MR；
+- Git 本身仍可通过 SSH 发布源分支；Git 传输方式不改变 MR 的默认 API 流程，API MR 命令不自动 push；
 - Token 不得作为普通命令行参数；
 - SSH 私钥只由系统 SSH agent/凭据管理器使用，不进入 CLI argv、Request、日志或 MR 正文；
 - 人工凭据优先保存到系统凭据库；

@@ -12,6 +12,7 @@ import {
   type SkillReleaseVerifier,
 } from "../../src/skill/manager.ts";
 import { canonicalizeJson } from "../../src/contracts/jcs.ts";
+import { parseCliInvocation } from "../../src/cli/program.ts";
 import { renderSkillInstructions } from "../../src/skill/projection.ts";
 
 const CLI_VERSION = "1.2.0";
@@ -75,20 +76,67 @@ async function manager(paths: { readonly active: string; readonly staging: strin
   });
 }
 
-test("Skill instructions begin with SSH-first local inspection and delegate rendering/labels to the CLI", () => {
-  const instructions = renderSkillInstructions({ skillVersion: "1.1.0", skillProtocol: 1 });
-  const schemaIndex = instructions.indexOf("harness-mrtool schema show");
-  assert.notEqual(schemaIndex, -1);
-  assert.ok(schemaIndex < instructions.indexOf("harness-mrtool manual --auth ssh"));
-  assert.ok(instructions.includes("--ssh-mr"));
-  assert.ok(instructions.includes("--auth api"));
-  assert.ok(instructions.includes("harness-mrtool manual"));
-  assert.ok(instructions.includes("--auth api"));
-  assert.ok(instructions.includes("harness-mrtool create"));
-  assert.ok(instructions.includes("harness-mrtool update"));
+function assertApiDefaultInstructions(instructions: string): void {
+  const normalized = instructions.replace(/\s+/gu, " ");
+  assert.match(normalized, /The default path is API/u);
+  const steps = [
+    "harness-mrtool schema show",
+    "harness-mrtool profiles list",
+    "harness-mrtool context --auth api",
+    "Build the Request only after API context succeeds",
+    "harness-mrtool preview --auth api",
+    "harness-mrtool create --auth api",
+    "harness-mrtool update <iid> --auth api",
+    "harness-mrtool verify <iid> --auth api",
+    "harness-mrtool manual --auth ssh",
+  ];
+  let previousIndex = -1;
+  for (const step of steps) {
+    const index = instructions.indexOf(step);
+    assert.ok(index > previousIndex, `${step} must follow the preceding workflow step`);
+    previousIndex = index;
+  }
+  assert.match(normalized, /API credentials are missing or the host's HTTP API is incompatible, stop and explain/u);
+  assert.match(normalized, /Never automatically fall back to manual/u);
+  assert.match(normalized, /Manual mode is disabled by default/u);
+  assert.match(normalized, /only when the human explicitly requests/u);
+  assert.match(normalized, /--ssh-mr`? is disabled/u);
+  assert.match(normalized, /API mode may still use ordinary Git SSH transport/u);
+  assert.ok(!normalized.includes("SSH-first"));
+  assert.ok(!normalized.includes("opt-in basic Draft MR"));
   assert.ok(!instructions.includes("status::"));
   assert.ok(!instructions.includes("type::"));
   assert.ok(!instructions.includes("## 1. Changes"));
+  assert.ok(instructions.includes("--client codex-skill --client-version <skill-semver> --skill-protocol <protocol>"));
+  assert.ok(instructions.includes("activationRequired"));
+  assert.ok(instructions.includes("hostRefreshMayBeRequired"));
+  const verifyExample = instructions.split("\n").find((line) => line.startsWith("harness-mrtool verify "));
+  assert.ok(verifyExample, "Skill must provide an executable verify example");
+  const verifyArguments = verifyExample
+    .replaceAll("<iid>", "12")
+    .replaceAll("<skill-semver>", "1.1.0")
+    .replaceAll("<protocol>", "1")
+    .split(/\s+/u)
+    .slice(1);
+  assert.deepEqual(parseCliInvocation(verifyArguments).command, { kind: "verify", iid: 12, level: "structure" });
+}
+
+test("generated Skill instructions default to the complete API workflow and require human opt-in for SSH manual mode", () => {
+  assertApiDefaultInstructions(renderSkillInstructions({ skillVersion: "1.1.0", skillProtocol: 1 }));
+});
+
+for (const path of ["../../skill/harness-mr/SKILL.md", "../../plugins/harness-mrtool/skills/harness-mr/SKILL.md"]) {
+  test(`${path} keeps the API default and explicit manual opt-in contract`, async () => {
+    assertApiDefaultInstructions(await readFile(new URL(path, import.meta.url), "utf8"));
+  });
+}
+
+test("bundled and plugin Skills carry identical submission instructions", async () => {
+  const [bundled, plugin] = await Promise.all([
+    readFile(new URL("../../skill/harness-mr/SKILL.md", import.meta.url), "utf8"),
+    readFile(new URL("../../plugins/harness-mrtool/skills/harness-mr/SKILL.md", import.meta.url), "utf8"),
+  ]);
+  assert.equal(plugin, bundled);
 });
 
 test("Skill manager prepares the staging root through the private-directory verifier", async () => {

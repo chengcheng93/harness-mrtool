@@ -12,7 +12,7 @@
 
 ## 1. 架构目标
 
-本架构把 MR 生成从 AI 临场组织文本改为确定性编译过程：调用者提交结构化 Request，CLI 固定完成解析、Schema 校验、模板渲染和 Git 事务校验。默认 SSH-first 路径不要求 GitLab Token：CLI 生成可审计的 title/body/push plan，用户通过 SSH 推送后在 GitLab 网页创建 MR。API 命令启用实时上下文、候选解析、MR 写入和最终回读，建议显式传入 `--auth api`；`auto` 对直接 API 命令保留兼容行为。API 路径返回成功意味着远端实际状态已满足该事务固定的 Bundle 及强制写入合同。工具不代表 GitLab 合并门禁，也无法限制原始 Git/API 或网页操作。
+本架构把 MR 生成从 AI 临场组织文本改为确定性编译过程：调用者提交结构化 Request，CLI 固定完成解析、Schema 校验、模板渲染和 Git 事务校验。CLI 与 Skill 默认使用 `--auth api`，通过 `context -> preview -> create/update -> verify` 完成实时上下文、候选解析、MR 写入和最终回读；`--auth auto` 只兼容选择 API，不回退 SSH。缺少 Token 或 API 失败时停止，不自动生成手工交接材料。仅在人类明确要求手工交接时才运行 `manual --auth ssh`；Git 本身仍可使用 SSH 发布源分支。API 路径返回成功意味着远端实际状态已满足该事务固定的 Bundle 及强制写入合同。工具不代表 GitLab 合并门禁，也无法限制原始 Git/API 或网页操作。
 
 V1 的优先级依次为：
 
@@ -35,7 +35,7 @@ V1 的优先级依次为：
 | GitLab 访问 | 生产 adapter 直接调用 REST/GraphQL；不依赖额外 CLI |
 | 模板事实源 | 公开 GitHub 仓库中的版本化 Template Bundle |
 | 自动更新 | 每次业务调用短预算检查，可信 last-known-good 离线继续 |
-| 默认认证 | Skill manual 路径 SSH-first；直接 API 命令在 auto 下保留兼容行为，建议显式 `--auth api` |
+| 默认认证 | CLI/Skill 默认 `api`；`auto` 只兼容选择 API，无 SSH fallback；手工交接仅在人类明确要求后显式 `manual --auth ssh` |
 | macOS 本地锁 | native process lock 使用 Perl `flock`；源码环境需可用 Perl，不等于正式平台支持声明 |
 | Windows 更新 | staging 新 CLI 执行业务，临时 helper 在旧进程退出后持久化替换 |
 | 代码组织 | 端口与适配器；领域层不得导入 CLI、HTTP、文件系统或进程实现 |
@@ -47,7 +47,7 @@ flowchart LR
     U["Human / Script / Codex Skill"] --> C["harness-mrtool CLI"]
     C --> G["Local Git"]
     C --> GIT["Git SSH push"]
-    C --> L["GitLab REST / GraphQL (explicit API mode)"]
+    C --> L["GitLab REST / GraphQL (default API mode)"]
     C --> H["Public GitHub signed channel"]
     H --> R["Immutable Releases"]
     C --> S["Private local state"]
@@ -85,21 +85,27 @@ domain         -X-> concrete HTTP, fs, process, console or CLI parsing
 
 ### 5.1 Context 与候选 token
 
-1. API 模式下，CLI 解析当前 Git remote、GitLab host/project、target branch 和 source HEAD；SSH-first 模式只依赖本地 Git remote、target branch 和 source HEAD。
+1. 默认 API 模式下，CLI 解析当前 Git remote、GitLab host/project、target branch 和 source HEAD；人类明确要求的 `manual --auth ssh` 交接只依赖本地 Git remote、target branch 和 source HEAD。MR diff 和推送只使用已提交的 `HEAD`；push/create/update/manual 允许 staged、unstaged、untracked 文件及 `.superpowers` 报告，不要求工作区干净，也不自动 add、stash、clean 或删除文件。
 2. CLI 固定一个已验证的 release-set 与 Bundle，并实时分页读取项目及祖先组标签、Issue 和人员候选。
 3. CLI 构造 `ExternalContextSnapshot`，发放 256-bit 随机 candidate token。
 4. 本地只保存 token 的 SHA-256 digest；context 文件绑定 host、project、候选类型、真实 ID、Bundle hash、protocol、创建时间和 30 分钟 TTL。
 5. `create`/`update` 只接受该 context 发放的 token。解析后仍要从 GitLab 重新验证对象存在、未归档且仍符合 Policy。
 
-### 5.5 SSH-first 手工提交
+### 5.5 默认 API 与显式手工交接
 
-默认 Skill 流程不调用 `context`、`labels list` 或 GitLab API：
+默认 Skill 流程使用 API，缺少凭据或 API 失败时停止：
+
+```text
+schema show -> profiles list -> context --auth api -> Request -> preview -> create/update -> verify
+```
+
+仅在人类明确要求手工交接时启用以下例外，不自动回退到该路径：
 
 ```text
 schema show -> profiles list -> manual --auth ssh -> review -> SSH push -> GitLab Web MR
 ```
 
-`manual` 只生成本地 handoff 和普通分支 push plan。`--ssh-mr` 已在命令层拒绝，不能绕过强制标签策略创建基础 MR。新的事务层从绑定 merge-base/HEAD 的 diff 自动计算类型，默认 `priority::p2`，按 Draft/Ready 选择状态；不再使用排期标签。必须写入并回读恰好三个固定池标签。默认 production 入口已装配 create/update/upsert/verify，交互向导也接入相同自动标签选择器。普通手工 handoff/push 不是已验证 MR。可执行入口的本地实现不等于已发布或真实 GitLab 验收通过。
+`manual` 必须显式使用 `--auth ssh`，只生成本地 handoff 和普通分支 push plan。`--ssh-mr` 对所有认证选择均返回 `LABEL_ERROR`，在 push 规划或执行前停止，不能绕过强制标签策略创建基础 MR。Git SSH 传输仍可用于 API 流程之前的普通分支发布。新的事务层从绑定 merge-base/HEAD 的 diff 自动计算类型，默认 `priority::p2`，按 Draft/Ready 选择状态；不再使用排期标签。必须写入并回读恰好三个固定池标签。默认 production 入口已装配 create/update/upsert/verify，交互向导也接入相同自动标签选择器。普通手工 handoff/push 不是已验证 MR。可执行入口的本地实现不等于已发布或真实 GitLab 验收通过。
 
 context 必须使用当前用户私有目录、原子替换和跨进程锁。Windows 通过 ACL 保障当前用户可读；类 Unix 目标若以后支持则要求 mode `0600`。原始 token 不写日志、marker 或诊断文件。
 
@@ -285,7 +291,7 @@ SEA 配置固定 `useSnapshot=false`、`useCodeCache=false`、`execArgvExtension
 | Unit / property / fuzz | 严格解析、Schema、Profile、renderer、marker、token、签名、兼容求交 |
 | Golden | 八段英文模板、Profile 组合、canonical empty、诊断 marker 字节输出 |
 | Fake HTTP + fault injection | GitHub/GitLab 分页、超时、竞态、partial、回滚、LKG、更新 crash points |
-| Local bare Git | merge-base、rename/delete/submodule、dirty/diverged、普通 push |
+| Local bare Git | merge-base、rename/delete/submodule、未提交文件保留且仅推送 committed HEAD、diverged、普通 push |
 | Windows integration | SEA、运行中 EXE handoff、锁、journal、Credential Manager、无 Node 运行 |
 | Real GitLab | API shape/权限、ID label mutation、组标签、scoped label、真实回读 |
 | Public GitHub prerelease | Immutable Release、Pages、attestation、真实升级/回滚 |

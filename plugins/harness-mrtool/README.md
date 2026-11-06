@@ -16,11 +16,9 @@ not include the mandatory-label changes:
 
 <https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.5>
 
-The current published CLI supports Windows x64. A GitLab token is optional:
-the default Skill path is SSH-first and renders a local handoff before the user
-creates the MR in the GitLab web UI. The live context and API write path remain
-available explicitly with `--auth api`.
-When credentials are used, configure them only in the host-scoped environment
+The historical published CLI supports Windows x64. The default CLI and Skill
+flow uses the GitLab API to create or update an MR and read back its final state.
+Configure a GitLab token in the host-scoped environment
 variables documented by the CLI. Never put a GitLab token in a command line,
 plugin file, or prompt.
 
@@ -38,16 +36,25 @@ Start a new Codex thread after installation so the host discovers the Skill.
 
 ## Skill flow
 
-The default invocation follows this order:
+The default invocation follows this order (`--auth api` is the CLI default):
 
 ```text
-schema/profiles -> structured Request -> manual --auth ssh -> user confirmation -> SSH push
+context --auth api -> structured Request -> preview -> user confirmation -> create/update -> verify
 ```
 
-The optional API invocation follows this order:
+Missing credentials or API failures stop the flow; never automatically fall back
+to SSH or manual handoff. `--auth auto` remains a compatibility alias for API
+selection without SSH fallback. Git may still use SSH to push the source branch
+before the API flow; Git transport does not select the MR creation mode.
+
+MR diffs and pushes use committed `HEAD` only. Staged, unstaged, and untracked
+files, including `.superpowers` reports, may remain in the worktree. The tool
+does not automatically add, stash, clean, or delete them.
+
+Use `manual --auth ssh` only after an explicit human request for manual handoff:
 
 ```text
-context --auth api -> structured Request -> preview -> user confirmation -> create/update/verify
+schema/profiles -> structured Request -> manual --auth ssh -> user confirmation -> manual --auth ssh --push -> web MR
 ```
 
 The manual path does not claim a remote MR was created and does not choose live

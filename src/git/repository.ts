@@ -616,21 +616,6 @@ export async function discoverRepository(
   });
 }
 
-export async function assertCleanWorktree(
-  repository: RepositorySnapshot,
-): Promise<void> {
-  const current = await readWorktree(repository.runner);
-  if (!current.clean) {
-    throw repositoryError(
-      "A clean worktree is required before a branch write",
-      "worktree",
-      "no staged, unstaged, unmerged, or untracked files",
-      "dirty",
-      "Commit or remove the worktree changes, then retry.",
-    );
-  }
-}
-
 export async function assertRepositoryUnchanged(
   repository: RepositorySnapshot,
 ): Promise<void> {

@@ -19,7 +19,6 @@ import { pathToFileURL } from "node:url";
 import { isToolError } from "../../src/contracts/errors.ts";
 import { readCanonicalChangeSet } from "../../src/git/change-set.ts";
 import {
-  assertCleanWorktree,
   discoverRepository,
   runGitChecked,
 } from "../../src/git/repository.ts";
@@ -54,6 +53,38 @@ class RecordingProcessRunner implements ProcessRunner {
 
 function isPushRequest(request: ProcessRequest): boolean {
   return request.arguments[0] === "push" || request.arguments[2] === "push";
+}
+
+async function addUncommittedChanges(fixture: GitFixture): Promise<void> {
+  await fixture.write("src/modified.ts", "export const value = 2;\n");
+  await fixture.git(["add", "--", "src/modified.ts"]);
+  await fixture.write("src/modified.ts", "export const value = 3;\n");
+  await fixture.write(".superpowers/sdd/report.md", "Untracked local report.\n");
+  await fixture.write("untracked-local.txt", "Local scratch file.\n");
+}
+
+async function localChangeEvidence(fixture: GitFixture) {
+  return {
+    status: await fixture.git(["status", "--porcelain=v2", "-z", "--untracked-files=all"]),
+    staged: await fixture.git(["diff", "--cached", "--binary"]),
+    unstaged: await fixture.git(["diff", "--binary"]),
+    tracked: await fixture.read("src/modified.ts"),
+    report: await fixture.read(".superpowers/sdd/report.md"),
+    untracked: await fixture.read("untracked-local.txt"),
+  };
+}
+
+async function assertOnlyCommittedHeadIsRemote(fixture: GitFixture, committedHead: string): Promise<void> {
+  assert.equal(await fixture.remoteHead(), committedHead);
+  assert.equal(
+    await fixture.git(["--git-dir", fixture.remotePath, "show", "refs/heads/feature/task7:src/modified.ts"]),
+    "export const value = 1;\n",
+  );
+  const remoteFiles = await fixture.git([
+    "--git-dir", fixture.remotePath, "ls-tree", "--name-only", "-r", "refs/heads/feature/task7",
+  ]);
+  assert.equal(remoteFiles.includes(".superpowers/"), false);
+  assert.equal(remoteFiles.includes("untracked-local.txt"), false);
 }
 
 interface HeldWindowsFile {
@@ -308,10 +339,9 @@ test("repository discovery records branch, HEAD, target ref SHA, and dirty state
   assert.equal(repository.worktree.clean, true);
 
   await fixture.write("untracked.txt", "dirty\n");
-  await assert.rejects(
-    assertCleanWorktree(repository),
-    (error: unknown) => isToolError(error, "REPOSITORY_ERROR", /clean worktree/i),
-  );
+  const untracked = await discoverRepository({ cwd: fixture.worktreePath, targetBranch: "main" });
+  assert.deepEqual(untracked.worktree, { clean: false, staged: false, unstaged: false, untracked: true });
+  assert.equal(untracked.sourceHeadSha, expectedHead);
 
   await fixture.remove("untracked.txt");
   await fixture.rename("src/rename-old.ts", "src/rename-staged.ts");
@@ -738,21 +768,26 @@ test("up-to-date execution rechecks the repository and live remote", async (t) =
     assert.equal(await fixture.remoteHead(), remoteHead);
   });
 
-  await t.test("worktree became dirty after planning", async (t) => {
+  await t.test("uncommitted local files after planning preserve the up-to-date no-op", async (t) => {
     const fixture = await fixtureFor(t);
-    await fixture.commitFile("src/equal.ts", "export const equal = true;\n", "equal");
+    const committedHead = await fixture.commitFile("src/equal.ts", "export const equal = true;\n", "equal");
     await fixture.pushSource();
+    const processRunner = new RecordingProcessRunner();
     const repository = await discoverRepository({
       cwd: fixture.worktreePath,
+      processRunner,
       targetBranch: "main",
     });
     const plan = await planSourceBranchPush(repository, { allowPush: true });
-    await fixture.write("dirty-after-plan.txt", "dirty\n");
+    await addUncommittedChanges(fixture);
+    const before = await localChangeEvidence(fixture);
 
-    await assert.rejects(
-      executeSourceBranchPush(repository, plan, { authorized: true }),
-      (error: unknown) => isToolError(error, "REPOSITORY_ERROR", /clean worktree/i),
-    );
+    const result = await executeSourceBranchPush(repository, plan, { authorized: true });
+
+    assert.equal(result.kind, "not-written");
+    assert.equal(processRunner.requests.some(isPushRequest), false);
+    assert.deepEqual(await localChangeEvidence(fixture), before);
+    await assertOnlyCommittedHeadIsRemote(fixture, committedHead);
   });
 
   await t.test("local HEAD changed after planning", async (t) => {
@@ -1068,23 +1103,30 @@ test("remote ahead and diverged source refs are blocked without a push command",
   });
 });
 
-test("push execution rechecks cleanliness and reports a rejected remote write", async (t) => {
-  await t.test("dirty after planning", async (t) => {
-    const fixture = await fixtureFor(t);
-    await fixture.commitFile("src/local.ts", "export const local = true;\n", "local");
-    const repository = await discoverRepository({
-      cwd: fixture.worktreePath,
-      targetBranch: "main",
-    });
-    const plan = await planSourceBranchPush(repository, { allowPush: true });
-    await fixture.write("untracked-after-plan.txt", "dirty\n");
+test("push execution preserves uncommitted local files and reports a rejected remote write", async (t) => {
+  for (const when of ["before discovery", "after planning"] as const) {
+    await t.test(`staged, unstaged, and untracked files ${when} do not block committed HEAD`, async (t) => {
+      const fixture = await fixtureFor(t);
+      const committedHead = await fixture.commitFile("src/local.ts", "export const local = true;\n", "local");
+      if (when === "before discovery") await addUncommittedChanges(fixture);
+      const repository = await discoverRepository({
+        cwd: fixture.worktreePath,
+        targetBranch: "main",
+      });
+      if (when === "before discovery") {
+        assert.deepEqual(repository.worktree, { clean: false, staged: true, unstaged: true, untracked: true });
+      }
+      const plan = await planSourceBranchPush(repository, { allowPush: true });
+      if (when === "after planning") await addUncommittedChanges(fixture);
+      const before = await localChangeEvidence(fixture);
 
-    await assert.rejects(
-      executeSourceBranchPush(repository, plan, { authorized: true }),
-      (error: unknown) => isToolError(error, "REPOSITORY_ERROR", /clean worktree/i),
-    );
-    assert.equal(await fixture.remoteHead(), null);
-  });
+      const result = await executeSourceBranchPush(repository, plan, { authorized: true });
+
+      assert.equal(result.kind, "pushed");
+      assert.deepEqual(await localChangeEvidence(fixture), before);
+      await assertOnlyCommittedHeadIsRemote(fixture, committedHead);
+    });
+  }
 
   await t.test("server rejection", async (t) => {
     const fixture = await fixtureFor(t);

@@ -8,7 +8,7 @@ import test from "node:test";
 
 
 
-import { isToolError } from "../../src/contracts/errors.ts";
+import { isToolError, ToolError } from "../../src/contracts/errors.ts";
 import {
   createDefaultUpdaterCommandServices,
   createProductionCommandHandlers,
@@ -109,6 +109,40 @@ test("SSH auth mode rejects API-only production commands before invoking handler
 
 
 
+
+test("API credential failures remain errors without falling back to manual SSH", async (t) => {
+  for (const auth of [[], ["--auth", "auto"]]) {
+    await t.test(auth.join(" ") || "default API", async () => {
+      let selectedAuth: string | undefined;
+      let handoffCalled = false;
+      const handlers = createProductionCommandHandlers({
+        cliVersion: "0.1.7-test",
+        create: async (invocation) => {
+          selectedAuth = invocation.options.authMode;
+          throw new ToolError("AUTH_ERROR", "API credentials are unavailable", {
+            field: "authMode",
+            expected: "host-scoped GitLab API credentials",
+            actual: "unavailable",
+            safeNextStep: "Configure API credentials and retry.",
+          });
+        },
+        manual: async () => { handoffCalled = true; return {}; },
+      });
+      const chunks: string[] = [];
+      const result = await executeCliJson(["create", ...auth, "--output", "json"], {
+        cliVersion: "0.1.7-test",
+        handlers,
+        stdout: { write(chunk, callback) { chunks.push(chunk); callback(); return true; } },
+      });
+      const output = JSON.parse(chunks[0]!) as Record<string, unknown>;
+      assert.equal(output.code, "AUTH_ERROR");
+      assert.equal(output.ok, false);
+      assert.equal(result.exitCode, 3);
+      assert.equal(selectedAuth, auth.length === 0 ? "api" : "auto");
+      assert.equal(handoffCalled, false);
+    });
+  }
+});
 
 test("missing production runtime dependencies are classified and do not claim success", async () => {
   const handlers = createProductionCommandHandlers({ cliVersion: "1.0.0" });

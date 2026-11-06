@@ -4,6 +4,8 @@
 
 本工作树的 Template Bundle 为 `1.1.0`。默认 production 入口已接入 API
 `create`、`create --upsert`、`update`、`verify` 和自动标签交互向导。
+CLI 与 Skill 默认使用 API 自动 MR 流程；缺少 Token 或 API 失败时停止，
+不会自动回退到 manual/SSH。`--auth auto` 仅兼容选择 API。
 这是本地实现状态，不代表已发布、已上线或通过真实 GitLab 验收。
 策略由 mrtool 代码执行，不依赖 Skill 文案；它无法限制绕过工具的原始 Git/API
 调用或 GitLab 网页操作，也不是服务端合并门禁。
@@ -27,6 +29,8 @@
 CLI 读取已提交的 canonical actual diff，绑定 `sourceHeadSha`、`targetRefSha`
 和 `mergeBaseSha`，并对规范化证据计算 diff digest。文件变更及内容证据参与
 有界分类；标题、分支名、文件名中的意图词或调用者摘要不能替代真实变更证据。
+未提交内容不参与 MR diff 或推送。staged、unstaged、untracked 文件（包括
+`.superpowers` 报告）均可保留；不要求工作区干净，不自动 add、stash、clean 或删除。
 支持性文档/测试不会覆盖唯一的主变更类型；未知、混合且无法确定或不支持的
 变更不会自动兜底为 `chore`。
 
@@ -71,6 +75,7 @@ production adapter 验证原 receipt、精确历史 Bundle 和迁移绑定后执
 ## SSH 边界
 
 `manual --ssh-mr` 返回 `LABEL_ERROR`，在 push 规划或执行前停止，即使同时
-传入 `--push` 也不能创建基础 MR。普通 `manual --auth ssh` 仍可生成本地
-handoff，确认后可执行普通分支推送；这不是已验证 MR，更不代表标签达标。
-需要工具创建、更新并证明标签状态时使用 API 事务路径。
+传入 `--push` 也不能创建基础 MR。仅在人类明确要求手工交接时，才使用
+`manual --auth ssh` 生成本地 handoff，确认后可执行普通分支推送；这不是
+已验证 MR，更不代表标签达标。Git 本身仍可使用 SSH 发布源分支，随后由
+默认 API 事务路径创建、更新并证明标签状态。

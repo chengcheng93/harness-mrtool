@@ -84,7 +84,7 @@ test("manual handoff renders a token-free MR draft and never calls GitLab", asyn
   });
   const chunks: string[] = [];
   const result = await executeCliJson(
-    ["manual", "--input", "-", "--input-format", "json", "--output", "json"],
+    ["manual", "--auth", "ssh", "--input", "-", "--input-format", "json", "--output", "json"],
     {
       cliVersion: "0.1.4-test",
       handlers: services,
@@ -112,7 +112,7 @@ test("manual handoff renders a token-free MR draft and never calls GitLab", asyn
 
   const pushChunks: string[] = [];
   const pushResult = await executeCliJson(
-    ["manual", "--input", "-", "--input-format", "json", "--push", "--output", "json"],
+    ["manual", "--auth", "ssh", "--input", "-", "--input-format", "json", "--push", "--output", "json"],
     {
       cliVersion: "0.1.4-test",
       handlers: services,
@@ -135,6 +135,48 @@ test("manual handoff renders a token-free MR draft and never calls GitLab", asyn
     beforeSha: null,
     afterSha: repository.sourceHeadSha,
   });
+});
+
+test("manual handoff rejects omitted, auto, or API auth before reading input or planning a push", async (t) => {
+  const bundle = await loadTemplateBundle(resolve(repositoryRoot, "template-bundle"));
+  for (const auth of [[], ["--auth", "auto"], ["--auth", "api"]]) {
+    for (const push of [[], ["--push"]]) {
+      await t.test([...auth, ...push].join(" ") || "default", async () => {
+        const touched: string[] = [];
+        const services = createManualCommandServices({
+          cliVersion: "0.1.7-test",
+          cwd: repositoryRoot,
+          currentBundle: {
+            bundle,
+            bundleManifestHash: sha256Utf8(`${canonicalizeJson(bundle.manifest)}\n`),
+            releaseSetId: "release-set:test",
+            releaseTag: "templates-v1.1.0",
+          },
+          requestSource: { read: async () => { touched.push("input"); return {}; } },
+          repository: {
+            discover: async () => { touched.push("repository"); throw new Error("must not discover repository"); },
+            mergeBase: async () => { touched.push("merge-base"); throw new Error("must not calculate merge base"); },
+            planPush: async () => { touched.push("plan"); throw new Error("must not plan push"); },
+            executePush: async () => { touched.push("push"); throw new Error("must not execute push"); },
+          },
+        });
+        const chunks: string[] = [];
+        const result = await executeCliJson(
+          ["manual", ...auth, "--input", "-", "--input-format", "json", ...push, "--output", "json"],
+          {
+            cliVersion: "0.1.7-test",
+            handlers: services,
+            stdout: { write(chunk, callback) { chunks.push(chunk); callback(); return true; } },
+          },
+        );
+        const output = JSON.parse(chunks[0]!) as Record<string, unknown>;
+        assert.equal(output.code, "AUTH_ERROR");
+        assert.equal(output.ok, false);
+        assert.equal(result.exitCode, 3);
+        assert.deepEqual(touched, []);
+      });
+    }
+  }
 });
 
 test("SSH Push Options are explicit, newline-safe, and exclude metadata mutation", () => {
@@ -215,7 +257,7 @@ test("manual --ssh-mr cannot bypass mandatory labels through SSH push options", 
 
 });
 
-test("manual --ssh-mr rejects API auth mode before rendering or writing", async () => {
+test("manual --ssh-mr stays disabled with API auth before rendering or writing", async () => {
   const bundle = await loadTemplateBundle(resolve(repositoryRoot, "template-bundle"));
   const raw = JSON.parse(await readFile(
     resolve(repositoryRoot, "test/golden/fixtures/code-docs-request.json"),
@@ -247,10 +289,10 @@ test("manual --ssh-mr rejects API auth mode before rendering or writing", async 
       stdout: { write(chunk, callback) { chunks.push(chunk); callback(); return true; } },
     },
   );
-  assert.equal(result.exitCode, 3);
+  assert.equal(result.exitCode, 2);
   const output = JSON.parse(chunks[0]!) as Record<string, unknown>;
   assert.equal(output.ok, false);
-  assert.equal(output.code, "REPOSITORY_ERROR");
+  assert.equal(output.code, "LABEL_ERROR");
 });
 
 test("manual SSH mode requires structured input before any wizard or GitLab access", async () => {

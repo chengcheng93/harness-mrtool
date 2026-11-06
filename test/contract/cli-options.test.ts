@@ -59,7 +59,7 @@ test("parses the complete common CLI flag contract without side effects", () => 
     nonInteractive: true,
     output: "json",
     client: "codex-skill",
-    authMode: "auto",
+    authMode: "api",
     clientVersion: "1.2.3-beta.1",
     skillProtocol: 2,
     push: true,
@@ -73,7 +73,7 @@ test("parses the complete common CLI flag contract without side effects", () => 
   });
 });
 
-test("uses explicit stable defaults", () => {
+test("defaults to API authentication without enabling SSH handoff", () => {
   assert.deepEqual(parseCliOptions([]), {
     confirmLabelType: null, labelDiffDigest: null, priority: null, priorityReason: null,
     input: null,
@@ -81,7 +81,7 @@ test("uses explicit stable defaults", () => {
     nonInteractive: false,
     output: null,
     client: "manual",
-    authMode: "auto",
+    authMode: "api",
     clientVersion: null,
     skillProtocol: null,
     push: false,
