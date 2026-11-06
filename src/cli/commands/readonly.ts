@@ -53,7 +53,8 @@ const CANDIDATE_BEARER = /^hmrc1_[A-Za-z0-9_-]{43}$/u;
 const PROFILE_IDS = ["general", "code", "docs", "ops"] as const;
 
 type ReadOnlyCommandKind = "context" | "labels.list" | "preview";
-type ContextStorePort = Pick<CandidateContextStore, "issue" | "resolve">;
+type ContextStorePort = Pick<CandidateContextStore, "issue" | "resolve"> &
+  Partial<Pick<CandidateContextStore, "loadRecoveryProof">>;
 
 export interface DoctorCheck {
   readonly id: string;

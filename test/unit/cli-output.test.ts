@@ -9,6 +9,8 @@ import { ToolError } from "../../src/contracts/errors.ts";
 import {
   TransactionJournal,
   attachTransactionAudit,
+  attachTransactionFailureReceipt,
+  type TransactionFailureReceiptV1,
 } from "../../src/app/transaction-journal.ts";
 
 const SHA = "a".repeat(40);
@@ -99,6 +101,132 @@ test("CLI failure derives partial remote writes and safe audit data from the att
   assert.equal(envelope.data.transaction.finalState, "unknown");
   assert.equal(serialized.includes("hmrc1_"), false);
   assert.equal(serialized.includes("hmrx1_"), false);
+});
+
+test("CLI partial failure projects the known MR and failed field without resolving an unknown write", async () => {
+  const error = new ToolError("PARTIAL_REMOTE_STATE", "Label write could not be confirmed", {
+    field: "mergeRequest",
+    expected: "confirmed label state",
+    actual: "readback unavailable",
+    safeNextStep: "Inspect the MR and refresh context before retrying.",
+  });
+  attachTransactionAudit(error, {
+    journalVersion: 1,
+    operation: "update",
+    sourceHeadSha: SHA,
+    candidateSelectionDigest: DIGEST,
+    finalState: "unknown",
+    recoveredUnknownOutcome: false,
+    steps: [{
+      sequence: 1,
+      phase: "normal",
+      operation: "labels-add",
+      preRead: { outcome: "succeeded", requestId: "request-before", snapshotDigest: "c".repeat(64) },
+      mutation: { outcome: "unknown", requestId: "request-labels" },
+      postRead: { outcome: "failed", requestId: "request-readback", snapshotDigest: null },
+      postcondition: "unavailable",
+    }],
+  });
+  const receipt: TransactionFailureReceiptV1 = {
+    receiptVersion: 1,
+    iid: 88,
+    iidUnavailable: false,
+    webUrl: "http://gitlab.example.test/group/project/-/merge_requests/88",
+    webUrlUnavailable: false,
+    completedSteps: ["mark-draft: matched"],
+    failedOperation: "labels-add",
+    failedField: "mergeRequest.labels",
+    retryCommand: "harness-mrtool update 88 --input - --non-interactive --output json",
+  };
+  attachTransactionFailureReceipt(error, receipt);
+  const sink = new DelayedSink();
+
+  const result = await new CliJsonOutput({ cliVersion: "0.1.0-dev" }, sink).failure(error);
+
+  assert.equal(result.exitCode, 6);
+  const envelope = JSON.parse(sink.chunks[0] ?? "") as {
+    code: string;
+    remoteWrite: { state: string; operations: string[] };
+    error: { safeNextStep: string };
+    validation: { issues: Array<{ safeNextStep: string }> };
+    data: { transaction: { finalState: string }; failureReceipt: TransactionFailureReceiptV1 };
+  };
+  assert.equal(envelope.code, "PARTIAL_REMOTE_STATE");
+  assert.deepEqual(envelope.remoteWrite, { state: "unknown", operations: ["labels-add"] });
+  assert.equal(envelope.data.transaction.finalState, "unknown");
+  assert.deepEqual(envelope.data.failureReceipt, receipt);
+  assert.match(envelope.error.safeNextStep, /!88/u);
+  assert.match(envelope.error.safeNextStep, /http:\/\/gitlab\.example\.test\/group\/project\/-\/merge_requests\/88/u);
+  assert.match(envelope.error.safeNextStep, /labels-add/u);
+  assert.match(envelope.error.safeNextStep, /mergeRequest\.labels/u);
+  assert.match(envelope.error.safeNextStep, /refresh context before retrying/u);
+  assert.equal(envelope.validation.issues[0]?.safeNextStep, envelope.error.safeNextStep);
+});
+
+test("CLI partial failure preserves an unavailable MR receipt even without a journal", async () => {
+  const error = new ToolError("PARTIAL_REMOTE_STATE", "Create result is unknown", {
+    field: "mergeRequest",
+    expected: "a known MR identity",
+    actual: "identity unavailable",
+    safeNextStep: "Inspect open MRs before attempting another create.",
+  });
+  const receipt: TransactionFailureReceiptV1 = {
+    receiptVersion: 1,
+    iid: null,
+    iidUnavailable: true,
+    webUrl: null,
+    webUrlUnavailable: true,
+    completedSteps: [],
+    failedOperation: "create-outcome-query",
+    failedField: "mergeRequest.createOutcome",
+    retryCommand: "harness-mrtool context --output json",
+  };
+  attachTransactionFailureReceipt(error, receipt);
+  const sink = new DelayedSink();
+
+  const result = await new CliJsonOutput({ cliVersion: "0.1.0-dev" }, sink).failure(error);
+
+  assert.equal(result.exitCode, 6);
+  const envelope = JSON.parse(sink.chunks[0] ?? "") as {
+    remoteWrite: { state: string; operations: string[] };
+    error: { safeNextStep: string };
+    data: { failureReceipt: TransactionFailureReceiptV1; transaction?: unknown };
+  };
+  assert.deepEqual(envelope.data.failureReceipt, receipt);
+  assert.equal(Object.hasOwn(envelope.data, "transaction"), false);
+  assert.deepEqual(envelope.remoteWrite, { state: "not-attempted", operations: [] });
+  assert.match(envelope.error.safeNextStep, /IID.*unavailable/u);
+  assert.match(envelope.error.safeNextStep, /URL.*unavailable/u);
+  assert.match(envelope.error.safeNextStep, /Inspect open MRs before attempting another create/u);
+});
+
+test("CLI receipt projection rejects bearer-shaped receipt text before stdout", async () => {
+  const credential = "Bearer receipt-secret-canary";
+  const error = new ToolError("PARTIAL_DRAFT", "Draft needs inspection", {
+    field: "mergeRequest",
+    expected: "completed fields",
+    actual: "incomplete fields",
+    safeNextStep: "Inspect the Draft.",
+  });
+  attachTransactionFailureReceipt(error, {
+    receiptVersion: 1,
+    iid: 88,
+    iidUnavailable: false,
+    webUrl: "http://gitlab.example.test/group/project/-/merge_requests/88",
+    webUrlUnavailable: false,
+    completedSteps: [],
+    failedOperation: "fields-write",
+    failedField: credential,
+    retryCommand: "harness-mrtool update 88 --input - --non-interactive --output json",
+  });
+  const sink = new DelayedSink();
+
+  const result = await new CliJsonOutput({ cliVersion: "0.1.0-dev" }, sink).failure(error);
+
+  assert.equal(result.exitCode, 7);
+  assert.equal(sink.chunks.length, 1);
+  assert.equal((sink.chunks[0] ?? "").includes(credential), false);
+  assert.equal((JSON.parse(sink.chunks[0] ?? "") as { code: string }).code, "INTERNAL_ERROR");
 });
 
 test("unknown failures become non-reflective INTERNAL_ERROR output", async () => {

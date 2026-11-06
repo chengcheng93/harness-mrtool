@@ -74,7 +74,8 @@ import {
   type TargetProjectResolver,
 } from "./target-project.ts";
 
-type DefaultContextStore = Pick<CandidateContextStoreType, "issue" | "resolve">;
+type DefaultContextStore = Pick<CandidateContextStoreType, "issue" | "resolve"> &
+  Partial<Pick<CandidateContextStoreType, "loadRecoveryProof">>;
 
 export interface ProductionReadOnlyRepositoryRuntime {
   readonly discover: (options: {
@@ -119,7 +120,7 @@ export interface ProductionReadOnlyDefaultsOptions extends ProductionReadOnlyDef
 
 function lazyDefaultContextStore(
   options: ProductionReadOnlyDefaultsOptions,
-): DefaultContextStore {
+): Required<DefaultContextStore> {
   let resolved: CandidateContextStore | undefined;
   const store = (): CandidateContextStore => {
     resolved ??= new CandidateContextStore({
@@ -133,6 +134,7 @@ function lazyDefaultContextStore(
   return Object.freeze({
     issue: async (input: Parameters<DefaultContextStore["issue"]>[0]) => store().issue(input),
     resolve: async (input: Parameters<DefaultContextStore["resolve"]>[0]) => store().resolve(input),
+    loadRecoveryProof: async (input: Parameters<CandidateContextStoreType["loadRecoveryProof"]>[0]) => store().loadRecoveryProof(input),
   });
 }
 
@@ -534,7 +536,8 @@ function validCapabilities(value: unknown): boolean {
       capabilities.mergeRequestSetLabels !== true ||
       !Array.isArray(capabilities.labelOperationModes)) return false;
   const modes = capabilities.labelOperationModes;
-  return modes.length === 2 && modes.includes("ADD") && modes.includes("REMOVE");
+  return modes.length === 2 && (modes.includes("ADD") || modes.includes("APPEND")) &&
+    modes.includes("REMOVE");
 }
 
 async function inspectDoctorRepository(
@@ -662,7 +665,7 @@ async function productionDoctorReport(
       ? "GitLab project REST identity matches the target session."
       : "GitLab project REST identity could not be verified."),
     doctorCheck("gitlab-capabilities", capabilityReady ? "passed" : "failed", capabilityReady
-      ? "GitLab supports GraphQL label ADD and REMOVE by global ID."
+      ? "GitLab supports GraphQL label add/remove operations by global ID."
       : "GitLab GraphQL label mutation capabilities could not be verified."),
     doctorCheck("gitlab-labels-rest", labelsReady ? "passed" : "failed", labelsReady
       ? "GitLab label inventory REST access completed."

@@ -77,6 +77,24 @@ test("parses the SSH merge request opt-in separately from auth mode", () => {
   assert.equal(invocation.options.authMode, "ssh");
 });
 
+test("requires an explicit MR and original request for interrupted create recovery", () => {
+  const invocation = parseCliInvocation([
+    "create", "--resume", "157", "--resume-from", "original.json", "--input", "fresh.json",
+  ]);
+  assert.deepEqual(invocation.command, {
+    kind: "create", upsert: false, resumeIid: 157, resumeFrom: "original.json",
+  });
+  assert.equal(invocation.options.input, "fresh.json");
+  for (const args of [
+    ["create", "--resume", "157"],
+    ["create", "--resume-from", "original.json"],
+    ["create", "--resume", "0", "--resume-from", "original.json"],
+    ["create", "--resume", "157", "--resume-from", "-"],
+    ["create", "--resume", "157", "--resume-from", "original.json", "--upsert"],
+    ["update", "157", "--resume-from", "original.json"],
+  ]) inputError(args);
+});
+
 test("keeps machine output separate from template export destination", () => {
   const invocation = parseCliInvocation([
     "template", "export",

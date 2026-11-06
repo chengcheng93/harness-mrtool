@@ -74,7 +74,7 @@ export interface GitLabCapabilities {
   readonly version: string;
   readonly revision: string | null;
   readonly mergeRequestSetLabels: true;
-  readonly labelOperationModes: readonly ["ADD", "REMOVE"];
+  readonly labelOperationModes: readonly ["APPEND" | "ADD", "REMOVE"];
 }
 
 export interface GitLabRequestAudit {

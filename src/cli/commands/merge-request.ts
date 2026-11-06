@@ -44,7 +44,7 @@ import {
 } from "../../contracts/jcs.ts";
 import type { Request } from "../../contracts/request.ts";
 import type { CandidateContextStore } from "../../context/store.ts";
-import type { Candidate, ContextBinding } from "../../context/types.ts";
+import type { Candidate, ContextBinding, ResolvedContext } from "../../context/types.ts";
 import { normalizeAndValidateRequest } from "../../input/normalize.ts";
 import {
   parseDiagnosticMarker,
@@ -330,7 +330,42 @@ function preparedFingerprint(
 
 export interface CreateMergeRequestCommandInput {
   readonly upsert: boolean;
+  readonly resume?: {
+    readonly iid: number;
+    readonly originalRequest: Request;
+    readonly originalContext: ResolvedContext;
+  };
   readonly prepare: () => Promise<PreparedCreateMergeRequestCommand>;
+}
+
+function snapshotCreateResume(
+  value: CreateMergeRequestCommandInput["resume"],
+): CreateMergeRequestCommandInput["resume"] {
+  if (value === undefined) return undefined;
+  try {
+    const copied = copyJsonValue(value, "$resume") as unknown as NonNullable<CreateMergeRequestCommandInput["resume"]>;
+    const context = copied.originalContext;
+    if (!exactFields(jsonRecord(copied), ["iid", "originalRequest", "originalContext"]) ||
+        !positiveInteger(copied.iid) || !exactFields(jsonRecord(context), [
+          "contextId", "createdAtMs", "expiresAtMs", "binding", "externalSnapshotDigest", "snapshot", "candidates",
+        ]) || !nonEmpty(context.contextId) || !Number.isSafeInteger(context.createdAtMs) ||
+        !Number.isSafeInteger(context.expiresAtMs) || context.createdAtMs < 0 ||
+        context.expiresAtMs <= context.createdAtMs || !SHA256.test(context.externalSnapshotDigest) ||
+        !Array.isArray(context.candidates)) {
+      throw preparedInputFailure();
+    }
+    return deepFreeze({
+      iid: copied.iid,
+      originalRequest: normalizeAndValidateRequest(copied.originalRequest),
+      originalContext: {
+        ...context,
+        binding: snapshotBinding(context.binding),
+        snapshot: copyJsonValue(validateExternalContextSnapshot(context.snapshot)),
+      },
+    });
+  } catch {
+    throw preparedInputFailure();
+  }
 }
 
 export interface UpdateMergeRequestCommandInput {
@@ -1040,6 +1075,7 @@ interface GatedRemoteProof {
 function mutationGatedRemote(
   remote: MergeRequestRemote,
   beforeFirstMutation: () => Promise<void>,
+  allowedMutationIid?: number,
 ): { readonly remote: MergeRequestRemote; readonly proof: GatedRemoteProof } {
   let gate: Promise<void> | null = null;
   let callSequence = 0;
@@ -1059,11 +1095,17 @@ function mutationGatedRemote(
   };
   const mutate = async <T extends { readonly requestId: string | null }>(
     method: MutationMethod,
+    iid: number | null,
     run: () => Promise<T>,
   ): Promise<T> => {
     proof.pendingMutationCalls += 1;
     try {
-      try { await beforeMutation(); }
+      try {
+        if (allowedMutationIid !== undefined && (method === "createDraft" || iid !== allowedMutationIid)) {
+          throw preparedInputFailure();
+        }
+        await beforeMutation();
+      }
       catch {
         // The guard failed before calling the transport. Never classify this as
         // an uncertain remote mutation or perform create-outcome recovery.
@@ -1160,15 +1202,15 @@ function mutationGatedRemote(
         };
       },
     ),
-    createDraft: (input) => mutate("createDraft", () => remote.createDraft(input)),
-    addLabels: (iid, labelIds) => mutate("addLabels", () => remote.addLabels(iid, labelIds)),
-    removeLabels: (iid, labelIds) => mutate("removeLabels", () => remote.removeLabels(iid, labelIds)),
+    createDraft: (input) => mutate("createDraft", null, () => remote.createDraft(input)),
+    addLabels: (iid, labelIds) => mutate("addLabels", iid, () => remote.addLabels(iid, labelIds)),
+    removeLabels: (iid, labelIds) => mutate("removeLabels", iid, () => remote.removeLabels(iid, labelIds)),
     writeManagedFields: (iid, input) =>
-      mutate("writeManagedFields", () => remote.writeManagedFields(iid, input)),
+      mutate("writeManagedFields", iid, () => remote.writeManagedFields(iid, input)),
     writeDescription: (iid, description) =>
-      mutate("writeDescription", () => remote.writeDescription(iid, description)),
-    markReady: (iid, title) => mutate("markReady", () => remote.markReady(iid, title)),
-    markDraft: (iid, title) => mutate("markDraft", () => remote.markDraft(iid, title)),
+      mutate("writeDescription", iid, () => remote.writeDescription(iid, description)),
+    markReady: (iid, title) => mutate("markReady", iid, () => remote.markReady(iid, title)),
+    markDraft: (iid, title) => mutate("markDraft", iid, () => remote.markDraft(iid, title)),
   };
   return Object.freeze({ remote: Object.freeze(wrapper), proof });
 }
@@ -1206,6 +1248,8 @@ export function createMergeRequestCommandAdapter(
     writeOperation: "create" | "update",
     snapshotOf: (prepared: Prepared) => ExternalContextSnapshot,
     mrIid: (prepared: Prepared) => number | null,
+    assertAdditionalInput: () => void = () => {},
+    allowedMutationIid?: number,
   ): Promise<{
     readonly prepared: Prepared;
     readonly candidates: readonly Candidate[];
@@ -1214,6 +1258,7 @@ export function createMergeRequestCommandAdapter(
     readonly preparedSnapshot: ExternalContextSnapshot;
   }> => {
     const supplied = await prepare();
+    assertAdditionalInput();
     const suppliedRemote = supplied.remote;
     const original = snapshotPrepared(supplied);
     const operation = writeOperation === "update" && "migration" in original && original.migration !== undefined
@@ -1230,6 +1275,7 @@ export function createMergeRequestCommandAdapter(
     const expectedMrIid = mrIid(prepared);
     const fingerprint = preparedFingerprint(original, expectedSnapshot, expectedMrIid);
     const assertUnchanged = (): void => {
+      assertAdditionalInput();
       const current = snapshotPrepared(supplied);
       if (current.remote !== suppliedRemote ||
           preparedFingerprint(current, snapshotOf(current), mrIid(current)) !== fingerprint) {
@@ -1286,7 +1332,7 @@ export function createMergeRequestCommandAdapter(
           canonicalizeJson(consumed.snapshot) !== canonicalizeJson(expectedSnapshot)) {
         throw internalFailure();
       }
-    });
+    }, allowedMutationIid);
     return {
       prepared,
       candidates: preflight.candidates,
@@ -1298,12 +1344,23 @@ export function createMergeRequestCommandAdapter(
 
   return Object.freeze({
     async create(input: CreateMergeRequestCommandInput): Promise<CliCommandExecution> {
+      const upsert = input.upsert;
+      if (typeof upsert !== "boolean") throw preparedInputFailure();
+      const resume = snapshotCreateResume(input.resume);
+      const resumeFingerprint = canonicalizeJson(copyJsonValue(resume ?? null));
+      const assertCommandUnchanged = (): void => {
+        if (input.upsert !== upsert || canonicalizeJson(copyJsonValue(snapshotCreateResume(input.resume) ?? null)) !== resumeFingerprint) {
+          throw preparedInputFailure();
+        }
+      };
       const { prepared, candidates, remote, proof, preparedSnapshot } = await prepareWrite(
         input.prepare,
         snapshotPreparedCreate,
         "create",
         (value) => value.initialSnapshot,
         () => null,
+        assertCommandUnchanged,
+        resume?.iid,
       );
       const domainResult = await domain.create({
         labelDiff: prepared.labelDiff,
@@ -1318,17 +1375,22 @@ export function createMergeRequestCommandAdapter(
         remote,
         gitlabOrigin: dependencies.gitlabOrigin,
         verificationReceiptWriter: dependencies.verificationReceiptWriter,
-        upsert: input.upsert,
+        upsert,
+        ...(resume === undefined ? {} : { resume: deepFreeze({ ...resume, binding: prepared.binding }) }),
       });
+      assertCommandUnchanged();
       const validated = validateSuccessfulWrite(
         domainResult,
         "create",
-        input.upsert,
+        upsert || resume !== undefined,
         prepared,
         preparedSnapshot,
         candidates,
         proof,
       );
+      if (resume !== undefined && (validated.command !== "update" || validated.result.iid !== resume.iid)) {
+        throw preparedInputFailure();
+      }
       return writeExecution(validated.command, validated.result, candidates, prepared.binding, prepared);
     },
 

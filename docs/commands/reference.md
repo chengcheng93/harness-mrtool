@@ -11,6 +11,7 @@ installation-path material.
 | `preview` | Produce a deterministic write plan without consuming candidates or mutating GitLab. |
 | `manual --auth ssh` | Render a local handoff and ordinary branch push plan only after an explicit human request. `--ssh-mr` is rejected with LABEL_ERROR; no unverified MR creation is allowed. |
 | `create` | Create or upsert a merge request through the verified transaction path. |
+| `create --resume <iid> --resume-from <original-request>` | Finish a verified provisional transaction prefix using original private proof and an equivalent fresh `--input` request. Never creates another MR. |
 | `update <iid>` | Update an existing merge request with readback and journal evidence. |
 | `verify <iid> --level structure` | Verify stored merge-request state and historical Bundle evidence; `ready` and `merge` request additional checks. |
 | `profiles detect` | Detect profiles from the local committed-diff baseline. |
@@ -71,6 +72,23 @@ an explicit priority escalation reason when needed.
   Bundle. If it differs from the create context, the current path rejects that
   mismatch and directs the caller to `context --mr <iid>` plus `update <iid>`, or
   explicit template migration. It does not silently substitute the current Bundle.
+- `create --resume <iid> --resume-from <original-request>` is separate from upsert.
+  Obtain a fresh ordinary create context, select the same candidate identities,
+  preview the equivalent request, and pass it through `--input`. Dry-run verifies
+  the provisional MR without consuming candidates. Recovery requires the original
+  private context, exact request/description/Bundle/diff identity, and a unique
+  matching open Draft. The description must remain exactly the original
+  provisional render. Allowed prefixes are empty labels with no assignee/reviewers;
+  the complete planned Draft label set with no assignee/reviewers; or that same
+  complete set with all planned assignee/reviewer selections. Title, target branch,
+  squash, and source-removal flags must match the original plan. Ready requests
+  still require the Draft lifecycle label here, never the final Ready label.
+  Partial/extra labels, mixed fields, edited or final descriptions are rejected.
+  The normal transaction skips already complete labels and managed fields, then
+  writes the remaining steps. It never creates another MR; `verify` only reads
+  stored state and cannot recover the transaction. Retained expired contexts are read-only proof for at most
+  24 hours after expiry and at most 16 contexts. Expired or consumed tokens remain
+  invalid for normal writes. Original diff-bound type/priority options also apply.
 - Existing-MR `context --mr <iid>`, `update <iid>`, and `verify <iid>` retain trusted
   historical Bundle/policy evidence. Old signed policies remain readable; they
   are not rewritten or retroactively treated as Bundle `1.1.0`.

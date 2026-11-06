@@ -384,11 +384,12 @@ test("Windows private state fails closed only when the lazy context store is use
       currentBundle,
       contextIssueIid: null,
     });
-    // Composition above must not resolve private state. Both store entry points
+    // Composition above must not resolve private state. All store entry points
     // must still reject the missing Windows path before touching disk or input.
     for (const useStore of [
       () => defaults.contextStore.issue({} as never),
       () => defaults.contextStore.resolve({} as never),
+      () => defaults.contextStore.loadRecoveryProof!({} as never),
     ]) {
       await assert.rejects(useStore, (error: unknown) =>
         isToolError(error, "INTERNAL_ERROR", /LOCALAPPDATA is unavailable/u));
@@ -437,6 +438,21 @@ test("default context state is resolved once per production composition", async 
     isToolError(error, "INPUT_ERROR"));
   assert.equal(firstReads, 1);
   assert.equal(secondReads, 1);
+});
+
+test("default composition forwards recovery proof lookup to the real private context store", async (t) => {
+  const currentBundle = await currentSelection();
+  const directory = await mkdtemp(resolve(tmpdir(), "harness-mrtool-recovery-default-"));
+  t.after(async () => rm(directory, { recursive: true, force: true }));
+  const defaults = createProductionReadOnlyDefaults({
+    cliVersion: "0.1.0-test", cwd: repositoryRoot, currentBundle, contextIssueIid: null,
+    stateDirectory: directory,
+    windowsAclVerifier: { verify: async () => undefined },
+  });
+  assert.equal(typeof defaults.contextStore.loadRecoveryProof, "function");
+  await assert.rejects(defaults.contextStore.loadRecoveryProof!({
+    contextId: `hmrx1_${"A".repeat(43)}`, selections: [],
+  }), (error: unknown) => isToolError(error, "INPUT_ERROR", /Original recovery context is unavailable/u));
 });
 
 function repositorySnapshot(): RepositorySnapshot {

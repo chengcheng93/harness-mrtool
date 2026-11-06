@@ -5,7 +5,8 @@ import { buildWritePlan } from "../app/write-plan.ts";
 import { defaultExternalContextReader } from "../app/external-context.ts";
 import { selectMandatoryLabels } from "../app/mandatory-labels.ts";
 import type { MergeRequestRemote } from "../app/create-mr.ts";
-import { RemoteMutationError } from "../app/remote-outcome.ts";
+import { isRemoteReadError, remoteFailureToolError, RemoteMutationError } from "../app/remote-outcome.ts";
+import { assertPristineResumeAuthorization, validatePristineCreateResume } from "../app/resume-create.ts";
 import type { Candidate } from "../context/types.ts";
 import { canonicalizeJson, sha256Utf8, copyJsonValue, type JsonObject } from "../contracts/jcs.ts";
 import { ToolError } from "../contracts/errors.ts";
@@ -70,6 +71,27 @@ export function createDefaultWriteServices(
     });
     const request = command.kind === "verify" ? null
       : normalizeAndValidateRequest(await readOnly.requestSource.read(invocation));
+    let resume: Parameters<ReturnType<typeof createMergeRequestCommandAdapter>["create"]>[0]["resume"];
+    if (command.kind === "create" && command.resumeIid !== undefined) {
+      if (command.resumeFrom === undefined || readOnly.contextStore.loadRecoveryProof === undefined) {
+        throw new ToolError("INPUT_ERROR", "The original private context is required to resume this Draft", {
+          field: "--resume-from", expected: "the original request and its retained private context",
+          actual: "recovery evidence is unavailable", safeNextStep: "Restore the original request and private context before resuming; no MR was changed.",
+        });
+      }
+      const originalRequest = normalizeAndValidateRequest(await readOnly.requestSource.read({ ...invocation,
+        options: { ...invocation.options, input: command.resumeFrom, inputFormat: null,
+          profile: null, type: null, module: null, titleSummary: null },
+      }));
+      const selections = [
+        ...originalRequest.mergeRequest.labelCandidateTokens.map((token) => ({ kind: "label" as const, token })),
+        ...(originalRequest.mergeRequest.assigneeCandidateToken === null ? []
+          : [{ kind: "assignee" as const, token: originalRequest.mergeRequest.assigneeCandidateToken }]),
+        ...originalRequest.review.reviewerCandidateTokens.map((token) => ({ kind: "reviewer" as const, token })),
+      ];
+      const originalContext = await readOnly.contextStore.loadRecoveryProof({ contextId: originalRequest.contextId, selections });
+      resume = { iid: command.resumeIid, originalRequest, originalContext };
+    }
     const contextInvocation: CliInvocation = Object.freeze({ ...invocation, command: Object.freeze({
       kind: "context", mrIid, migrateTemplate: command.kind === "update" && command.migrateTemplate,
     }) });
@@ -141,6 +163,33 @@ export function createDefaultWriteServices(
       const plan = buildWritePlan({ request, snapshot, resolvedCandidates: resolved.candidates,
         bundle: planned.selection.bundle, labelDiff: planned.labelDiff,
         labelOptions: labelOptionsForProductionInvocation(invocation) });
+      if (resume !== undefined) {
+        const dryRemote = new GitLabMergeRequestRemote({ gitlab: planned.options.gitlab,
+          targetProject: { id: snapshot.targetProject.id, fullPath: snapshot.targetProject.path },
+          snapshotReader: async (mr) => {
+            const value = await reader.read({ ...planned.options, operation: "update", mrIid: mr.iid, mergeRequestRead: mr });
+            planned.assertNoCredentialExposure(value.snapshot);
+            return validateExternalContextSnapshot(value.snapshot);
+          },
+        });
+        try {
+          const authorization = validatePristineCreateResume({ ...resume, request, binding: live.binding, initialSnapshot: snapshot,
+            resolvedCandidates: resolved.candidates, current: (await dryRemote.read(resume.iid)).value,
+            bundle: planned.selection.bundle, releaseTag: planned.selection.releaseTag,
+            labelDiff: planned.labelDiff, labelOptions: labelOptionsForProductionInvocation(invocation),
+          });
+          const matching = await dryRemote.findOpen(authorization.createInput);
+          if (matching.value.length !== 1 || matching.value[0]?.iid !== resume.iid) {
+            throw new ToolError("INPUT_ERROR", "Resume requires one matching open Draft", {
+              field: "--resume", expected: "the unique matching MR with the selected IID",
+              actual: "the selected MR is absent or ambiguous", safeNextStep: "Inspect the matching open MRs before resuming; no MR was changed.",
+            });
+          }
+          assertPristineResumeAuthorization(authorization, matching.value[0]!);
+        } catch (error) {
+          throw isRemoteReadError(error) ? remoteFailureToolError(error) : error;
+        }
+      }
       const output = { output: { message: "Dry run validated; no remote writes or candidate consumption",
         data: copyJsonValue({ command: command.kind, dryRun: true, mandatoryLabels: selection,
           writePlan: plan, pushPlan: planned.pushPlan }) as JsonObject } };
@@ -222,7 +271,8 @@ export function createDefaultWriteServices(
       cliVersion: options.cliVersion, sourceBranch: planned.options.git.sourceBranch, remote,
     };
     const result = command.kind === "create"
-      ? await adapter.create({ upsert: command.upsert, prepare: async () => ({ ...base, initialSnapshot: snapshot }) })
+      ? await adapter.create({ upsert: command.upsert, ...(resume === undefined ? {} : { resume }),
+        prepare: async () => ({ ...base, initialSnapshot: snapshot }) })
       : await adapter.update({ forceReplaceDescription: command.forceReplaceDescription,
         prepare: async () => ({ ...base, initial: (await rawRemote.read(mrIid!)).value, ...(migration === undefined ? {} : { migration }) }) });
     planned.assertNoCredentialExposure(result);

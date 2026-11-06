@@ -270,7 +270,7 @@ test("resolves only tokens matching context, host, project, kind, release, Bundl
   );
 });
 
-test("expires the entire context at exactly thirty minutes and removes it", async (context) => {
+test("expires write authority at exactly thirty minutes while retaining read-only proof", async (context) => {
   const { directory, clock, store } = await fixture(context);
   const issued = await store.issue(issueInput);
   const label = issued.candidates[0];
@@ -292,7 +292,52 @@ test("expires the entire context at exactly thirty minutes and removes it", asyn
     (error: unknown) => isToolError(error, "INPUT_ERROR", /expired/i),
   );
   const persisted = JSON.parse(await readFile(resolve(directory, "candidate-contexts-v1.json"), "utf8"));
-  assert.deepEqual(persisted.contexts, []);
+  assert.equal(persisted.contexts.length, 1);
+});
+
+test("recovery proof survives fresh issuance after expiry without authorizing token replay", async (context) => {
+  const { directory, clock, store } = await fixture(context);
+  const issued = await store.issue(issueInput);
+  const label = issued.candidates[0]!;
+  const selections = [{ token: label.token, kind: label.kind }];
+  await store.resolve({ contextId: issued.contextId, expectedBinding: binding, selections, consume: true });
+  clock.advance(CANDIDATE_CONTEXT_TTL_MS);
+  await store.issue(issueInput);
+  const before = await readFile(resolve(directory, "candidate-contexts-v1.json"), "utf8");
+  assert.equal(typeof store.loadRecoveryProof, "function");
+  const proof = await store.loadRecoveryProof({ contextId: issued.contextId, selections });
+  assert.deepEqual(proof.binding, binding);
+  assert.deepEqual(proof.snapshot, snapshot);
+  assert.deepEqual(proof.candidates, [issueInput.candidates[0]]);
+  assert.equal(await readFile(resolve(directory, "candidate-contexts-v1.json"), "utf8"), before);
+  await assert.rejects(store.resolve({ contextId: issued.contextId, expectedBinding: binding, selections, consume: true }),
+    (error: unknown) => isToolError(error, "INPUT_ERROR", /expired/i));
+  await assert.rejects(store.loadRecoveryProof({ contextId: issued.contextId,
+    selections: [{ token: label.token, kind: "reviewer" }] }),
+    (error: unknown) => isToolError(error, "INPUT_ERROR"));
+  clock.advance(24 * 60 * 60 * 1_000);
+  await assert.rejects(store.loadRecoveryProof({ contextId: issued.contextId, selections }),
+    (error: unknown) => isToolError(error, "INPUT_ERROR"));
+});
+
+test("tokenless create proof survives refresh and expired proof history stays bounded", async (context) => {
+  const { directory, clock, store } = await fixture(context);
+  const contexts = [];
+  for (let index = 0; index < 17; index += 1) {
+    contexts.push(await store.issue({ ...issueInput, candidates: [] }));
+    clock.advance(CANDIDATE_CONTEXT_TTL_MS);
+  }
+  await store.issue({ ...issueInput, candidates: [] });
+  const latestExpired = contexts[16]!;
+  assert.deepEqual((await store.loadRecoveryProof({ contextId: latestExpired.contextId, selections: [] })).candidates, []);
+  await assert.rejects(store.loadRecoveryProof({ contextId: contexts[0]!.contextId, selections: [] }),
+    (error: unknown) => isToolError(error, "INPUT_ERROR"));
+  const persisted = JSON.parse(await readFile(resolve(directory, "candidate-contexts-v1.json"), "utf8"));
+  assert.equal(persisted.contexts.length, 17);
+  clock.advance(24 * 60 * 60 * 1_000 + CANDIDATE_CONTEXT_TTL_MS);
+  await store.cleanup();
+  const cleaned = JSON.parse(await readFile(resolve(directory, "candidate-contexts-v1.json"), "utf8"));
+  assert.deepEqual(cleaned.contexts, []);
 });
 
 test("batch consume is all-or-nothing and prevents replay", async (context) => {

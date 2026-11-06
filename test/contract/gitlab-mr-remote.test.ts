@@ -168,8 +168,22 @@ function requestPath(request: { readonly url: string }): string {
   return `${parsed.pathname}${parsed.search}`;
 }
 
+function enqueueCapabilities(fake: FakeGitLab, modes: readonly string[] = ["APPEND", "REMOVE"]): void {
+  fake.enqueue("GET", "/api/v4/version", { body: { version: "17.10.3", revision: "fixture" } });
+  fake.enqueue("POST", "/api/graphql", {
+    body: {
+      data: {
+        mutation: { fields: [{ name: "mergeRequestSetLabels" }] },
+        input: { inputFields: ["projectPath", "iid", "labelIds", "operationMode"].map((name) => ({ name })) },
+        mode: { enumValues: modes.map((name) => ({ name })) },
+      },
+    },
+  });
+}
+
 test("creates a Draft with an exact label-free REST body and returns only the acknowledged IID", async () => {
   const fake = new FakeGitLab();
+  enqueueCapabilities(fake);
   fake.enqueue("POST", "/api/v4/projects/7/merge_requests", {
     headers: { "x-request-id": "req-create" },
     body: mutationBody(),
@@ -178,8 +192,12 @@ test("creates a Draft with an exact label-free REST body and returns only the ac
   const receipt = await remote(fake).createDraft(createInput());
 
   assert.deepEqual(receipt, { requestId: "req-create", value: { iid: 12 } });
-  assert.equal(fake.requests.length, 1);
-  assert.deepEqual(fake.requests[0]?.body, {
+  assert.deepEqual(fake.requests.map((request) => [request.method, requestPath(request)]), [
+    ["GET", "/api/v4/version"],
+    ["POST", "/api/graphql"],
+    ["POST", "/api/v4/projects/7/merge_requests"],
+  ]);
+  assert.deepEqual(fake.requests[2]?.body, {
     source_branch: SOURCE_BRANCH,
     target_branch: TARGET_BRANCH,
     title: "Draft: [fix][app] Preserve CSS output",
@@ -189,7 +207,7 @@ test("creates a Draft with an exact label-free REST body and returns only the ac
     squash: true,
     remove_source_branch: true,
   });
-  assert.equal(Object.hasOwn(fake.requests[0]?.body as object, "labels"), false);
+  assert.equal(Object.hasOwn(fake.requests[2]?.body as object, "labels"), false);
 });
 
 test("findOpen applies all required filters, consumes every page, and hard-binds every snapshot", async () => {
@@ -242,9 +260,10 @@ test("findOpen follows a same-origin Link continuation when x-next-page is absen
   assert.deepEqual(fake.requests.map(requestPath), [first, second]);
 });
 
-test("uses only GraphQL global-ID ADD and REMOVE label mutations and returns their receipts", async () => {
+test("uses GraphQL global-ID add/remove mutations after one capability preflight and returns their receipts", async () => {
   const fake = new FakeGitLab();
-  for (const [mode, requestId] of [["ADD", "req-add"], ["REMOVE", "req-remove"]] as const) {
+  enqueueCapabilities(fake);
+  for (const requestId of ["req-add", "req-remove"]) {
     fake.enqueue("POST", "/api/graphql", {
       headers: { "x-request-id": requestId },
       body: {
@@ -266,9 +285,14 @@ test("uses only GraphQL global-ID ADD and REMOVE label mutations and returns the
   assert.deepEqual(await adapter.addLabels(12, ids), { requestId: "req-add" });
   assert.deepEqual(await adapter.removeLabels(12, ids), { requestId: "req-remove" });
 
-  assert.equal(fake.requests.every((request) => request.method === "POST" && requestPath(request) === "/api/graphql"), true);
-  for (const [index, operationMode] of ["ADD", "REMOVE"].entries()) {
-    const body = fake.requests[index]?.body as {
+  assert.deepEqual(fake.requests.map((request) => [request.method, requestPath(request)]), [
+    ["GET", "/api/v4/version"],
+    ["POST", "/api/graphql"],
+    ["POST", "/api/graphql"],
+    ["POST", "/api/graphql"],
+  ]);
+  for (const [index, operationMode] of ["APPEND", "REMOVE"].entries()) {
+    const body = fake.requests[index + 2]?.body as {
       readonly query: string;
       readonly variables: unknown;
     };
@@ -286,6 +310,7 @@ test("uses only GraphQL global-ID ADD and REMOVE label mutations and returns the
 
 test("treats structured GraphQL mutation errors as a definitive validation rejection", async () => {
   const fake = new FakeGitLab();
+  enqueueCapabilities(fake, ["ADD", "REMOVE"]);
   fake.enqueue("POST", "/api/graphql", {
     headers: { "x-request-id": "req-label-rejected" },
     body: {
@@ -304,6 +329,61 @@ test("treats structured GraphQL mutation errors as a definitive validation rejec
       return true;
     },
   );
+});
+
+test("capability failures reject create and label writes before any mutation request", async () => {
+  for (const action of ["create", "labels-add", "labels-remove"] as const) {
+    for (const failure of ["schema", "network", "introspection-server", "auth"] as const) {
+      const fake = new FakeGitLab();
+      if (failure === "schema") {
+        enqueueCapabilities(fake, ["REMOVE"]);
+      } else {
+        fake.enqueue("GET", "/api/v4/version", failure === "auth"
+          ? { status: 401, headers: { "x-request-id": "req-probe-auth" }, body: { message: TOKEN } }
+          : { body: { version: "17.10.3", revision: "fixture" } });
+        if (failure === "introspection-server") {
+          fake.enqueue("POST", "/api/graphql", {
+            status: 503,
+            headers: { "x-request-id": "req-probe-introspection" },
+            body: { message: TOKEN },
+          });
+        }
+      }
+      const attempts: Array<{ method: string; path: string; query: string | null }> = [];
+      const transport: GitLabHttpTransport = {
+        request: async (request) => {
+          const body = request.body === null ? null
+            : JSON.parse(new TextDecoder().decode(request.body)) as { query?: string };
+          attempts.push({ method: request.method, path: requestPath(request), query: body?.query ?? null });
+          if (failure === "network" && requestPath(request) === "/api/graphql") {
+            throw new Error(`Network failed: ${TOKEN}`);
+          }
+          return fake.request(request);
+        },
+      };
+      const adapter = remote(transport);
+      const mutation = action === "create" ? adapter.createDraft(createInput())
+        : action === "labels-add" ? adapter.addLabels(12, ["gid://gitlab/ProjectLabel/3"])
+        : adapter.removeLabels(12, ["gid://gitlab/ProjectLabel/3"]);
+
+      await assert.rejects(mutation, (error: unknown) => {
+        assert.equal(isRemoteMutationError(error, "rejected"), true, `${action}:${failure}`);
+        assert.equal(isRemoteMutationError(error) ? error.reason : null, failure === "auth" ? "auth" : "validation");
+        if (failure === "auth" || failure === "introspection-server") {
+          assert.equal(isRemoteMutationError(error) ? error.requestId : null,
+            failure === "auth" ? "req-probe-auth" : "req-probe-introspection");
+        }
+        assert.equal(JSON.stringify(error).includes(TOKEN), false);
+        return true;
+      });
+      assert.deepEqual(attempts.map(({ method, path }) => [method, path]), failure === "auth"
+        ? [["GET", "/api/v4/version"]]
+        : [["GET", "/api/v4/version"], ["POST", "/api/graphql"]]);
+      for (const attempt of attempts.filter((request) => request.path === "/api/graphql")) {
+        assert.match(attempt.query ?? "", /^\s*query\b/u);
+      }
+    }
+  }
 });
 
 test("writes managed fields as numeric IDs and keeps every PUT body on its operation whitelist", async () => {
@@ -357,6 +437,7 @@ test("rejects non-numeric managed user IDs before transport", async () => {
 
 test("rejects malformed mutation acknowledgements as unknown instead of using them as readback", async () => {
   const fake = new FakeGitLab();
+  enqueueCapabilities(fake);
   fake.enqueue("POST", "/api/v4/projects/7/merge_requests", {
     headers: { "x-request-id": "req-wrong-project" },
     body: { ...mutationBody(), project_id: 8 },

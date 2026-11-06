@@ -1,6 +1,7 @@
-import { ToolError } from "../contracts/errors.ts";
+import { isToolError, ToolError } from "../contracts/errors.ts";
 import type { JsonObject, JsonValue } from "../contracts/jcs.ts";
-import { GitLabHttpClient, type GitLabHttpClientOptions, type GitLabJsonResponse } from "./http.ts";
+import { normalizeGitLabDescription } from "./description.ts";
+import { GitLabHttpClient, isGitLabRequestError, type GitLabHttpClientOptions, type GitLabJsonResponse } from "./http.ts";
 import { CAPABILITIES_QUERY, LABEL_GLOBAL_IDS_QUERY, SET_LABELS_MUTATION } from "./queries.ts";
 import type {
   GitLabCapabilities,
@@ -233,6 +234,28 @@ interface LabelInventory {
 
 const gitLabMutationRejectedErrors = new WeakSet<object>();
 const gitLabResponseValidationErrors = new WeakSet<object>();
+const gitLabMutationPreflightErrors = new WeakSet<object>();
+
+export class GitLabMutationPreflightError extends ToolError<"AUTH_ERROR" | "GITLAB_ERROR"> {
+  readonly requestId: string | null;
+
+  constructor(error: unknown) {
+    super(isToolError(error, "AUTH_ERROR") ? "AUTH_ERROR" : "GITLAB_ERROR", "GitLab mutation capability preflight failed", {
+      field: "gitlab",
+      expected: "verified label append/remove capabilities before any mutation request",
+      actual: "read-only capability preflight failed; no mutation was requested",
+      safeNextStep: "Run doctor, verify GitLab API capabilities and credentials, then retry.",
+    });
+    this.name = "GitLabMutationPreflightError";
+    this.requestId = isGitLabRequestError(error) || isGitLabResponseValidationError(error) ? error.requestId : null;
+    gitLabMutationPreflightErrors.add(this);
+  }
+}
+
+export function isGitLabMutationPreflightError(error: unknown): error is GitLabMutationPreflightError {
+  return (typeof error === "object" || typeof error === "function") &&
+    error !== null && gitLabMutationPreflightErrors.has(error);
+}
 
 export class GitLabMutationRejectedError extends ToolError<"GITLAB_ERROR"> {
   readonly requestId: string | null;
@@ -288,6 +311,20 @@ function validateResponse<T>(
     return validate(response.data);
   } catch (error) {
     if (isGitLabMutationRejectedError(error) || isGitLabResponseValidationError(error)) {
+      throw error;
+    }
+    throw new GitLabResponseValidationError(response.requestId, error);
+  }
+}
+
+async function validateAsyncResponse<T>(
+  response: GitLabJsonResponse,
+  validate: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await validate();
+  } catch (error) {
+    if (isGitLabRequestError(error) || isGitLabMutationRejectedError(error) || isGitLabResponseValidationError(error)) {
       throw error;
     }
     throw new GitLabResponseValidationError(response.requestId, error);
@@ -350,6 +387,29 @@ function appliedLabels(value: JsonValue | undefined, subject: string): readonly 
   return Object.freeze(result.sort((left, right) => ordinal(left.name, right.name) || left.restId - right.restId));
 }
 
+function appliedLabelNames(value: JsonValue | undefined, subject: string): readonly string[] | null {
+  const values = array(value, `${subject} labels`);
+  if (!values.some((entry) => typeof entry === "string")) return null;
+  const names = values.map((entry) => string(entry, `${subject} label name`));
+  if (new Set(names).size !== names.length) throw apiError(`${subject} labels`, "duplicate applied label name");
+  return Object.freeze(names);
+}
+
+function appliedLabelsFromInventory(
+  names: readonly string[],
+  inventory: LabelInventory,
+  subject: string,
+): readonly GitLabAppliedLabel[] {
+  return appliedLabels(names.map((name) => {
+    // Effective labels can hide a project/group name collision. Applied names
+    // identify a REST label only when the complete live inventory is unique.
+    const candidates = inventory.all.filter((label) => label.name === name);
+    if (candidates.length !== 1) throw apiError(`${subject} labels`, "applied label name has no unique live identity");
+    const label = candidates[0] as GitLabLabel;
+    return { id: label.restId, name: label.name, archived: label.archived };
+  }), subject);
+}
+
 function parseMergeRequest(
   value: JsonValue,
   subject: string,
@@ -370,11 +430,15 @@ function parseMergeRequest(
       (record.project_id !== undefined && String(integer(record.project_id, `${subject}.project_id`)) !== expectedTargetProjectId)) {
     throw apiError(subject, "target project identity mismatch");
   }
+  const shouldRemoveSourceBranch = record.should_remove_source_branch === null
+    ? false : boolean(record.should_remove_source_branch, `${subject}.should_remove_source_branch`);
+  const forceRemoveSourceBranch = record.force_remove_source_branch === undefined || record.force_remove_source_branch === null
+    ? false : boolean(record.force_remove_source_branch, `${subject}.force_remove_source_branch`);
   return Object.freeze({
     iid: actualIid,
     webUrl: string(record.web_url, `${subject}.web_url`),
     title: string(record.title, `${subject}.title`),
-    description: nullableString(record.description, `${subject}.description`) ?? "",
+    description: normalizeGitLabDescription(nullableString(record.description, `${subject}.description`) ?? ""),
     draft: boolean(record.draft, `${subject}.draft`),
     state,
     sourceProjectId: String(integer(record.source_project_id, `${subject}.source_project_id`)),
@@ -387,7 +451,7 @@ function parseMergeRequest(
     reviewers: Object.freeze(array(record.reviewers, `${subject} reviewers`).map((entry) => user(entry, `${subject} reviewer`))),
     labels: appliedLabels(record.labels, subject),
     squash: boolean(record.squash, `${subject}.squash`),
-    shouldRemoveSourceBranch: boolean(record.should_remove_source_branch, `${subject}.should_remove_source_branch`),
+    shouldRemoveSourceBranch: shouldRemoveSourceBranch || forceRemoveSourceBranch,
     pipelineStatus: pipelineStatus(record.head_pipeline, sha),
   });
 }
@@ -421,6 +485,7 @@ export class GitLabClient {
   readonly origin: string;
   private readonly http: GitLabHttpClient;
   private readonly requestIds = new Set<string>();
+  private capabilities: Promise<GitLabCapabilities> | undefined;
 
   constructor(options: GitLabHttpClientOptions) {
     this.http = new GitLabHttpClient(options);
@@ -679,13 +744,31 @@ export class GitLabClient {
     if (dueDate !== null && !DATE.test(dueDate)) throw apiError("issue", "invalid due date");
     const actualIid = integer(record.iid, "issue.iid");
     if (actualIid !== iid) throw apiError("issue", "Issue IID mismatch");
-    return Object.freeze({
+    const names = appliedLabelNames(record.labels, "issue");
+    const issue = Object.freeze({
       iid: actualIid,
       milestone,
       assignees: Object.freeze(array(record.assignees, "issue assignees").map((value) => user(value, "issue assignee"))),
       dueDate,
-      labels: appliedLabels(record.labels, "issue"),
+      labels: names === null ? appliedLabels(record.labels, "issue") : Object.freeze([]),
     });
+    if (names === null) return issue;
+    const inventory = await this.labelInventory(project.id);
+    return Object.freeze({ ...issue, labels: appliedLabelsFromInventory(names, inventory, "issue") });
+  }
+
+  private async mergeRequestWithAppliedLabels(
+    data: JsonValue,
+    iid: number,
+    projectId: string,
+    loadInventory: () => Promise<LabelInventory> = () => this.labelInventory(projectId),
+  ): Promise<GitLabMergeRequest> {
+    const record = object(data, "merge request");
+    const names = appliedLabelNames(record.labels, "merge request");
+    if (names === null) return parseMergeRequest(data, "merge request", iid, projectId);
+    const value = parseMergeRequest({ ...record, labels: [] }, "merge request", iid, projectId);
+    const inventory = await loadInventory();
+    return Object.freeze({ ...value, labels: appliedLabelsFromInventory(names, inventory, "merge request") });
   }
 
   async getMergeRequest(projectReference: string, iid: number): Promise<GitLabMergeRequest> {
@@ -694,7 +777,7 @@ export class GitLabClient {
     const response = await this.get(
       `/api/v4/projects/${encodeId(project.id)}/merge_requests/${String(iid)}?with_labels_details=true`,
     );
-    return parseMergeRequest(response.data, "merge request", iid, project.id);
+    return this.mergeRequestWithAppliedLabels(response.data, iid, project.id);
   }
 
   async getMergeRequestReceipt(
@@ -705,8 +788,8 @@ export class GitLabClient {
     const response = await this.get(
       `/api/v4/projects/${encodeId(project.id)}/merge_requests/${String(iid)}?with_labels_details=true`,
     );
-    const value = validateResponse(response, (data) =>
-      parseMergeRequest(data, "merge request", iid, project.id));
+    const value = await validateAsyncResponse(response, () =>
+      this.mergeRequestWithAppliedLabels(response.data, iid, project.id));
     return Object.freeze({ value, requestId: response.requestId });
   }
 
@@ -724,18 +807,20 @@ export class GitLabClient {
     });
     const values: GitLabMergeRequest[] = [];
     let lastRequestId: string | null = null;
+    let inventory: Promise<LabelInventory> | undefined;
+    const loadInventory = (): Promise<LabelInventory> => inventory ??= this.labelInventory(project.id);
     const seen = new Set<number>();
     let page = 1;
     for (let count = 0; count < MAX_REST_PAGES; count += 1) {
       const response = await this.get(`${endpoint}&per_page=100&page=${String(page)}`);
       lastRequestId = response.requestId;
-      validateResponse(response, (data) => {
-        for (const value of array(data, "paginated merge request response")) {
+      await validateAsyncResponse(response, async () => {
+        for (const value of array(response.data, "paginated merge request response")) {
           const record = object(value, "merge request");
           const iid = integer(record.iid, "merge request.iid");
           if (seen.has(iid)) throw apiError("merge requests", "duplicate MR IID across pages");
           seen.add(iid);
-          values.push(parseMergeRequest(value, "merge request", iid, project.id));
+          values.push(await this.mergeRequestWithAppliedLabels(value, iid, project.id, loadInventory));
         }
       });
       const pageEndpoint = `${endpoint}&per_page=100&page=${String(page)}`;
@@ -770,6 +855,7 @@ export class GitLabClient {
     project: GitLabProjectIdentity,
     input: GitLabCreateMergeRequestInput,
   ): Promise<GitLabValueReceipt<{ readonly iid: number }>> {
+    await this.mutationCapabilities();
     const response = await this.mutate(
       "POST",
       `/api/v4/projects/${encodeId(project.id)}/merge_requests`,
@@ -853,10 +939,11 @@ export class GitLabClient {
     const approvals = object((await this.get(
       `/api/v4/projects/${encodeId(project.id)}/merge_requests/${String(iid)}/approvals`,
     )).data, "merge request approvals");
-    const mergeRequestId = integer(approvals.id, "merge request approvals.id");
-    if (mergeRequestId !== fencedMergeRequestId ||
-        integer(approvals.project_id, "merge request approvals.project_id") !== Number(project.id) ||
-        integer(approvals.iid, "merge request approvals.iid") !== iid) {
+    // CE omits these identities; both MR reads fence the endpoint's project, IID, ID, and SHA.
+    const mergeRequestId = fencedMergeRequestId;
+    if ((Object.hasOwn(approvals, "id") && integer(approvals.id, "merge request approvals.id") !== mergeRequestId) ||
+        (Object.hasOwn(approvals, "project_id") && integer(approvals.project_id, "merge request approvals.project_id") !== Number(project.id)) ||
+        (Object.hasOwn(approvals, "iid") && integer(approvals.iid, "merge request approvals.iid") !== iid)) {
       throw apiError("merge request approvals", "project or MR identity mismatch");
     }
     const approved = array(approvals.approved_by, "merge request approvals approved_by").map((value) => {
@@ -880,7 +967,8 @@ export class GitLabClient {
           throw apiError("merge request discussion", "project or noteable identity mismatch");
         }
         const resolvable = boolean(noteRecord.resolvable, "discussion note.resolvable");
-        const resolved = boolean(noteRecord.resolved, "discussion note.resolved");
+        const resolved = !resolvable && !Object.hasOwn(noteRecord, "resolved")
+          ? false : boolean(noteRecord.resolved, "discussion note.resolved");
         if (resolvable && !resolved) discussionUnresolved = true;
       }
       if (discussionUnresolved) unresolved += 1;
@@ -893,6 +981,19 @@ export class GitLabClient {
   }
 
   async probeCapabilities(): Promise<GitLabCapabilities> {
+    this.capabilities ??= this.readCapabilities();
+    return this.capabilities;
+  }
+
+  private async mutationCapabilities(): Promise<GitLabCapabilities> {
+    try {
+      return await this.probeCapabilities();
+    } catch (error) {
+      throw new GitLabMutationPreflightError(error);
+    }
+  }
+
+  private async readCapabilities(): Promise<GitLabCapabilities> {
     const versionRecord = object((await this.get("/api/v4/version")).data, "GitLab version");
     const version = string(versionRecord.version, "GitLab version.version");
     const revision = versionRecord.revision === undefined || versionRecord.revision === null
@@ -904,16 +1005,17 @@ export class GitLabClient {
       .map((value) => string(object(value, "input field").name, "input field name"));
     const modes = array(object(data.mode, "MutationOperationMode type").enumValues, "operation modes")
       .map((value) => string(object(value, "operation mode").name, "operation mode name"));
+    const appendMode = modes.includes("APPEND") ? "APPEND" : modes.includes("ADD") ? "ADD" : null;
     if (!mutationNames.includes("mergeRequestSetLabels") ||
         !["projectPath", "iid", "labelIds", "operationMode"].every((name) => inputNames.includes(name)) ||
-        !["ADD", "REMOVE"].every((name) => modes.includes(name))) {
-      throw apiError("capability probe", "label ID ADD/REMOVE mutation is unavailable");
+        appendMode === null || !modes.includes("REMOVE")) {
+      throw apiError("capability probe", "label ID append/remove mutation is unavailable");
     }
     return Object.freeze({
       version,
       revision,
       mergeRequestSetLabels: true,
-      labelOperationModes: ["ADD", "REMOVE"] as const,
+      labelOperationModes: Object.freeze([appendMode, "REMOVE"] as const),
     });
   }
 
@@ -930,11 +1032,13 @@ export class GitLabClient {
         new Set(labelIds).size !== labelIds.length || labelIds.some((id) => !/^gid:\/\/gitlab\/(?:Project|Group)Label\/\d+$/u.test(id))) {
       throw new TypeError("Label mutation requires unique GitLab global label IDs");
     }
+    const capabilities = await this.mutationCapabilities();
     const project = typeof projectReference === "string"
       ? await this.getProject(projectReference)
       : projectReference;
     const response = await this.graphqlReceipt(SET_LABELS_MUTATION, {
-      input: { projectPath: project.fullPath, iid: String(iid), labelIds: [...labelIds], operationMode },
+      input: { projectPath: project.fullPath, iid: String(iid), labelIds: [...labelIds],
+        operationMode: operationMode === "ADD" ? capabilities.labelOperationModes[0] : "REMOVE" },
     });
     try {
       const mutation = object(response.value.mergeRequestSetLabels, "mergeRequestSetLabels mutation");

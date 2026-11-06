@@ -108,6 +108,42 @@ Report the single CLI JSON document without rewriting its `ok`, `code`, partial
 Draft state, transaction audit, `activationRequired`, or
 `hostRefreshMayBeRequired` fields. A failed or partial transaction is not success.
 
+## Resume a provisional transaction prefix
+
+If a partial create already produced a Draft, preserve its
+IID, original Request file, private context proof, and transaction audit. Stop on
+the API blocker and resolve it before continuing. Never blindly retry ordinary
+create or patch the MR with raw API calls. Explicit resume requires the exact
+original provisional description and one complete transaction prefix:
+
+- No labels and no assignee/reviewers.
+- The full planned Draft label set and no assignee/reviewers.
+- That same full Draft label set and all planned assignee/reviewer selections.
+
+Title, target branch, squash, and source-removal flags must match the original
+plan throughout. Ready requests still use the Draft lifecycle label at this
+stage. Partial/extra labels, mixed fields, edited descriptions, and final
+descriptions are unsupported. Resume skips already complete labels and managed
+fields; `verify` reads stored state and does not recover the transaction.
+
+After resolving the blocker, obtain a fresh ordinary create context using the
+API context command above without `--mr`. Build a separate fresh Request with
+the same committed diff, request meaning, and selected candidate identities.
+Carry forward the existing authorization for this unchanged submission and the
+same diff-bound confirmation flags for preview and resume. Historical private
+proof is read-only: at most 16 expired contexts remain for up to 24 hours after
+expiry; retention never revives expired or consumed candidate tickets.
+
+Preview the fresh Request and validate explicit resume with `--dry-run`. Only
+after both succeed, repeat the resume command with `--dry-run` removed, then run
+structure verification before reporting completion:
+
+```text
+harness-mrtool preview --auth api --client codex-skill --client-version <skill-semver> --skill-protocol <protocol> --input <fresh-request.json> --output json
+harness-mrtool create --resume <iid> --resume-from <original-request.json> --auth api --client codex-skill --client-version <skill-semver> --skill-protocol <protocol> --input <fresh-request.json> --dry-run --output json
+harness-mrtool verify <iid> --auth api --level structure --client codex-skill --client-version <skill-semver> --skill-protocol <protocol> --output json
+```
+
 ## Explicitly requested SSH manual handoff
 
 Manual mode is disabled by default. Use it only when the human explicitly requests

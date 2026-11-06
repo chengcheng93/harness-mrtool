@@ -139,6 +139,41 @@ test("bundled and plugin Skills carry identical submission instructions", async 
   assert.equal(plugin, bundled);
 });
 
+for (const path of ["../../skill/harness-mr/SKILL.md", "../../plugins/harness-mrtool/skills/harness-mr/SKILL.md"]) {
+  test(`${path} provides executable pristine-resume validation and structure verification`, async () => {
+    const instructions = await readFile(new URL(path, import.meta.url), "utf8");
+    const commands = [...instructions.matchAll(/```text\r?\n([\s\S]*?)```/gu)]
+      .map((match) => match[1]!.trim().split(/\r?\n/u))
+      .find((lines) => lines.some((line) => line.includes(" --resume ")));
+    assert.ok(commands, "Skill must provide an explicit resume command");
+    const args = commands.map((line) => line
+      .replaceAll("<iid>", "157")
+      .replaceAll("<skill-semver>", "1.1.0")
+      .replaceAll("<protocol>", "1")
+      .replaceAll("<original-request.json>", "original-request.json")
+      .replaceAll("<fresh-request.json>", "fresh-request.json")
+      .split(/\s+/u).slice(1));
+    const invocations = args.map((arguments_) => parseCliInvocation(arguments_));
+    assert.equal(invocations.length, 3, "Resume sequence must preview, dry-run, then verify");
+    const [preview, resume, verify] = invocations;
+    assert.deepEqual(preview!.command, { kind: "preview" });
+    assert.equal(preview!.options.input, "fresh-request.json");
+    assert.deepEqual(resume!.command, { kind: "create", upsert: false,
+      resumeIid: 157, resumeFrom: "original-request.json" });
+    assert.equal(resume!.options.input, "fresh-request.json");
+    assert.equal(resume!.options.dryRun, true);
+    assert.deepEqual(verify!.command, { kind: "verify", iid: 157, level: "structure" });
+    for (const invocation of invocations) {
+      assert.equal(invocation.options.authMode, "api");
+      assert.equal(invocation.options.output, "json");
+    }
+    const write = parseCliInvocation(args[1]!.filter((argument) => argument !== "--dry-run"));
+    assert.deepEqual(write.command, resume!.command);
+    assert.equal(write.options.input, resume!.options.input);
+    assert.equal(write.options.dryRun, false);
+  });
+}
+
 test("Skill manager prepares the staging root through the private-directory verifier", async () => {
   const paths = await sandbox();
   let calls = 0;

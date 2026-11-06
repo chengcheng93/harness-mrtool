@@ -804,3 +804,140 @@ HTTP 支持覆盖底层 REST/GraphQL、CLI 只读规划、MR URL、事务失败�
 早期并发运行出现过本机锁等待和 Git 子进程 30 秒超时；最终使用固定 Node、串行运行后两个完整用例通过，未放宽生产超时或跳过实际锁实现。
 
 使用经官方 SHA256 校验的 Node `24.16.0`，类型检查、`git diff --check` 及标准构建通过；`dist/main.cjs version --output json` 和 `schema show --output json` 返回 `OK`，CLI `0.1.7`、Template `1.1.0`。构建保留两条已有的 CJS `import.meta` 警告。交付分支为 `origin/codex/mr-submit-performance`，可用 `git log -1` 与 `git ls-remote --heads origin codex/mr-submit-performance` 核对源码提交。
+
+## 18. 2026-11-06：真实 Draft !157 的创建后中断
+
+### 18.1 本轮目标和原始状态
+
+用户报告另一个会话已经创建 `03-apps` Draft MR !157，但随后回读、标签、负责人及结构验证没有完成。
+本轮目标是用实际 GitLab 响应定位原因，修复兼容层和创建前检查，并给原始描述未变、状态符合原计划事务前缀的 provisional Draft 提供明确的恢复入口。
+
+继续沿用 `codex/mr-submit-performance`，起点是此前已推送的 `52443e5c87c522967af7822d01d80daafee34bd4`。
+不要求业务仓库工作区完全干净，不切回 SSH MR，不重新创建 MR，也不改变用户原本的 Draft 意图。
+
+原始证据在本机私有目录 `C:/Users/lxc/.cache/harness-mrtool/requests/restart-20261106/`，包括
+`diagnostics.md`、`create.json`、`preview.json`、`request.json` 和实际 REST/GraphQL 读取结果。
+另核对了 “Add harness-mrtool plugin” 会话中此前的类型确认和提交记录；实际使用的源码是 `52443e5`，并非旧缓存版本。
+这些私有输入不纳入仓库；本文只记录不含凭据的结论。
+
+业务提交和远端身份：
+
+- GitLab origin：`http://yanfa-git.maxphotonics.com`，实际版本 `17.10.3`。
+- 项目 `bjxcjg/Luban/03-apps`，ID `258`；MR IID `157`。
+- 源分支 `docs/wasm-asset-base-comment-20261106`，目标 `develop`。
+- 源 SHA `edd483c30b81814d082990fb4806956b27f772bf`；目标/merge-base `2b9ada4b5651b6c86452170fbd7f17ca9a5e7197`。
+- 已提交 diff 只有 `luban-web-wasm/src/wasm/package.ts` 的注释；用户原先明确确认 `type::doc`。
+- 本轮开始时实际 MR 为 opened Draft，标签/负责人/评审人均为空，描述标记为 `provisional`，没有最终持久化验证回执。
+- 本地未跟踪 `luban-web-wasm/.superpowers/` 报告保留。
+
+### 18.2 根因：已取得服务器信息，但硬编码合同没有适配
+
+1. REST 返回 `should_remove_source_branch:null` 和 `force_remove_source_branch:true`。
+   原解析器只接受第一个字段为 boolean，因此 POST 成功后的第一次独立 GET 被当作非法响应。
+   修复按 GitLab 的有效语义合并两个字段：nullable 视为未设置，结果取逻辑 OR；显式字符串、数字等畸形值继续拒绝。
+2. 服务器 GraphQL introspection 明确公布 `MutationOperationMode = REPLACE / APPEND / REMOVE`。
+   原工具却要求存在 `ADD / REMOVE`，并将逻辑 ADD 原样发给接口。
+   修复从实际 schema 选择 APPEND，兼容明确公布 ADD 的旧接口；REMOVE 也必须由服务器公布。
+   不通过 mutation 失败后换枚举重试来猜测能力。
+3. 原能力检查只在 doctor 中执行，创建前没有强制执行。因此不兼容时仍先产生了 Draft。
+   修复在 POST 创建和标签 mutation 前探测能力，每个命令内复用探测结果；探测失败明确标记为未发送写请求，不能误报为未知写入结果。
+4. GitLab 持久化描述时去掉末尾 LF。原 renderer、marker 和精确描述比对要求这一 LF，后续也会失败。
+   修复只在补回单个 LF 后，完整 marker/JCS/body digest 均验证通过时恢复它；正文被改、标记畸形或普通人工描述不被清洗。
+5. 原事务 journal/失败回执只在进程内保存，CLI 也没投影已知 MR IID。
+   同时普通 update/upsert 要求 final 标记和受信回执，无法恢复这个只有 provisional 的 Draft。
+   不能仅修解析器后盲重试 create，也不能把所有 provisional 当作已完成受管 MR。
+6. 恢复 dry-run 读取审批时，实际 `approvals` 响应只有 `approved`、`approved_by`、`user_can_approve`、`user_has_approved`。
+   这也是 GitLab 官方 API 文档注明的 Community Edition 响应形状；原客户端强制要求 `id/iid/project_id`，因此再次拒绝合法响应。
+   修复使用审批读取前后的 MR identity/SHA fence 绑定身份；审批响应若提供身份字段则继续逐项严格核对，未提供时不伪造字段。
+7. 同项目现有 !156 的真实系统 discussion note 为 `system:true, resolvable:false`，不含 `resolved`。
+   原解析器无条件要求 `resolved` 为 boolean；写入标签/负责人后产生的系统消息也可能触发这一问题。
+   修复只允许不可解决的 note 缺省该字段；可解决的讨论仍必须提供明确 boolean，畸形值和身份不匹配仍拒绝。
+8. 第一次恢复中 `labels-add` 已获服务器确认，但单 MR GET 忽略 `with_labels_details=true`，仍返回标签名称字符串数组。
+   原解析器只支持 rich label 对象，因此写后回读再次中断；现场确认三个标签已应用、负责人仍空、描述仍是原 provisional。
+   同一项目的 MR list 接口带 `iids[]=157&with_labels_details=true` 则返回真实 ID/name 对象，证明是接口形状差异。
+   本轮对字符串数组使用该项目的新鲜完整标签 inventory 解析真实 REST ID；名称缺失、跨项目/组同名歧义或畸形/混合数组仍拒绝。
+   rich 对象和空数组不新增查询；同一列表读取只复用本次局部 inventory，不跨操作缓存身份。
+
+此前真实验证只覆盖 context、标签等只读操作；模拟测试使用了 boolean 和 ADD 响应，未覆盖本次实际创建后的完整链路。
+“能读取项目/候选”不等于“该版本 GitLab 的创建、标签写入、独立验证均已验收”。本轮补上真实响应回归和真实 MR 闭环验证。
+
+### 18.3 显式恢复设计和限制
+
+命令接口：`create --resume <iid> --resume-from <original-request-file> --input <fresh-request-file>`，与 `--upsert` 互斥。
+
+原始 Request 和私有 context 只用于证明先前操作；重新运行普通 create context，选相同真实人员，使用新 context/candidate 票据。
+原始票据即使仍存在，也不能重新消费或延长写权限。过期 context 最多保留 24 小时、16 条，作为只读历史证明；包括没有显式候选的请求。
+本次在刷新之前还在私有状态目录保存了旧 context 文件的逐字节备份，以防调查过程中原有清理逻辑删除证据。
+
+恢复先核对 origin、项目/分支、源/目标/merge-base SHA、作者、模板/策略、原始 Request 和 snapshot digest、完整 provisional 描述、新旧候选身份及写计划。
+只接受唯一、opened、原 provisional 描述逐字一致的 Draft，元数据必须是以下正常事务前缀之一：
+初始空标签与空人员；完整且恰好等于计划的标签与空人员；或标签及全部受管人员字段都恰好等于计划。
+不接受部分/多余/其他标签、混合人员状态、身份或正文编辑；原证明丢失时拒绝；没有匹配 MR 时也不执行 POST 创建。
+
+通过后产生仅在内存中可认证的恢复授权，绑定精确 MR 状态和新的写入意图，再使用正常 update 事务补标签、人员、最终描述和持久化验证回执。
+写前新鲜度、候选消费、每步独立回读和最终结构校验继续执行；普通 loadMrBundle/update/upsert 的 final 标记与受信历史回执要求不放宽。
+审计记录 operation 为 update，明确说明本次没有再次创建 MR。
+
+这不是任意中断状态的通用恢复器；人工编辑正文或不属于上述明确前缀的元数据状态仍会拒绝。
+原先 final MR 的常规 update/verify 流程继续使用其持久化回执。
+
+### 18.4 当前验证进度
+
+本节记录调查与实现边界；最终回归和真实 MR 恢复结果见 18.5、18.6，不以只读成功代替提交成功。
+
+已直接通过生产 GitLabClient 只读验证：版本 `17.10.3`、协商结果 `APPEND/REMOVE`、!157 能正确解析且有效删除源分支为 true、补 LF 后 provisional marker 校验通过。
+此前 POST 产生的 MR 在这次只读检查后仍为空标签和空负责人，没有进行旁路 API 写入。
+
+真实恢复 dry-run 还发现默认 lazy context-store wrapper 漏转发 `loadRecoveryProof`；已补同一惰性实例的转发，并加入未注入 contextStore 的默认组合回归。
+审批读取错误原先在 dry-run 路径被输出为 `INTERNAL_ERROR`，本轮同时补上安全的远端读取错误分类；这些 dry-run 失败均发生在候选消费及远端写入之前。
+
+### 18.5 最终针对性回归
+
+以下是本轮分组运行结果，范围有重叠，不能相加当作一套全仓库测试。
+
+| 范围 | 通过 | 跳过 | 说明 |
+| --- | ---: | ---: | --- |
+| 早期客户端、CLI、输出、写服务、事务与性能组合 | 244 | 0 | 覆盖原始兼容修复和初始恢复路径；后续变化再运行下列相关组 |
+| 最终 GitLab client + remote | 126 | 0 | nullable 删除字段、APPEND、CE 审批、系统 note、字符串标签及身份/失败分类 |
+| 最终恢复 validator + MR transaction | 75 | 0 | 三个完整前缀、Draft/Ready、混合/编辑拒绝、已完成字段跳过及正常事务 |
+| 最终默认写服务 | 13 | 0 | 原/新输入分离、dry-run read/findOpen 认证及网络失败分类 |
+| 默认只读运行时组合 | 25 | 0 | 默认 lazy store 的恢复方法转发及惰性行为 |
+| 最终 Skill 与插件契约 | 36 | 0 | 两份 Skill 同步、真实 CLI 恢复示例与打包边界 |
+| 候选 store 与初始恢复单元组 | 52 | 3 | 过期/消费票据不可重用、只读历史限制；平台用例在 Windows 跳过 |
+| 真实 Git 的标签流程 | 6 | 0 | 实际 Git + 模拟 HTTP，创建/dry-run/漂移/HTTP/HTTPS/持久化验证；不创建真实测试 MR |
+
+最终生产代码的 `tsc --noEmit`、标准 `scripts/build.mjs` 和 `git diff --check` 通过。
+构建仍有两条已有的 CJS `import.meta` 警告；本轮没有把它们当成新的兼容错误或更改编译产物格式。
+
+### 18.6 真实恢复执行记录
+
+新鲜 create context、相同人员身份的 fresh Request、原先 `type::doc` diff-bound 确认和 preview 均通过。
+第一次 resume 的 `labels-add` 确认写入后因单 MR 字符串标签响应中断，CLI 正确保留 !157、失败操作及 unknown readback 状态。
+该次结果、已消费 Request 和 context 已另存私有 `*-labels-add-partial.json`，不覆盖原始创建证据。
+
+修复后再次签发新 context 与票据；preview 和 `create --resume 157 ... --dry-run` 返回 `OK`，
+确认目标仍为同一 !157，已写的三个标签完整匹配原计划，不会再次创建 MR，也不重复添加标签。
+
+2026-11-06 最终通过标准构建产物执行显式 resume，返回 exit `0` / `OK` / `Merge request updated successfully`。
+审计 operation 为 `update`，只执行 `fields-write` 和 `description-write`；两步 mutation 均为 confirmed，独立 postRead 均 succeeded、postcondition 均 matched，最终 `draft-proven`。
+已有标签写入没有重复执行，没有新建另一个 MR。
+
+随后在独立 CLI 进程执行 `verify 157 --level structure`，返回 exit `0`、`OK`、`valid:true`、`level:structure`。
+这一步实际读取了已持久化的验证回执与相应 Bundle，并重新读取远端状态；不是复用恢复进程内的成功对象。
+生产 marker 校验器确认最终正文为 `renderPhase:final`。
+
+真实 REST 再次读取确认：
+
+- MR !157，opened、Draft；标题为 `Draft: [docs][wasm] 补充 CAD 资源路径与构建版本关系说明`。
+- 标签恰好为 `priority::p2`、`status::doing`、`type::doc`。
+- 负责人 `117 / MXB0091 / 刘希呈`，reviewers 为空，符合原始 Draft 请求。
+- 源分支仍为 `docs/wasm-asset-base-comment-20261106`，目标仍为 `develop`，源 SHA 未变。
+- squash 为 false；REST 仍返回 `should_remove_source_branch:null`、`force_remove_source_branch:true`，工具按有效 true 正确验证。
+- 业务仓库只保留原有未跟踪 `luban-web-wasm/.superpowers/`，HEAD 仍为 `edd483c30b81814d082990fb4806956b27f772bf`。
+
+最终私有证据包括 `resume-context.json`、`resume-request.json`、`resume-preview.json`、`resume-dry-run.json`、
+`resume-result.json`、`resume-verify.json`、`live-157-final.json`，以及审批/讨论/标签形状读取结果。
+这些文件在原诊断目录中，候选票据和凭据材料未纳入仓库。
+
+本轮交付为 `codex/mr-submit-performance` 的源码修复、同步的两份 Skill、测试与本地标准构建。
+CLI 版本仍为开发候选 `0.1.7`、Template `1.1.0`；正式签名发布与其他会话插件宿主更新属于后续发布步骤。

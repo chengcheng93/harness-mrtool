@@ -66,8 +66,19 @@ const SHA256 = /^[a-f0-9]{64}$/u;
 const SHA = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u;
 const MAX_STORE_BYTES = 16 * 1024 * 1024;
 const MAX_COLLISION_ATTEMPTS = 8;
+const RECOVERY_PROOF_TTL_MS = 24 * 60 * 60 * 1_000;
+const MAX_EXPIRED_RECOVERY_CONTEXTS = 16;
 const RAW_BEARER = /(?:hmrc1_|hmrx1_)[A-Za-z0-9_-]{43}/u;
 const INCOMPLETE_LOCK_GRACE_MS = 1_000;
+
+function retainedContexts(contexts: readonly PersistedContext[], now: number): readonly PersistedContext[] {
+  const active = contexts.filter((context) => context.expiresAtMs > now);
+  const historical = contexts.filter((context) => context.expiresAtMs <= now &&
+    now - context.expiresAtMs < RECOVERY_PROOF_TTL_MS)
+    .sort((left, right) => right.expiresAtMs - left.expiresAtMs)
+    .slice(0, MAX_EXPIRED_RECOVERY_CONTEXTS);
+  return [...historical, ...active];
+}
 const MAX_LOCK_OWNER_BYTES = 1_024;
 
 interface LockOwner extends ProcessIdentity {
@@ -854,7 +865,7 @@ export class CandidateContextStore {
     return this.locked(async (lease) => {
       const document = await this.readDocument();
       const now = this.now(CANDIDATE_CONTEXT_TTL_MS);
-      const active = document.contexts.filter((context) => context.expiresAtMs > now);
+      const active = retainedContexts(document.contexts, now);
       const activeDocument: ContextStoreDocument = { storeVersion: CONTEXT_STORE_VERSION, contexts: active };
       const contextId = this.uniqueContextId(activeDocument);
       const pendingDigests = new Set<string>();
@@ -909,7 +920,7 @@ export class CandidateContextStore {
       const index = document.contexts.findIndex((context) =>
         digestMatches(context.contextIdDigest, requestedContextDigest));
       if (index < 0) {
-        const active = document.contexts.filter((context) => context.expiresAtMs > now);
+        const active = retainedContexts(document.contexts, now);
         if (active.length !== document.contexts.length) {
           await this.writeDocument({ storeVersion: CONTEXT_STORE_VERSION, contexts: active }, lease);
         }
@@ -925,7 +936,7 @@ export class CandidateContextStore {
       if (now >= context.expiresAtMs) {
         await this.writeDocument({
           storeVersion: CONTEXT_STORE_VERSION,
-          contexts: document.contexts.filter((_, contextIndex) => contextIndex !== index && document.contexts[contextIndex]!.expiresAtMs > now),
+          contexts: retainedContexts(document.contexts, now),
         }, lease);
         throw contextInputError("Candidate context has expired");
       }
@@ -971,11 +982,45 @@ export class CandidateContextStore {
     });
   }
 
+  /** History proves a prior intent only. It never grants permission to consume an expired or used token. */
+  async loadRecoveryProof(input: Pick<ResolveContextInput, "contextId" | "selections">): Promise<ResolvedContext> {
+    assertContextId(input.contextId);
+    const requested = contextIdDigest(input.contextId);
+    const selections = input.selections.map((selection) => {
+      try { return { kind: selection.kind, digest: candidateTokenDigest(selection.token) }; }
+      catch { throw this.selectionError(selection.kind, "Invalid recovery candidate token"); }
+    });
+    if (new Set(selections.map((selection) => selection.digest)).size !== selections.length) {
+      throw contextInputError("Recovery candidate selection contains duplicates", "candidateTokens");
+    }
+    return this.locked(async () => {
+      const document = await this.readDocument();
+      const now = this.now();
+      const context = retainedContexts(document.contexts, now)
+        .find((entry) => digestMatches(entry.contextIdDigest, requested));
+      if (context === undefined || now < context.createdAtMs ||
+          now - context.expiresAtMs >= RECOVERY_PROOF_TTL_MS) {
+        throw contextInputError("Original recovery context is unavailable");
+      }
+      const candidates = selections.map((selection) => {
+        const candidate = context.candidates.find((entry) => digestMatches(entry.tokenDigest, selection.digest));
+        if (candidate === undefined || candidate.kind !== selection.kind) {
+          throw this.selectionError(selection.kind, "Recovery candidate identity does not match");
+        }
+        return copyJsonValue(candidate.metadata) as unknown as Candidate;
+      });
+      return { contextId: input.contextId, createdAtMs: context.createdAtMs, expiresAtMs: context.expiresAtMs,
+        binding: context.binding, externalSnapshotDigest: context.externalSnapshotDigest,
+        snapshot: copyJsonValue(context.snapshot), candidates };
+    });
+  }
+
+  /** Remove expired authority while retaining a bounded recent history solely for recovery proof. */
   async cleanup(): Promise<number> {
     return this.locked(async (lease) => {
       const document = await this.readDocument();
       const now = this.now();
-      const active = document.contexts.filter((context) => context.expiresAtMs > now);
+      const active = retainedContexts(document.contexts, now);
       const removed = document.contexts.length - active.length;
       if (removed > 0) {
         await this.writeDocument({ storeVersion: CONTEXT_STORE_VERSION, contexts: active }, lease);

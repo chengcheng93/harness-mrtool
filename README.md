@@ -212,6 +212,31 @@ hmr verify 88 --auth api --level structure --output json
 `create --upsert` 可复用同分支已有 MR，但必须验证该 MR 的 receipt 和精确历史模板；
 若历史 Bundle 不同，按错误提示改走 `context --mr` + `update`，不能跳过认证。
 
+如果创建已经产生 Draft，但在原始 provisional 描述定稿前中断，保留原始 Request 文件和私有证明，修复阻断后重新
+运行普通 `context`（不加 `--mr`），把原来选中的人员映射到新候选票据，其余 Request 内容保持
+一致，先预览，然后显式恢复已有 MR：
+
+```sh
+hmr create --resume 157 --resume-from /absolute/private/original.json --input /absolute/private/fresh.json --dry-run --output json
+hmr create --resume 157 --resume-from /absolute/private/original.json --input /absolute/private/fresh.json --output json
+hmr verify 157 --level structure --output json
+```
+
+恢复要求原始 provisional 描述完全不变，且远端恰好处于以下正常事务前缀之一：
+
+- 标签为空，assignee/reviewers 为空。
+- 标签恰好为计划的完整 Draft 标签组，assignee/reviewers 仍为空。
+- 同一完整 Draft 标签组，assignee/reviewers 全部与计划一致。
+
+标题、目标分支、squash 和删除源分支选项始终须匹配原计划；Ready 请求在此阶段也只能使用
+Draft 的 doing 标签组，不能提前带有最终 review 标签。部分/额外标签、混合字段、描述编辑、
+已定稿描述均拒绝恢复。核对项目、分支、提交、模板和新旧候选身份后，正常事务跳过已完整
+写入的标签和 metadata，继续剩余步骤。它不创建第二个 MR，不把过期票据重新变成写权限，
+也不代替普通 `update` 的回执校验；`verify` 只验证存储状态，不恢复事务。
+私有上下文的历史证明保留至过期后 24 小时，最多 16 条；原始文件、私有证明丢失或计划变化时
+会拒绝恢复。需要原有 diff 类型确认的命令，
+恢复时继续传入相同且仍与当前 diff 匹配的 `--confirm-label-type` / `--label-diff-digest`。
+
 ## 6. 自动标签规则与人工确认
 
 | 类别 | 固定池 | 规则 |

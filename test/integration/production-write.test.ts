@@ -32,7 +32,7 @@ import {
 import { buildWritePlan } from "../../src/app/write-plan.ts";
 import { loadTemplateBundle } from "../../src/bundle/load.ts";
 import { ToolError } from "../../src/contracts/errors.ts";
-import { canonicalizeJson, sha256CanonicalJson, sha256Utf8 } from "../../src/contracts/jcs.ts";
+import { canonicalizeJson, copyJsonValue, sha256CanonicalJson, sha256Utf8 } from "../../src/contracts/jcs.ts";
 import { createSuccessOutput } from "../../src/contracts/output.ts";
 import type { Request } from "../../src/contracts/request.ts";
 import type { Candidate, ContextBinding, ResolvedContext } from "../../src/context/types.ts";
@@ -1158,6 +1158,127 @@ test("the default create domain satisfies the exact remote query proof", async (
   assert.equal(remote.operations[0], "read:find-open");
   assert.equal(remote.operations.some((operation) => operation === "mutation:create-draft"), true);
   assert.equal(remote.operations.at(-1), "read:mr");
+});
+
+async function pristineAdapterResumeFixture() {
+  const base = await fixture();
+  const durable = durableVerificationFixture(base);
+  const writeBase: Fixture = { ...base, request: durable.request, snapshot: durable.initialSnapshot };
+  const originalRequest = normalizeAndValidateRequest({ ...durable.request,
+    contextId: `hmrx1_${"G".repeat(43)}`,
+    mergeRequest: { ...durable.request.mergeRequest,
+      labelCandidateTokens: ["original-week", "original-type", "original-priority"],
+      assigneeCandidateToken: "original-assignee" },
+    review: { ...durable.request.review, reviewerCandidateTokens: ["original-reviewer"] },
+  });
+  const originalContext: ResolvedContext = {
+    contextId: originalRequest.contextId, createdAtMs: 1, expiresAtMs: 2, binding: base.binding,
+    externalSnapshotDigest: sha256CanonicalJson(writeBase.snapshot),
+    snapshot: copyJsonValue(writeBase.snapshot), candidates: durable.resolved,
+  };
+  const remote = new StatefulRemote(writeBase.snapshot);
+  const plan = buildWritePlan({ request: originalRequest, snapshot: writeBase.snapshot,
+    resolvedCandidates: durable.resolved, bundle: base.bundle, labelDiff: bugLabelDiff(writeBase.snapshot) });
+  await remote.createDraft({ ...createInput(), title: plan.provisional.title,
+    sourceProjectId: base.binding.sourceProject.id, targetProjectId: base.binding.targetProject.id,
+    sourceHeadSha: base.binding.sourceHeadSha,
+    description: renderDescription({ request: originalRequest, snapshot: writeBase.snapshot,
+      writePlan: plan.desired, bundle: base.bundle, releaseTag: base.binding.bundle.releaseTag,
+      cliVersion: base.binding.cliVersion, renderPhase: "provisional" }),
+  });
+  remote.operations.length = 0;
+  return { writeBase, remote, resolved: durable.resolved,
+    resume: { iid: 88, originalRequest, originalContext } };
+}
+
+test("explicit resume preserves the adapter query, consumption, receipt, and update-audit proofs", async () => {
+  const { writeBase, remote, resolved, resume } = await pristineAdapterResumeFixture();
+  const operations: string[] = [];
+  const adapter = createMergeRequestCommandAdapter(dependencies(writeBase, operations, {
+    candidateStore: durableCandidateStore(writeBase, operations, resolved),
+  }));
+  const execution = await adapter.create({ upsert: false, resume,
+    prepare: async () => preparedCreate(writeBase, remote) });
+  assert.equal(execution.output?.data?.command, "update");
+  assert.equal(execution.context?.remoteWrite?.state, "written");
+  assert.deepEqual(remote.operations.slice(0, 2), ["read:find-open", "read:mr"]);
+  assert.equal(remote.operations.includes("mutation:create-draft"), false);
+  assert.equal(remote.operations.at(-1), "read:mr");
+  assert.equal(operations.filter((operation) => operation === "candidate:true").length, 1);
+  assert.equal(operations.filter((operation) => operation === "receipt-stage").length, 1);
+  assert.equal(remote.current?.draft, false);
+  const serialized = JSON.stringify(execution);
+  for (const secret of [...BEARERS, resume.originalRequest.contextId, "original-assignee"]) {
+    assert.equal(serialized.includes(secret), false);
+  }
+});
+
+test("resume evidence is detached and frozen before invoking the domain", async () => {
+  const { writeBase, remote, resolved, resume } = await pristineAdapterResumeFixture();
+  const operations: string[] = [];
+  const sentinel = new ToolError("INPUT_ERROR", "stop after inspecting resume proof", {
+    field: "--resume", expected: "immutable proof", actual: "test inspection", safeNextStep: "retry",
+  });
+  const adapter = createMergeRequestCommandAdapter(dependencies(writeBase, operations, {
+    candidateStore: durableCandidateStore(writeBase, operations, resolved),
+    domain: { create: async (input) => {
+      assert.ok(input.resume);
+      assert.notEqual(input.resume.originalContext, resume.originalContext);
+      assert.notEqual(input.resume.originalRequest, resume.originalRequest);
+      assert.ok(Object.isFrozen(input.resume));
+      assert.ok(Object.isFrozen(input.resume.originalContext.candidates));
+      assert.ok(Object.isFrozen(input.resume.binding));
+      throw sentinel;
+    }, update: async () => { throw new Error("unused"); } },
+  }));
+  await assert.rejects(adapter.create({ upsert: false, resume,
+    prepare: async () => preparedCreate(writeBase, remote) }), (error: unknown) => error === sentinel);
+  assert.equal(Object.isFrozen(resume.originalContext), false);
+  assert.deepEqual(remote.operations, []);
+});
+
+test("resume blocks domain attempts to create or mutate another IID before candidate consumption", async () => {
+  for (const attempt of ["create", "wrong-iid"] as const) {
+    const { writeBase, remote, resolved, resume } = await pristineAdapterResumeFixture();
+    const operations: string[] = [];
+    const adapter = createMergeRequestCommandAdapter(dependencies(writeBase, operations, {
+      candidateStore: durableCandidateStore(writeBase, operations, resolved),
+      domain: { create: async (input) => {
+        if (attempt === "create") await input.remote.createDraft(createInput());
+        else await input.remote.addLabels(89, ["gid://gitlab/ProjectLabel/20"]);
+        throw new Error("an unauthorized resume mutation reached the transport");
+      }, update: async () => { throw new Error("unused"); } },
+    }));
+    await assert.rejects(adapter.create({ upsert: false, resume,
+      prepare: async () => preparedCreate(writeBase, remote) }),
+      (error: unknown) => error instanceof RemoteMutationError && error.outcome === "rejected", attempt);
+    assert.deepEqual(remote.operations, [], attempt);
+    assert.equal(operations.includes("candidate:true"), false, attempt);
+  }
+});
+
+test("resume evidence mutation across preparation and the first-write gate rejects before consumption", async () => {
+  for (const phase of ["prepare", "binding", "live"] as const) {
+    const fixture = await pristineAdapterResumeFixture();
+    const resume = structuredClone(fixture.resume);
+    const operations: string[] = [];
+    const mutate = () => { (resume.originalContext as { createdAtMs: number }).createdAtMs += 1; };
+    const adapter = createMergeRequestCommandAdapter(dependencies(fixture.writeBase, operations, {
+      candidateStore: durableCandidateStore(fixture.writeBase, operations, fixture.resolved),
+      readCurrentBinding: async () => {
+        if (phase === "binding") mutate();
+        return fixture.writeBase.binding;
+      },
+      verifyLiveCandidateIdentities: async () => { if (phase === "live") mutate(); },
+    }));
+    await assert.rejects(adapter.create({ upsert: false, resume, prepare: async () => {
+      if (phase === "prepare") mutate();
+      return preparedCreate(fixture.writeBase, fixture.remote);
+    } }), (error: unknown) => error instanceof ToolError &&
+      error.code === (phase === "live" ? "CONCURRENT_UPDATE" : "INTERNAL_ERROR"), phase);
+    assert.equal(fixture.remote.operations.some((operation) => operation.startsWith("mutation:")), false, phase);
+    assert.equal(operations.includes("candidate:true"), false, phase);
+  }
 });
 
 test("the default create domain binds unknown recovery to its second findOpen", async () => {

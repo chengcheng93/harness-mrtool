@@ -14,6 +14,7 @@ import { exitCodeFor, type RemoteWriteState } from "../contracts/exit-codes.ts";
 import { copyJsonValue, type JsonObject } from "../contracts/jcs.ts";
 import {
   getTransactionAudit,
+  getTransactionFailureReceipt,
   remoteWriteFromTransactionAudit,
 } from "../app/transaction-journal.ts";
 
@@ -122,17 +123,19 @@ function validationIssue(error: ToolError<FailureCode>): {
 
 function transactionData(error: unknown): {
   readonly remoteWrite?: ReturnType<typeof remoteWriteFromTransactionAudit>;
+  readonly failureReceipt?: NonNullable<ReturnType<typeof getTransactionFailureReceipt>>;
   readonly data?: JsonObject;
 } {
   const transaction = getTransactionAudit(error);
-  if (transaction === null) return {};
-  const copied = copyJsonValue(transaction);
-  if (copied === null || typeof copied !== "object" || Array.isArray(copied)) {
-    throw new TypeError("Transaction audit must be a JSON object");
-  }
+  const failureReceipt = getTransactionFailureReceipt(error);
+  if (transaction === null && failureReceipt === null) return {};
   return {
-    remoteWrite: remoteWriteFromTransactionAudit(transaction),
-    data: { transaction: copied },
+    ...(transaction === null ? {} : { remoteWrite: remoteWriteFromTransactionAudit(transaction) }),
+    ...(failureReceipt === null ? {} : { failureReceipt }),
+    data: {
+      ...(transaction === null ? {} : { transaction: copyJsonValue(transaction) }),
+      ...(failureReceipt === null ? {} : { failureReceipt: copyJsonValue(failureReceipt) }),
+    },
   };
 }
 
@@ -166,8 +169,20 @@ export class CliJsonOutput {
     let outputCode: FailureCode;
     let remoteWriteState: RemoteWriteState = "not-attempted";
     try {
-      const normalized = normalizeCliFailure(error);
+      let normalized = normalizeCliFailure(error);
       const audit = transactionData(error);
+      if (audit.failureReceipt !== undefined) {
+        const receipt = audit.failureReceipt;
+        normalized = new ToolError(normalized.code, normalized.message, {
+          ...normalized.details,
+          safeNextStep: [
+            receipt.iid === null ? "MR IID is unavailable." : `MR !${String(receipt.iid)}.`,
+            receipt.webUrl === null ? "MR URL is unavailable." : `MR URL: ${receipt.webUrl}.`,
+            `Failed operation: ${receipt.failedOperation} (${receipt.failedField}).`,
+            normalized.details.safeNextStep,
+          ].join(" "),
+        });
+      }
       const context: OutputContext = {
         ...this.context,
         validation: {

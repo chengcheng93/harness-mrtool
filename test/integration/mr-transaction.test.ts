@@ -31,7 +31,8 @@ import { mutationReceipt, valueReceipt } from "../../src/app/remote-receipt.ts";
 import { RemoteMutationError } from "../../src/app/remote-outcome.ts";
 import { RemoteReadError } from "../../src/app/remote-outcome.ts";
 import { loadTemplateBundle } from "../../src/bundle/load.ts";
-import type { Candidate } from "../../src/context/types.ts";
+import type { Candidate, ContextBinding, ResolvedContext } from "../../src/context/types.ts";
+import { canonicalizeJson, copyJsonValue, sha256CanonicalJson, sha256Utf8 } from "../../src/contracts/jcs.ts";
 import { normalizeAndValidateRequest } from "../../src/input/normalize.ts";
 import {
   parseDiagnosticMarker,
@@ -556,6 +557,127 @@ test("create upserts the one existing open managed merge request only when expli
   assert.equal(upserted.iid, created.iid);
   assert.equal(upserted.transaction.operation, "update");
   assert.equal(fixture.remote.writes.includes("create-draft"), false);
+});
+
+async function pristineResumeFixture() {
+  const fixture = await transactionFixture();
+  const releaseTag = `templates-v${fixture.bundle.manifest.version}`;
+  const binding: ContextBinding = {
+    operation: "create", gitlabOrigin: fixture.remote.gitlabOrigin,
+    sourceProject: { id: fixture.snapshot.sourceProject.id, fullPath: fixture.snapshot.sourceProject.path },
+    targetProject: { id: fixture.snapshot.targetProject.id, fullPath: fixture.snapshot.targetProject.path },
+    sourceBranch: "fix/webengine-css", targetBranch: fixture.request.targetBranch,
+    sourceHeadSha: fixture.snapshot.sourceHeadSha, targetRefSha: fixture.snapshot.targetRefSha,
+    mrIid: null, releaseSetId: "embedded:test", cliVersion: "0.1.0-dev",
+    bundle: { id: fixture.bundle.manifest.bundleId, version: fixture.bundle.manifest.version,
+      releaseTag, manifestHash: sha256Utf8(`${canonicalizeJson(fixture.bundle.manifest)}\n`) },
+    protocols: { inputSchema: fixture.bundle.manifest.inputSchema,
+      policySchema: fixture.bundle.manifest.policySchema, skillProtocol: null },
+  };
+  const originalContext: ResolvedContext = {
+    contextId: fixture.request.contextId, createdAtMs: 1, expiresAtMs: 2,
+    binding, externalSnapshotDigest: sha256CanonicalJson(fixture.snapshot),
+    snapshot: copyJsonValue(fixture.snapshot), candidates: fixture.candidates,
+  };
+  const original = {
+    request: fixture.request, initialSnapshot: fixture.snapshot, resolvedCandidates: fixture.candidates,
+    bundle: fixture.bundle, releaseTag, cliVersion: binding.cliVersion, sourceBranch: binding.sourceBranch,
+    ...transactionRuntime(fixture.remote),
+  };
+  fixture.remote.failReads = 1;
+  await assert.rejects(createMergeRequest(original),
+    (error: unknown) => typeof error === "object" && error !== null && "code" in error &&
+      error.code === "PARTIAL_REMOTE_STATE");
+  assert.deepEqual(fixture.remote.writes, ["create-draft"]);
+  fixture.remote.writes.length = 0;
+  const request = normalizeAndValidateRequest({ ...fixture.request, contextId: "renewed-create-context",
+    mergeRequest: { ...fixture.request.mergeRequest, labelCandidateTokens: ["fresh-type", "fresh-priority"],
+      assigneeCandidateToken: "fresh-assignee" },
+    review: { ...fixture.request.review, reviewerCandidateTokens: ["fresh-reviewer"] },
+  });
+  return { fixture, original, inputs: { ...original, request,
+    resume: { iid: 88, originalRequest: fixture.request, originalContext, binding } } };
+}
+
+test("explicit create resume completes only the selected pristine provisional Draft using fresh context", async () => {
+  const { fixture, inputs } = await pristineResumeFixture();
+  const result = await createMergeRequest(inputs);
+  assert.equal(result.iid, 88);
+  assert.equal(result.transaction.operation, "update");
+  assert.equal(result.final.draft, false);
+  assert.equal(fixture.remote.writes.includes("create-draft"), false);
+  assert.equal(fixture.remote.writes.at(-1), "mark-ready");
+  assert.equal(parseDiagnosticMarker(result.final.description).renderPhase, "final");
+  assert.equal(fixture.remote.stagedVerificationReceipts.length, 1);
+});
+
+for (const metadataWritten of [false, true]) {
+  test(`explicit resume completes a full-label prefix with metadata ${metadataWritten ? "written" : "pending"}`, async () => {
+    const { fixture, inputs } = await pristineResumeFixture();
+    const plan = buildWritePlan({ request: inputs.request, snapshot: inputs.initialSnapshot,
+      resolvedCandidates: inputs.resolvedCandidates, bundle: inputs.bundle, labelDiff: inputs.labelDiff });
+    await fixture.remote.addLabels(88, plan.draft.labelIds);
+    if (metadataWritten) await fixture.remote.writeManagedFields(88, {
+      title: plan.draft.title, targetBranch: inputs.request.targetBranch,
+      assigneeUserId: plan.draft.assigneeUserId, reviewerUserIds: plan.draft.reviewerUserIds,
+      squash: plan.draft.squash, removeSourceBranch: plan.draft.removeSourceBranch,
+    });
+    fixture.remote.writes.length = 0;
+    const result = await createMergeRequest(inputs);
+    assert.equal(result.iid, 88);
+    assert.equal(result.transaction.operation, "update");
+    assert.equal(result.final.draft, false);
+    assert.equal(fixture.remote.writes[0], metadataWritten ? "write-description" : "write-fields");
+    assert.equal(fixture.remote.writes.includes("create-draft"), false);
+    assert.equal(fixture.remote.writes.includes("write-fields"), !metadataWritten);
+    assert.equal(result.transaction.steps.some((step) => step.operation === "labels-add"), false);
+    assert.equal(result.transaction.steps.some((step) => step.operation === "fields-write"), !metadataWritten);
+    assert.equal(parseDiagnosticMarker(result.final.description).renderPhase, "final");
+    assert.deepEqual(result.final.labelIds, plan.desired.labelIds);
+  });
+}
+
+test("explicit resume rejects partial labels and mixed metadata before further mutations", async () => {
+  for (const mixedMetadata of [false, true]) {
+    const { fixture, inputs } = await pristineResumeFixture();
+    const plan = buildWritePlan({ request: inputs.request, snapshot: inputs.initialSnapshot,
+      resolvedCandidates: inputs.resolvedCandidates, bundle: inputs.bundle, labelDiff: inputs.labelDiff });
+    await fixture.remote.addLabels(88, mixedMetadata ? plan.draft.labelIds : plan.draft.labelIds.slice(0, 2));
+    if (mixedMetadata) await fixture.remote.writeManagedFields(88, {
+      title: plan.draft.title, targetBranch: inputs.request.targetBranch,
+      assigneeUserId: plan.draft.assigneeUserId, reviewerUserIds: [],
+      squash: plan.draft.squash, removeSourceBranch: plan.draft.removeSourceBranch,
+    });
+    fixture.remote.writes.length = 0;
+    await assert.rejects(createMergeRequest(inputs),
+      (error: unknown) => typeof error === "object" && error !== null && "code" in error && error.code === "INPUT_ERROR");
+    assert.deepEqual(fixture.remote.writes, []);
+  }
+});
+
+test("explicit create resume rejects absent, ambiguous, wrong-IID, or edited Drafts without creating", async () => {
+  for (const scenario of ["absent", "ambiguous", "wrong-iid", "edited"] as const) {
+    const { fixture, inputs } = await pristineResumeFixture();
+    if (scenario === "absent") fixture.remote.createRecovery = "none";
+    if (scenario === "ambiguous") fixture.remote.createRecovery = "multiple";
+    if (scenario === "edited") fixture.remote.createRecovery = "mismatch";
+    const resume = scenario === "wrong-iid" ? { ...inputs.resume, iid: 89 } : inputs.resume;
+    await assert.rejects(createMergeRequest({ ...inputs, resume }),
+      (error: unknown) => typeof error === "object" && error !== null && "code" in error &&
+        error.code === "INPUT_ERROR", scenario);
+    assert.deepEqual(fixture.remote.writes, [], scenario);
+  }
+});
+
+test("resume keeps the independent update read and ordinary upsert ownership checks", async () => {
+  const { fixture, inputs, original } = await pristineResumeFixture();
+  await assert.rejects(createMergeRequest({ ...original, upsert: true }));
+  assert.deepEqual(fixture.remote.writes, []);
+  fixture.remote.driftDescriptionBeforeRead = `${fixture.remote.current!.description}human edit`;
+  await assert.rejects(createMergeRequest(inputs),
+    (error: unknown) => typeof error === "object" && error !== null && "code" in error &&
+      error.code === "CONCURRENT_UPDATE");
+  assert.deepEqual(fixture.remote.writes, []);
 });
 
 async function transactionFixture(gitlabOrigin = "https://gitlab.example.test"): Promise<{

@@ -57,6 +57,15 @@ function labelGraphql(
   };
 }
 
+function enqueueCapabilities(fake: FakeGitLab, modes: readonly string[] = ["ADD", "REMOVE"]): void {
+  fake.enqueue("GET", "/api/v4/version", { body: { version: "17.10.3", revision: "abc" } });
+  fake.enqueue("POST", "/api/graphql", { body: { data: {
+    mutation: { fields: [{ name: "mergeRequestSetLabels" }] },
+    input: { inputFields: ["projectPath", "iid", "labelIds", "operationMode"].map((name) => ({ name })) },
+    mode: { enumValues: modes.map((name) => ({ name })) },
+  } } });
+}
+
 function bundleManifestHash(bundle: Awaited<ReturnType<typeof loadTemplateBundle>>): string {
   return sha256Utf8(`${canonicalizeJson(bundle.manifest)}\n`);
 }
@@ -86,6 +95,46 @@ function reviewFenceBody(
     detailed_merge_status: detailedMergeStatus,
     ...overrides,
   };
+}
+
+function mergeRequestBody(overrides: Readonly<Record<string, unknown>> = {}): Record<string, unknown> {
+  return {
+    iid: 12, web_url: "https://gitlab.example.test/group/project/-/merge_requests/12",
+    title: "Draft: [fix][app] Fix labels", description: "", draft: true, state: "opened",
+    source_project_id: 7, source_branch: "fix/51-labels", target_project_id: 7,
+    target_branch: "develop", sha: "b".repeat(40),
+    author: { id: 40, username: "author", name: "Author", state: "active" },
+    assignees: [], reviewers: [], labels: [],
+    squash: true, should_remove_source_branch: true, head_pipeline: null,
+    ...overrides,
+  };
+}
+
+function enqueueAppliedLabelInventory(
+  fake: FakeGitLab,
+  projectLabels: readonly Record<string, unknown>[],
+  groupLabels: readonly Record<string, unknown>[] = [],
+): void {
+  fake.enqueue("GET", "/api/v4/projects/7", { headers: { "x-request-id": "req-inventory-project" }, body: projectBody() });
+  fake.enqueue("GET", "/api/v4/projects/7/groups?with_shared=false&per_page=100&page=1", {
+    headers: { "x-next-page": "", "x-request-id": "req-inventory-groups" }, body: groupLabels.length === 0 ? [] : [{ id: 11, full_path: "group" }],
+  });
+  fake.enqueue("GET", "/api/v4/projects/7/labels?include_ancestor_groups=false&per_page=100&page=1", {
+    headers: { "x-next-page": "", "x-request-id": "req-inventory-project-labels" }, body: projectLabels,
+  });
+  if (groupLabels.length > 0) {
+    fake.enqueue("GET", "/api/v4/groups/11/labels?include_ancestor_groups=false&include_descendant_groups=false&only_group_labels=true&per_page=100&page=1", {
+      headers: { "x-next-page": "", "x-request-id": "req-inventory-group-labels" }, body: groupLabels,
+    });
+  }
+  fake.enqueue("POST", "/api/graphql", { headers: { "x-request-id": "req-inventory-graphql" }, body: labelGraphql([
+    ...projectLabels.filter((label) => label.archived !== true).map((label) => ({
+      id: `gid://gitlab/ProjectLabel/${String(label.id)}`, title: label.name,
+    })),
+    ...groupLabels.filter((label) => label.archived !== true).map((label) => ({
+      id: `gid://gitlab/GroupLabel/${String(label.id)}`, title: label.name,
+    })),
+  ], false, null) });
 }
 
 test("redacts transport failures and never exposes the token", async () => {
@@ -513,7 +562,7 @@ test("rejects a cross-origin Link continuation without following it", async () =
   assert.equal(fake.requests.length, 1);
 });
 
-test("doctor capability probe requires label ID ADD and REMOVE", async () => {
+test("doctor capability probe accepts advertised legacy label ID ADD and REMOVE", async () => {
   const fake = new FakeGitLab();
   fake.enqueue("GET", "/api/v4/version", { body: { version: "19.2.1", revision: "abc" } });
   fake.enqueue("POST", "/api/graphql", { body: { data: {
@@ -536,12 +585,89 @@ test("doctor capability probe requires label ID ADD and REMOVE", async () => {
     client(missing).probeCapabilities(),
     (error: unknown) => typeof error === "object" && error !== null &&
       "code" in error && error.code === "GITLAB_ERROR" &&
-      "details" in error && JSON.stringify(error.details).includes("label ID ADD/REMOVE mutation is unavailable"),
+      "details" in error && JSON.stringify(error.details).includes("label ID append/remove mutation is unavailable"),
   );
+});
+
+test("capability probe prefers advertised APPEND and caches one immutable session result", async () => {
+  const fake = new FakeGitLab();
+  enqueueCapabilities(fake, ["REPLACE", "ADD", "APPEND", "REMOVE"]);
+  const api = client(fake);
+  const [first, second] = await Promise.all([api.probeCapabilities(), api.probeCapabilities()]);
+  assert.deepEqual(first.labelOperationModes, ["APPEND", "REMOVE"]);
+  assert.equal(first, second);
+  assert.equal(fake.requests.length, 2);
+});
+
+test("Draft creation probes required label capabilities before any remote write", async (t) => {
+  for (const modes of [["REPLACE", "APPEND", "REMOVE"], ["REPLACE", "REMOVE"]]) {
+    await t.test(modes.join(","), async () => {
+      const fake = new FakeGitLab();
+      enqueueCapabilities(fake, modes);
+      fake.enqueue("POST", "/api/v4/projects/7/merge_requests", { body: {
+        iid: 12, project_id: 7, target_project_id: 7, source_project_id: 7,
+        source_branch: "fix/labels", target_branch: "develop", title: "Draft: Fix labels",
+        description: "", draft: true, state: "opened",
+      } });
+      const created = client(fake).createMergeRequest({ id: "7", fullPath: "group/project" }, {
+        title: "Draft: Fix labels", description: "", sourceProjectId: 7, sourceBranch: "fix/labels",
+        targetProjectId: 7, targetBranch: "develop", squash: true, removeSourceBranch: true,
+      });
+      if (modes.includes("APPEND")) {
+        assert.equal((await created).value.iid, 12);
+        assert.deepEqual(fake.requests.map((request) => [request.method, new URL(request.url).pathname]), [
+          ["GET", "/api/v4/version"], ["POST", "/api/graphql"], ["POST", "/api/v4/projects/7/merge_requests"],
+        ]);
+      } else {
+        await assert.rejects(created, { name: "GitLabMutationPreflightError", code: "GITLAB_ERROR" });
+        assert.equal(fake.requests.some((request) => new URL(request.url).pathname === "/api/v4/projects/7/merge_requests"), false);
+      }
+    });
+  }
+});
+
+test("read-only capability probe failures reject before create or label mutations", async (t) => {
+  for (const operation of ["create", "labels"] as const) {
+    for (const status of [401, 503]) {
+      await t.test(`${operation}: ${String(status)}`, async () => {
+        const fake = new FakeGitLab();
+        fake.enqueue("GET", "/api/v4/version", { status, body: { message: "Unavailable" } });
+        const api = client(fake);
+        const result = operation === "labels"
+          ? api.mutateLabels({ id: "7", fullPath: "group/project" }, 12, ["gid://gitlab/ProjectLabel/3"], "ADD")
+          : api.createMergeRequest({ id: "7", fullPath: "group/project" }, {
+            title: "Draft: Fix labels", description: "", sourceProjectId: 7, sourceBranch: "fix/labels",
+            targetProjectId: 7, targetBranch: "develop", squash: true, removeSourceBranch: true,
+          });
+        await assert.rejects(result, {
+          name: "GitLabMutationPreflightError", code: status === 401 ? "AUTH_ERROR" : "GITLAB_ERROR",
+        });
+        assert.deepEqual(fake.requests.map((request) => request.method), ["GET"]);
+      });
+    }
+  }
+});
+
+test("label ADD uses only the advertised append operation and never retries a rejected mutation", async (t) => {
+  for (const modes of [["REPLACE", "APPEND", "REMOVE"], ["ADD", "REMOVE"], ["ADD", "APPEND", "REMOVE"]]) {
+    await t.test(modes.join(","), async () => {
+      const fake = new FakeGitLab();
+      enqueueCapabilities(fake, modes);
+      fake.enqueue("POST", "/api/graphql", { body: { data: {
+        mergeRequestSetLabels: { errors: ["Mutation rejected"], mergeRequest: null },
+      } } });
+      await assert.rejects(client(fake).mutateLabels({ id: "7", fullPath: "group/project" }, 12,
+        ["gid://gitlab/ProjectLabel/3"], "ADD"), { code: "GITLAB_ERROR" });
+      assert.equal(fake.requests.length, 3);
+      const mutation = fake.requests[2]?.body as { variables: { input: { operationMode: string } } };
+      assert.equal(mutation.variables.input.operationMode, modes.includes("APPEND") ? "APPEND" : "ADD");
+    });
+  }
 });
 
 test("label mutation sends only global IDs and never a label name", async () => {
   const fake = new FakeGitLab();
+  enqueueCapabilities(fake);
   fake.enqueue("GET", "/api/v4/projects/group%2Fproject", { body: projectBody() });
   fake.enqueue("POST", "/api/graphql", { body: { data: {
     mergeRequestSetLabels: { errors: [], mergeRequest: {
@@ -550,7 +676,7 @@ test("label mutation sends only global IDs and never a label name", async () => 
     } },
   } } });
   await client(fake).mutateLabels("group/project", 12, ["gid://gitlab/ProjectLabel/3"], "ADD");
-  const body = fake.requests[1]?.body as { query: string; variables: unknown };
+  const body = fake.requests[3]?.body as { query: string; variables: unknown };
   assert.match(body.query, /mergeRequestSetLabels/u);
   assert.match(body.query, /targetProject\s*\{\s*id\s+fullPath\s*\}/u);
   assert.doesNotMatch(JSON.stringify(body.variables), /type::|priority::|status::|week::/u);
@@ -572,6 +698,7 @@ test("rejects Issue and label-mutation responses for a different IID", async () 
     typeof error === "object" && error !== null && "code" in error && error.code === "GITLAB_ERROR");
 
   const mutation = new FakeGitLab();
+  enqueueCapabilities(mutation);
   mutation.enqueue("GET", "/api/v4/projects/group%2Fproject", { body: projectBody() });
   mutation.enqueue("POST", "/api/graphql", { body: { data: {
     mergeRequestSetLabels: { errors: [], mergeRequest: {
@@ -603,6 +730,7 @@ test("rejects label mutation operation modes other than explicit ADD or REMOVE b
 
 test("rejects a label mutation response bound to another target project", async () => {
   const fake = new FakeGitLab();
+  enqueueCapabilities(fake);
   fake.enqueue("GET", "/api/v4/projects/group%2Fproject", { body: projectBody() });
   fake.enqueue("POST", "/api/graphql", { body: { data: {
     mergeRequestSetLabels: { errors: [], mergeRequest: {
@@ -735,6 +863,88 @@ test("review state uses approvals rather than treating a completed review as app
   assert.equal(fake.requests.some((request) => request.url.includes("/reviewers")), false);
 });
 
+test("GitLab CE review state accepts the four-field approvals response and binds discussions to both MR fences", async () => {
+  const sourceSha = "b".repeat(40);
+  const fake = new FakeGitLab();
+  fake.enqueue("GET", "/api/v4/projects/7", { body: projectBody() });
+  fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12", { body: reviewFenceBody(sourceSha) });
+  fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12/approvals", { body: {
+    user_has_approved: false, user_can_approve: true, approved: false, approved_by: [],
+  } });
+  fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12/discussions?per_page=100&page=1", {
+    headers: { "x-next-page": "" }, body: [{ notes: [{
+      project_id: 7, noteable_id: 120, noteable_iid: 12, noteable_type: "MergeRequest",
+      resolvable: true, resolved: false,
+    }] }],
+  });
+  fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12", { body: reviewFenceBody(sourceSha) });
+  assert.deepEqual(await client(fake).getReviewState("7", 12, sourceSha), {
+    approvedUserIds: [], unresolvedDiscussions: 1,
+  });
+  assert.equal(fake.requests.length, 5);
+  assert.equal(fake.requests.every((request) => request.method === "GET"), true);
+});
+
+test("review approvals reject every null, malformed, or mismatched identity field that is present", async () => {
+  const sourceSha = "b".repeat(40);
+  for (const field of ["id", "iid", "project_id"] as const) {
+    for (const value of [null, "120", field === "id" ? 121 : field === "iid" ? 13 : 8]) {
+      const fake = new FakeGitLab();
+      fake.enqueue("GET", "/api/v4/projects/7", { body: projectBody() });
+      fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12", { body: reviewFenceBody(sourceSha) });
+      fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12/approvals", { body: {
+        user_has_approved: false, user_can_approve: true, approved: false, approved_by: [], [field]: value,
+      } });
+      await assert.rejects(client(fake).getReviewState("7", 12, sourceSha),
+        (error: unknown) => typeof error === "object" && error !== null && "code" in error && error.code === "GITLAB_ERROR",
+        `${field}=${String(value)}`);
+      assert.equal(fake.requests.length, 3);
+    }
+  }
+});
+
+test("CE approval omission still requires the final MR fence to match the original MR identity and SHA", async () => {
+  const sourceSha = "b".repeat(40);
+  for (const drift of [{ id: 121 }, { iid: 13 }, { project_id: 8 }, { sha: "c".repeat(40) }]) {
+    const fake = new FakeGitLab();
+    fake.enqueue("GET", "/api/v4/projects/7", { body: projectBody() });
+    fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12", { body: reviewFenceBody(sourceSha) });
+    fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12/approvals", { body: {
+      user_has_approved: false, user_can_approve: true, approved: false, approved_by: [],
+    } });
+    fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12/discussions?per_page=100&page=1", {
+      headers: { "x-next-page": "" }, body: [],
+    });
+    fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12", {
+      body: reviewFenceBody(sourceSha, "mergeable", drift),
+    });
+    await assert.rejects(client(fake).getReviewState("7", 12, sourceSha),
+      (error: unknown) => typeof error === "object" && error !== null && "code" in error && error.code === "GITLAB_ERROR");
+    assert.equal(fake.requests.length, 5);
+  }
+});
+
+test("review state accepts non-resolvable system notes without a resolved field", async () => {
+  const sourceSha = "b".repeat(40);
+  const fake = new FakeGitLab();
+  fake.enqueue("GET", "/api/v4/projects/7", { body: projectBody() });
+  fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12", { body: reviewFenceBody(sourceSha) });
+  fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12/approvals", { body: {
+    user_has_approved: false, user_can_approve: true, approved: false, approved_by: [],
+  } });
+  fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12/discussions?per_page=100&page=1", {
+    headers: { "x-next-page": "" }, body: [{ notes: [{
+      project_id: 7, noteable_id: 120, noteable_iid: 12, noteable_type: "MergeRequest",
+      system: true, resolvable: false,
+    }] }],
+  });
+  fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12", { body: reviewFenceBody(sourceSha) });
+  assert.deepEqual(await client(fake).getReviewState("7", 12, sourceSha), {
+    approvedUserIds: [], unresolvedDiscussions: 0,
+  });
+  assert.equal(fake.requests.length, 5);
+});
+
 test("rejects review state whose approvals or discussions belong to another resource", async () => {
   const sourceSha = "b".repeat(40);
   for (const variant of ["approval-project", "approval-iid", "discussion-project", "discussion-mr"] as const) {
@@ -778,7 +988,9 @@ test("rejects review discussion state with unknown resolution booleans", async (
   for (const notes of [
     [{ ...identity, resolvable: "true", resolved: false }],
     [{ ...identity, resolvable: true, resolved: "false" }],
-    [{ ...identity, resolvable: false }],
+    [{ ...identity, resolvable: true }],
+    [{ ...identity, resolvable: false, resolved: null }],
+    [{ ...identity, resolvable: false, resolved: "false" }],
     [
       { ...identity, resolvable: true, resolved: false },
       { ...identity, resolvable: true, resolved: "false" },
@@ -893,6 +1105,204 @@ test("reads exact applied label IDs and the live target branch head", async () =
   assert.deepEqual((await api.getMergeRequest("group/project", 12)).labels, [
     { restId: 3, name: "status::doing", archived: false },
   ]);
+});
+
+test("hydrates string applied labels from a fresh project and ancestor inventory for MR and Issue reads", async (t) => {
+  for (const resource of ["merge request", "issue"] as const) {
+    await t.test(resource, async () => {
+      const fake = new FakeGitLab();
+      fake.enqueue("GET", "/api/v4/projects/7", { body: projectBody() });
+      const labels = ["status::doing", "type::bug", "archived::old"];
+      fake.enqueue("GET", resource === "issue"
+        ? "/api/v4/projects/7/issues/51?with_labels_details=true"
+        : "/api/v4/projects/7/merge_requests/12?with_labels_details=true", { body: resource === "issue"
+          ? { iid: 51, milestone: null, assignees: [], due_date: null, labels }
+          : mergeRequestBody({ labels }),
+      });
+      enqueueAppliedLabelInventory(fake, [restLabel(3, "status::doing"), restLabel(9, "archived::old", { archived: true })], [restLabel(21, "type::bug")]);
+
+      const api = client(fake);
+      const result = resource === "issue" ? await api.getIssue("7", 51) : await api.getMergeRequest("7", 12);
+      assert.deepEqual(result.labels, [
+        { restId: 9, name: "archived::old", archived: true },
+        { restId: 3, name: "status::doing", archived: false },
+        { restId: 21, name: "type::bug", archived: false },
+      ]);
+      assert.equal(fake.requests.filter((request) => new URL(request.url).pathname === "/api/graphql").length, 1);
+    });
+  }
+});
+
+test("MR string label receipts keep the MR request ID while auditing inventory requests", async () => {
+  const fake = new FakeGitLab();
+  fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12?with_labels_details=true", {
+    headers: { "x-request-id": "req-mr-string-labels" }, body: mergeRequestBody({ labels: ["type::bug"] }),
+  });
+  enqueueAppliedLabelInventory(fake, [], [restLabel(21, "type::bug")]);
+  const api = client(fake);
+
+  const receipt = await api.getMergeRequestReceipt({ id: "7", fullPath: "group/project" }, 12);
+  assert.equal(receipt.requestId, "req-mr-string-labels");
+  assert.deepEqual(receipt.value.labels, [{ restId: 21, name: "type::bug", archived: false }]);
+  assert.deepEqual(api.audit().requestIds, [
+    "req-inventory-graphql", "req-inventory-group-labels", "req-inventory-groups",
+    "req-inventory-project", "req-inventory-project-labels", "req-mr-string-labels",
+  ]);
+});
+
+test("paginated MR string labels share one inventory within the list and keep the last page receipt", async () => {
+  const fake = new FakeGitLab();
+  const endpoint = "/api/v4/projects/7/merge_requests?scope=all&state=opened&source_branch=fix%2F51-labels&target_branch=develop&with_labels_details=true&per_page=100&page=";
+  fake.enqueue("GET", `${endpoint}1`, {
+    headers: { "x-next-page": "2", "x-request-id": "req-list-1" }, body: [mergeRequestBody({ labels: ["type::bug"] })],
+  });
+  fake.enqueue("GET", `${endpoint}2`, {
+    headers: { "x-next-page": "", "x-request-id": "req-list-2" }, body: [mergeRequestBody({ iid: 13, labels: ["status::doing"] })],
+  });
+  enqueueAppliedLabelInventory(fake, [restLabel(3, "status::doing")], [restLabel(21, "type::bug")]);
+
+  const receipt = await client(fake).listOpenMergeRequestReceipts({ id: "7", fullPath: "group/project" }, "fix/51-labels", "develop");
+  assert.equal(receipt.requestId, "req-list-2");
+  assert.deepEqual(receipt.value.map((mr) => mr.labels), [
+    [{ restId: 21, name: "type::bug", archived: false }],
+    [{ restId: 3, name: "status::doing", archived: false }],
+  ]);
+  assert.equal(fake.requests.filter((request) => new URL(request.url).pathname === "/api/graphql").length, 1);
+});
+
+test("string applied labels reject absent or ambiguous real identities and retain the MR receipt", async (t) => {
+  for (const [name, projectLabels, groupLabels] of [
+    ["absent", [], []],
+    ["same project", [restLabel(3, "status::doing"), restLabel(4, "status::doing")], []],
+    ["project shadows group", [restLabel(3, "status::doing")], [restLabel(21, "status::doing")]],
+    ["archived duplicate", [restLabel(3, "status::doing"), restLabel(4, "status::doing", { archived: true })], []],
+  ] as const) {
+    await t.test(name, async () => {
+      const fake = new FakeGitLab();
+      fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12?with_labels_details=true", {
+        headers: { "x-request-id": "req-unresolved-labels" }, body: mergeRequestBody({ labels: ["status::doing"] }),
+      });
+      enqueueAppliedLabelInventory(fake, projectLabels, groupLabels);
+
+      await assert.rejects(client(fake).getMergeRequestReceipt({ id: "7", fullPath: "group/project" }, 12), (error: unknown) =>
+        typeof error === "object" && error !== null && "code" in error && error.code === "GITLAB_ERROR" &&
+          "requestId" in error && error.requestId === "req-unresolved-labels");
+    });
+  }
+});
+
+test("string applied label reads reject malformed labels and resource identities before inventory lookup", async (t) => {
+  for (const [name, overrides] of [
+    ["duplicate names", { labels: ["status::doing", "status::doing"] }],
+    ["mixed labels", { labels: ["status::doing", { id: 3, name: "status::doing" }] }],
+    ["empty name", { labels: [""] }],
+    ["wrong project", { labels: ["status::doing"], target_project_id: 8 }],
+    ["wrong IID", { labels: ["status::doing"], iid: 13 }],
+    ["wrong pipeline SHA", { labels: ["status::doing"], head_pipeline: { status: "success", sha: "c".repeat(40) } }],
+  ] as const) {
+    await t.test(name, async () => {
+      const fake = new FakeGitLab();
+      fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12?with_labels_details=true", {
+        headers: { "x-request-id": "req-invalid-label-resource" }, body: mergeRequestBody(overrides),
+      });
+
+      await assert.rejects(client(fake).getMergeRequestReceipt({ id: "7", fullPath: "group/project" }, 12), {
+        code: "GITLAB_ERROR", requestId: "req-invalid-label-resource",
+      });
+      assert.equal(fake.requests.length, 1);
+    });
+  }
+});
+
+test("string applied labels use a new live inventory on each MR read", async () => {
+  const fake = new FakeGitLab();
+  for (const id of [3, 30]) {
+    fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12?with_labels_details=true", { body: mergeRequestBody({ labels: ["status::doing"] }) });
+    enqueueAppliedLabelInventory(fake, [restLabel(id, "status::doing")]);
+  }
+  const api = client(fake);
+  const project = { id: "7", fullPath: "group/project" };
+
+  assert.equal((await api.getMergeRequestReceipt(project, 12)).value.labels[0]?.restId, 3);
+  assert.equal((await api.getMergeRequestReceipt(project, 12)).value.labels[0]?.restId, 30);
+  assert.equal(fake.requests.filter((request) => new URL(request.url).pathname === "/api/graphql").length, 2);
+});
+
+test("string applied label hydration retains inventory HTTP failures and rejects another project's inventory", async (t) => {
+  for (const status of [401, 503]) {
+    await t.test(`inventory HTTP ${String(status)}`, async () => {
+      const fake = new FakeGitLab();
+      fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12?with_labels_details=true", {
+        headers: { "x-request-id": "req-mr-before-inventory" }, body: mergeRequestBody({ labels: ["status::doing"] }),
+      });
+      fake.enqueue("GET", "/api/v4/projects/7", {
+        status, headers: { "x-request-id": "req-inventory-failure" }, body: { message: "inventory failed" },
+      });
+
+      await assert.rejects(client(fake).getMergeRequestReceipt({ id: "7", fullPath: "group/project" }, 12), {
+        name: "GitLabRequestError", requestId: "req-inventory-failure", status,
+      });
+    });
+  }
+  await t.test("inventory project mismatch", async () => {
+    const fake = new FakeGitLab();
+    fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12?with_labels_details=true", {
+      headers: { "x-request-id": "req-mr-before-inventory" }, body: mergeRequestBody({ labels: ["status::doing"] }),
+    });
+    fake.enqueue("GET", "/api/v4/projects/7", { body: projectBody(8, "other/project") });
+
+    await assert.rejects(client(fake).getMergeRequestReceipt({ id: "7", fullPath: "group/project" }, 12), {
+      code: "GITLAB_ERROR", requestId: "req-mr-before-inventory",
+    });
+    assert.equal(fake.requests.length, 2);
+  });
+});
+
+test("string applied label hydration rejects one REST ID resolving to two applied names", async () => {
+  const fake = new FakeGitLab();
+  fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12?with_labels_details=true", {
+    headers: { "x-request-id": "req-duplicate-applied-id" }, body: mergeRequestBody({ labels: ["status::doing", "type::bug"] }),
+  });
+  enqueueAppliedLabelInventory(fake, [restLabel(3, "status::doing")], [restLabel(3, "type::bug")]);
+
+  await assert.rejects(client(fake).getMergeRequestReceipt({ id: "7", fullPath: "group/project" }, 12), {
+    code: "GITLAB_ERROR", requestId: "req-duplicate-applied-id",
+  });
+});
+
+test("merge request source branch removal uses both nullable GitLab flags and rejects malformed values", async (t) => {
+  for (const [name, shouldRemove, forceRemove, expected] of [
+    ["legacy true", true, undefined, true],
+    ["legacy false", false, undefined, false],
+    ["nullable true force", null, true, true],
+    ["explicit false true force", false, true, true],
+    ["true false force", true, false, true],
+    ["nullable false force", null, false, false],
+    ["both nullable", null, null, false],
+    ["string should", "true", true, null],
+    ["missing should", undefined, true, null],
+    ["string force", true, "true", null],
+    ["number force", false, 0, null],
+  ] as const) {
+    await t.test(name, async () => {
+      const fake = new FakeGitLab();
+      fake.enqueue("GET", "/api/v4/projects/7", { body: projectBody() });
+      const body: Record<string, unknown> = {
+        iid: 12, web_url: "https://gitlab.example.test/group/project/-/merge_requests/12",
+        title: "Draft: [fix][app] Fix labels", description: "", draft: true, state: "opened",
+        source_project_id: 7, source_branch: "fix/51-labels", target_project_id: 7,
+        target_branch: "develop", sha: "b".repeat(40),
+        author: { id: 40, username: "author", name: "Author", state: "active" },
+        assignees: [], reviewers: [], labels: [], squash: true, head_pipeline: null,
+      };
+      if (shouldRemove !== undefined) body.should_remove_source_branch = shouldRemove;
+      if (forceRemove !== undefined) body.force_remove_source_branch = forceRemove;
+      fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12?with_labels_details=true", { body });
+      const result = client(fake).getMergeRequest("7", 12);
+      if (expected === null) await assert.rejects(result, { code: "GITLAB_ERROR" });
+      else assert.equal((await result).shouldRemoveSourceBranch, expected);
+    });
+  }
 });
 
 test("Issue and MR labels default omitted archived to false and validate explicit values", async (t) => {

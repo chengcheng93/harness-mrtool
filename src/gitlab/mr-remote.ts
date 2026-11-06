@@ -19,6 +19,7 @@ import {
 } from "../render/marker.ts";
 import {
   GitLabClient,
+  isGitLabMutationPreflightError,
   isGitLabMutationRejectedError,
   isGitLabResponseValidationError,
 } from "./client.ts";
@@ -65,6 +66,9 @@ function readReason(error: GitLabRequestError): RemoteReadFailureReason {
 
 function asMutationError(error: unknown): RemoteMutationError {
   if (isRemoteMutationError(error)) return error;
+  if (isGitLabMutationPreflightError(error)) {
+    return new RemoteMutationError("rejected", error.code === "AUTH_ERROR" ? "auth" : "validation", error.requestId);
+  }
   if (isGitLabMutationRejectedError(error)) {
     return new RemoteMutationError("rejected", "validation", error.requestId);
   }

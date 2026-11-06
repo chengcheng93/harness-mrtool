@@ -43,6 +43,7 @@ import {
   type VerificationReceiptWriter,
 } from "./verify-mr.ts";
 import { buildWritePlan, type MergeRequestWritePlan } from "./write-plan.ts";
+import { assertPristineResumeAuthorization, type PristineCreateResumeAuthorization } from "./resume-create.ts";
 
 function concurrentUpdateError(): ToolError<"CONCURRENT_UPDATE"> {
   return new ToolError("CONCURRENT_UPDATE", "The merge request changed after context discovery", {
@@ -101,6 +102,7 @@ export interface UpdateMergeRequestInputs {
   readonly verificationReceiptWriter: VerificationReceiptWriter;
   readonly forceReplaceDescription?: boolean;
   readonly migration?: UpdateMergeRequestMigration;
+  readonly resumeAuthorization?: PristineCreateResumeAuthorization;
   readonly labelDiff: CanonicalLabelChangeSet;
   readonly labelOptions?: LabelSelectionOptions;
 }
@@ -160,12 +162,24 @@ export async function updateMergeRequest(
   inputs = { ...inputs, request: normalizeAndValidateRequest({
     ...inputs.request, title: { ...inputs.request.title, type: labels.titleType },
   }) };
-  const forcedDescriptionReplacement = assertManagedDescription(
-    inputs.initial.description,
-    ownershipBundle,
-    ownershipReleaseTag,
-    inputs.forceReplaceDescription === true,
-  ).manuallyChanged;
+  let forcedDescriptionReplacement = false;
+  if (inputs.resumeAuthorization !== undefined) {
+    if (inputs.migration !== undefined || inputs.forceReplaceDescription === true) {
+      throw new ToolError("INPUT_ERROR", "Resume requires a verified provisional transaction prefix", {
+        field: "--resume", expected: "resume without migration or description replacement overrides",
+        actual: "conflicting update overrides",
+        safeNextStep: "Refresh context and resume the original provisional Draft without overrides.",
+      });
+    }
+    assertPristineResumeAuthorization(inputs.resumeAuthorization, inputs.initial, inputs);
+  } else {
+    forcedDescriptionReplacement = assertManagedDescription(
+      inputs.initial.description,
+      ownershipBundle,
+      ownershipReleaseTag,
+      inputs.forceReplaceDescription === true,
+    ).manuallyChanged;
+  }
   if (inputs.initial.snapshot.mergeRequest.lifecycle === "new" ||
       inputs.initial.snapshot.mergeRequest.iid !== inputs.initial.iid) {
     throw transactionError("POSTCONDITION_ERROR", "Update requires an existing managed MR", "new MR snapshot");
@@ -206,12 +220,16 @@ export async function updateMergeRequest(
       throw concurrentUpdateError();
     }
     assertRemoteIdentity(current, context);
-    assertManagedDescription(
-      current.description,
-      ownershipBundle,
-      ownershipReleaseTag,
-      inputs.forceReplaceDescription === true,
-    );
+    if (inputs.resumeAuthorization !== undefined) {
+      assertPristineResumeAuthorization(inputs.resumeAuthorization, current, inputs);
+    } else {
+      assertManagedDescription(
+        current.description,
+        ownershipBundle,
+        ownershipReleaseTag,
+        inputs.forceReplaceDescription === true,
+      );
+    }
   } catch (error) {
     journal.setFinalState("not-started");
     const failure = isRemoteReadError(error) ? remoteFailureToolError(error) : error;
@@ -255,19 +273,28 @@ export async function updateMergeRequest(
       completed,
       () => { recoveredUnknownOutcome = true; },
     );
-    current = await writeAndRead(
-      context,
-      current,
-      "fields-write",
-      "normal",
-      completed,
-      () => inputs.remote.writeManagedFields(
-        current.iid,
-        managedFields(plan, inputs.request.targetBranch, true),
-      ),
-      () => { recoveredUnknownOutcome = true; },
-      (value) => assertManagedFields(value, plan, inputs.request, true),
-    );
+    const resumeFieldsAlreadyWritten = inputs.resumeAuthorization !== undefined &&
+      current.title === plan.draft.title && current.targetBranch === inputs.request.targetBranch &&
+      current.assigneeUserId === plan.draft.assigneeUserId &&
+      canonicalizeJson([...current.reviewerUserIds].sort()) === canonicalizeJson([...plan.draft.reviewerUserIds].sort()) &&
+      current.squash === plan.draft.squash && current.removeSourceBranch === plan.draft.removeSourceBranch;
+    if (resumeFieldsAlreadyWritten) {
+      assertManagedFields(current, plan, inputs.request, true);
+    } else {
+      current = await writeAndRead(
+        context,
+        current,
+        "fields-write",
+        "normal",
+        completed,
+        () => inputs.remote.writeManagedFields(
+          current.iid,
+          managedFields(plan, inputs.request.targetBranch, true),
+        ),
+        () => { recoveredUnknownOutcome = true; },
+        (value) => assertManagedFields(value, plan, inputs.request, true),
+      );
+    }
 
     renderSnapshot = current.snapshot;
     finalDescription = renderDescription({

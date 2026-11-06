@@ -15,7 +15,7 @@ type ProjectTemplateProfile = "general" | "code" | "docs" | "ops";
 export type CliCommand =
   | { readonly kind: "doctor" }
   | { readonly kind: "context"; readonly mrIid: number | null; readonly migrateTemplate: boolean }
-  | { readonly kind: "create"; readonly upsert: boolean }
+  | { readonly kind: "create"; readonly upsert: boolean; readonly resumeIid?: number; readonly resumeFrom?: string }
   | {
       readonly kind: "update";
       readonly iid: number | null;
@@ -83,7 +83,7 @@ const LOCAL_COMMON_FLAGS = new Set([
 
 const SPECIFIC_FLAGS: Readonly<Partial<Record<CommandKind, Readonly<Record<string, FlagArity>>>>> = {
   manual: { "--ssh-mr": "boolean" },
-  create: { "--upsert": "boolean" },
+  create: { "--upsert": "boolean", "--resume": "value", "--resume-from": "value" },
   context: { "--mr": "value", "--migrate-template": "boolean" },
   update: {
     "--migrate-template": "boolean",
@@ -225,7 +225,19 @@ function commandFor(
       return Object.freeze({ kind });
     case "create": { // eslint-disable-line no-case-declarations
       requireNoPositionals(positionals);
-      return Object.freeze({ kind, upsert: specific.has("--upsert") });
+      const resumeRaw = specificValue(specific, "--resume");
+      const resumeFromRaw = specificValue(specific, "--resume-from");
+      if ((resumeRaw === undefined) !== (resumeFromRaw === undefined)) {
+        invalid("--resume", "--resume IID together with --resume-from ORIGINAL_REQUEST", "incomplete recovery arguments");
+      }
+      if (resumeRaw !== undefined && specific.has("--upsert")) {
+        invalid("--resume", "used separately from --upsert", "conflicting recovery arguments");
+      }
+      const resumeFrom = resumeFromRaw === undefined ? undefined : scalar(resumeFromRaw, "--resume-from");
+      if (resumeFrom === "-") invalid("--resume-from", "an original request file", "stdin cannot hold both requests");
+      return Object.freeze({ kind, upsert: specific.has("--upsert"),
+        ...(resumeRaw === undefined ? {} : { resumeIid: parsePositiveInteger(resumeRaw, "--resume"), resumeFrom: resumeFrom! }),
+      });
     }
     case "preview":
     case "profiles.list":

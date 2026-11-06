@@ -4,7 +4,7 @@ import type { LoadedTemplateBundle } from "../bundle/load.ts";
 import type { CanonicalLabelChangeSet } from "../git/change-set.ts";
 import { isToolError, ToolError } from "../contracts/errors.ts";
 import type { Request } from "../contracts/request.ts";
-import type { Candidate } from "../context/types.ts";
+import type { Candidate, ContextBinding, ResolvedContext } from "../context/types.ts";
 import { renderDescription } from "../render/markdown.ts";
 import {
   validateExternalContextSnapshot,
@@ -24,6 +24,7 @@ import {
 } from "./compensate.ts";
 import { buildWritePlan, type MergeRequestWritePlan } from "./write-plan.ts";
 import { updateMergeRequest } from "./update-mr.ts";
+import { validatePristineCreateResume } from "./resume-create.ts";
 import {
   assertReadyGate,
   assertTransactionStructure,
@@ -114,6 +115,12 @@ export interface CreateMergeRequestInputs {
   readonly gitlabOrigin: string;
   readonly verificationReceiptWriter: VerificationReceiptWriter;
   readonly upsert?: boolean;
+  readonly resume?: {
+    readonly iid: number;
+    readonly originalRequest: Request;
+    readonly originalContext: ResolvedContext;
+    readonly binding: ContextBinding;
+  };
   readonly labelDiff: CanonicalLabelChangeSet;
   readonly labelOptions?: LabelSelectionOptions;
 }
@@ -189,7 +196,26 @@ export async function createMergeRequest(
   };
   try {
     const existing = await inputs.remote.findOpen(createInput);
-    if (existing.value.length === 1 && inputs.upsert === true) {
+    if (inputs.resume !== undefined && (existing.value.length !== 1 ||
+        existing.value[0]?.iid !== inputs.resume.iid || inputs.upsert === true)) {
+      throw new ToolError("INPUT_ERROR", "Resume requires the exact selected provisional Draft", {
+        field: "--resume", expected: "one matching open Draft with the explicitly selected IID",
+        actual: "the resume selection is absent, ambiguous, mismatched, or combined with --upsert",
+        safeNextStep: "Preserve the original Draft and refresh its local context before retrying resume.",
+      });
+    }
+    if (existing.value.length === 1 && (inputs.upsert === true || inputs.resume !== undefined)) {
+      const resumeAuthorization = inputs.resume === undefined ? undefined : validatePristineCreateResume({
+        ...inputs.resume,
+        request: inputs.request,
+        initialSnapshot,
+        resolvedCandidates: inputs.resolvedCandidates,
+        current: existing.value[0]!,
+        bundle: inputs.bundle,
+        releaseTag: inputs.releaseTag,
+        labelDiff: inputs.labelDiff,
+        ...(inputs.labelOptions === undefined ? {} : { labelOptions: inputs.labelOptions }),
+      });
       return updateMergeRequest({
         labelDiff: inputs.labelDiff,
         ...(inputs.labelOptions === undefined ? {} : { labelOptions: inputs.labelOptions }),
@@ -203,6 +229,7 @@ export async function createMergeRequest(
         remote: inputs.remote,
         gitlabOrigin: inputs.gitlabOrigin,
         verificationReceiptWriter: inputs.verificationReceiptWriter,
+        ...(resumeAuthorization === undefined ? {} : { resumeAuthorization }),
       });
     }
     if (existing.value.length > 0) {
