@@ -182,7 +182,7 @@ function receiptOrigin(value: unknown): string {
   } catch {
     throw verificationError("verification receipt GitLab origin is invalid");
   }
-  if (parsed.protocol !== "https:" || parsed.username !== "" || parsed.password !== "" ||
+  if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || parsed.username !== "" || parsed.password !== "" ||
       parsed.search !== "" || parsed.hash !== "" || parsed.pathname !== "/" ||
       parsed.origin !== origin) {
     throw verificationError("verification receipt GitLab origin is invalid");
@@ -198,7 +198,7 @@ function receiptWebUrl(value: unknown, origin: string): string {
   } catch {
     throw verificationError("verification receipt MR URL is invalid");
   }
-  if (parsed.protocol !== "https:" || parsed.origin !== origin || parsed.username !== "" ||
+  if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || parsed.origin !== origin || parsed.username !== "" ||
       parsed.password !== "" || parsed.search !== "" || parsed.hash !== "" ||
       parsed.pathname === "/") {
     throw verificationError("verification receipt MR URL is invalid");

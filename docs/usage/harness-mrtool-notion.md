@@ -302,6 +302,8 @@ harness-mrtool context --auth api --output json
 unstaged、untracked 文件（包括 `.superpowers` 报告）可以保留，不要求工作区干净。
 工具不自动 add、stash、clean 或删除本地文件；输入文件可放在私有目录。
 Git push 与 API MR 创建使用各自的认证，原有 SSH remote 不影响 API 流程。
+GitLab API 支持 HTTP 和 HTTPS；显式 HTTP/HTTPS remote 保留原协议，
+SSH/scp/git remote 推断时优先 HTTP，HTTP 不可用时兼容尝试同主机 HTTPS。
 凭据或 API 错误时停止，不自动生成 handoff。
 
 ### 7.4 文件或 stdin 模式

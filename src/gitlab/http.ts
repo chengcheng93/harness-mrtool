@@ -41,6 +41,7 @@ export interface GitLabHttpClientOptions {
   readonly transport?: GitLabHttpTransport;
   readonly timeoutMs?: number;
   readonly maxResponseBytes?: number;
+  /** @deprecated HTTP and HTTPS origins are supported without a loopback exception. */
   readonly allowInsecureLoopback?: boolean;
 }
 
@@ -114,15 +115,14 @@ function gitLabError(
   });
 }
 
-export function normalizeGitLabOrigin(value: string, allowInsecureLoopback = false): string {
+export function normalizeGitLabOrigin(value: string, _allowInsecureLoopback = false): string {
   let parsed: URL;
   try {
     parsed = new URL(value);
   } catch {
     throw gitLabError("GITLAB_ERROR", "GitLab origin is invalid", "invalid origin");
   }
-  const loopback = parsed.hostname === "127.0.0.1" || parsed.hostname === "[::1]" || parsed.hostname === "localhost";
-  if ((parsed.protocol !== "https:" && !(allowInsecureLoopback && loopback && parsed.protocol === "http:")) ||
+  if ((parsed.protocol !== "https:" && parsed.protocol !== "http:") ||
       parsed.username !== "" || parsed.password !== "" || parsed.search !== "" || parsed.hash !== "" ||
       (parsed.pathname !== "" && parsed.pathname !== "/")) {
     throw gitLabError("GITLAB_ERROR", "GitLab origin is not trusted", "unsupported origin shape");

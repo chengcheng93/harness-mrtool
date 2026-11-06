@@ -34,6 +34,8 @@ codex plugin add harness-mrtool@harness-mrtool
 在业务仓库内检查工作区、分支和 remote，提交本次改动并发布源分支。
 API MR 命令不自动 push，远端源 SHA 必须与本地提交一致。原有 SSH Git remote
 可以继续使用，不需要为 API 创建 MR 改成 HTTPS。
+GitLab API 支持 HTTP/HTTPS；显式 HTTP/HTTPS remote 保留协议，SSH/scp/git
+remote 推断时优先 HTTP，HTTP 不可用时兼容尝试同主机 HTTPS。
 MR diff 和推送只使用已提交的 `HEAD`；staged、unstaged、untracked 文件及
 `.superpowers` 报告可以保留，不要求工作区干净，也不会自动 add、stash、clean 或删除。
 

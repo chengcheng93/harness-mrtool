@@ -121,13 +121,15 @@ export const systemWindowsAclVerifier: WindowsAclVerifier = {
       "if ($unsafe) { exit 22 }",
       "if (-not $acl.AreAccessRulesProtected) { exit 23 }",
     ].join("; ");
+    // Native Windows PowerShell must resolve its own modules instead of inheriting PowerShell 7 modules.
+    const environment = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toUpperCase() !== "PSMODULEPATH"));
     try {
       await execFileAsync(
         resolveWindowsPowerShellPath(),
         ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
         { windowsHide: true, timeout: 5_000, encoding: "utf8",
           // PowerShell otherwise treats .exe files as documents when PATHEXT is absent.
-          env: { ...process.env, PATHEXT: ".EXE" } },
+          env: { ...environment, PATHEXT: ".EXE" } },
       );
     } catch (error) {
       const code = typeof error === "object" && error !== null && "code" in error

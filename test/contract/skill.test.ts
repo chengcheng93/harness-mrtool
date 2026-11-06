@@ -96,7 +96,7 @@ function assertApiDefaultInstructions(instructions: string): void {
     assert.ok(index > previousIndex, `${step} must follow the preceding workflow step`);
     previousIndex = index;
   }
-  assert.match(normalized, /API credentials are missing or the host's HTTP API is incompatible, stop and explain/u);
+  assert.match(normalized, /API credentials are missing or API requests fail, stop and explain/u);
   assert.match(normalized, /Never automatically fall back to manual/u);
   assert.match(normalized, /Manual mode is disabled by default/u);
   assert.match(normalized, /only when the human explicitly requests/u);

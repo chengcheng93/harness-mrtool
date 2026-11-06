@@ -256,7 +256,7 @@ export function validateTransactionFailureReceipt(value: unknown): TransactionFa
       typeof input.iidUnavailable !== "boolean" || input.iidUnavailable !== (input.iid === null) ||
       typeof input.webUrlUnavailable !== "boolean" ||
       (input.webUrl !== null && (typeof input.webUrl !== "string" ||
-        input.webUrl === "" || !/^https:\/\/[^\s]+$/u.test(input.webUrl))) ||
+        input.webUrl === "" || !/^https?:\/\/[^\s]+$/u.test(input.webUrl))) ||
       input.webUrlUnavailable !== (input.webUrl === null) || !Array.isArray(input.completedSteps) ||
       input.completedSteps.some((step) => typeof step !== "string" || !SAFE_AUDIT_TEXT.test(step)) ||
       new Set(input.completedSteps).size !== input.completedSteps.length ||

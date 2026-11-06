@@ -204,7 +204,7 @@ class FakeMergeRequestRemote implements MergeRequestRemote {
   }
 
   readonly initialSnapshot: ExternalContextSnapshot;
-  constructor(snapshot: ExternalContextSnapshot) {
+  constructor(snapshot: ExternalContextSnapshot, readonly gitlabOrigin = "https://gitlab.example.test") {
     this.initialSnapshot = snapshot;
     this.baseSnapshot = snapshot;
   }
@@ -299,7 +299,7 @@ class FakeMergeRequestRemote implements MergeRequestRemote {
     assert.equal(input.sourceBranch, "fix/webengine-css");
     const provisional: RemoteMergeRequest = {
       iid: 88,
-      webUrl: "https://gitlab.example.test/luban/luban-studio/-/merge_requests/88",
+      webUrl: `${this.gitlabOrigin}/luban/luban-studio/-/merge_requests/88`,
       title: input.title,
       description: input.description,
       draft: true,
@@ -466,7 +466,7 @@ function transactionRuntime(remote: FakeMergeRequestRemote) {
   return {
     labelDiff: bugLabelDiff(remote.initialSnapshot),
     remote,
-    gitlabOrigin: "https://gitlab.example.test",
+    gitlabOrigin: remote.gitlabOrigin,
     verificationReceiptWriter: {
       stageAuthenticated: async (receipt: VerificationReceiptV1) => {
         remote.stagedVerificationReceipts.push(structuredClone(receipt));
@@ -558,7 +558,7 @@ test("create upserts the one existing open managed merge request only when expli
   assert.equal(fixture.remote.writes.includes("create-draft"), false);
 });
 
-async function transactionFixture(): Promise<{
+async function transactionFixture(gitlabOrigin = "https://gitlab.example.test"): Promise<{
   readonly request: ReturnType<typeof normalizeAndValidateRequest>;
   readonly snapshot: ExternalContextSnapshot;
   readonly candidates: readonly Candidate[];
@@ -608,7 +608,7 @@ async function transactionFixture(): Promise<{
     snapshot,
     candidates,
     bundle,
-    remote: new FakeMergeRequestRemote(snapshot),
+    remote: new FakeMergeRequestRemote(snapshot, gitlabOrigin),
   };
 }
 
@@ -1161,6 +1161,99 @@ test("standalone verification reloads a trusted durable receipt and exact histor
 
   assert.equal(verified.valid, true);
   assert.deepEqual(loadedBundleRef, receipt.bundle);
+});
+
+test("HTTP transactions stage a receipt and standalone verification preserves its exact origin identity", async () => {
+  const fixture = await transactionFixture("http://gitlab.example.test:8080");
+  const created = await createMergeRequest({
+    request: fixture.request,
+    initialSnapshot: fixture.snapshot,
+    resolvedCandidates: fixture.candidates,
+    bundle: fixture.bundle,
+    releaseTag: "templates-v1.0.0",
+    cliVersion: "0.1.0-dev",
+    sourceBranch: "fix/webengine-css",
+    ...transactionRuntime(fixture.remote),
+  });
+  assert.equal(fixture.remote.stagedVerificationReceipts.length, 1);
+  const receipt = fixture.remote.stagedVerificationReceipts[0];
+  assert.ok(receipt);
+  assert.equal(receipt.gitlabOrigin, "http://gitlab.example.test:8080");
+  assert.equal(receipt.webUrl, "http://gitlab.example.test:8080/luban/luban-studio/-/merge_requests/88");
+  const verificationError = (error: unknown) => typeof error === "object" && error !== null &&
+    "code" in error && error.code === "POSTCONDITION_ERROR";
+  const verificationInputs = {
+    level: "structure" as const,
+    current: created.final,
+    gitlabOrigin: "http://gitlab.example.test:8080",
+    receiptLoader: {
+      loadVerified: async () => ({ trusted: true as const, receipt: structuredClone(receipt) }),
+    },
+    bundleLoader: {
+      loadVerifiedExact: async () => ({ trusted: true as const, bundle: fixture.bundle }),
+    },
+  };
+
+  const verified = await verifyStoredMergeRequest(verificationInputs);
+
+  assert.equal(verified.valid, true);
+  assert.equal(verified.webUrl, "http://gitlab.example.test:8080/luban/luban-studio/-/merge_requests/88");
+  for (const gitlabOrigin of ["https://gitlab.example.test:8080", "http://gitlab.example.test:8081"]) {
+    await assert.rejects(
+      verifyStoredMergeRequest({ ...verificationInputs, gitlabOrigin }),
+      verificationError,
+      gitlabOrigin,
+    );
+  }
+  for (const gitlabOrigin of [
+    "ftp://gitlab.example.test:8080",
+    "http://user:password@gitlab.example.test:8080",
+    "http://gitlab.example.test:8080/group/project",
+    "http://gitlab.example.test:8080?query=value",
+    "http://gitlab.example.test:8080#fragment",
+    "http://gitlab.example.test:8080/",
+  ]) {
+    assert.throws(() => validateVerificationReceipt({ ...receipt, gitlabOrigin }), verificationError, gitlabOrigin);
+  }
+  for (const webUrl of [
+    "ftp://gitlab.example.test:8080/luban/luban-studio/-/merge_requests/88",
+    "https://gitlab.example.test:8080/luban/luban-studio/-/merge_requests/88",
+    "http://gitlab.example.test:8081/luban/luban-studio/-/merge_requests/88",
+    "http://other-gitlab.example.test:8080/luban/luban-studio/-/merge_requests/88",
+    "http://user:password@gitlab.example.test:8080/luban/luban-studio/-/merge_requests/88",
+    "http://gitlab.example.test:8080/luban/luban-studio/-/merge_requests/88?query=value",
+    "http://gitlab.example.test:8080/luban/luban-studio/-/merge_requests/88#fragment",
+    "http://gitlab.example.test:8080/",
+  ]) {
+    assert.throws(() => validateVerificationReceipt({ ...receipt, webUrl }), verificationError, webUrl);
+  }
+});
+
+test("HTTP transaction failures retain their MR URL and recovery receipt", async () => {
+  const fixture = await transactionFixture("http://gitlab.example.test:8080");
+  fixture.remote.failReadAfterWrite = "write-fields";
+  let caught: unknown;
+  try {
+    await createMergeRequest({
+      request: fixture.request,
+      initialSnapshot: fixture.snapshot,
+      resolvedCandidates: fixture.candidates,
+      bundle: fixture.bundle,
+      releaseTag: "templates-v1.0.0",
+      cliVersion: "0.1.0-dev",
+      sourceBranch: "fix/webengine-css",
+      ...transactionRuntime(fixture.remote),
+    });
+  } catch (error) {
+    caught = error;
+  }
+
+  assert.equal(typeof caught === "object" && caught !== null && "code" in caught ? caught.code : null, "PARTIAL_REMOTE_STATE");
+  const receipt = getTransactionFailureReceipt(caught);
+  assert.equal(receipt?.webUrl, "http://gitlab.example.test:8080/luban/luban-studio/-/merge_requests/88");
+  assert.equal(receipt?.failedOperation, "fields-write");
+  assert.equal(receipt?.retryCommand, "harness-mrtool update 88 --input - --non-interactive --output json");
+  assert.equal(getTransactionAudit(caught)?.finalState, "unknown");
 });
 
 test("standalone verification fails closed for a missing or untrusted durable receipt", async () => {

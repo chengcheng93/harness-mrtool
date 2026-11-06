@@ -31,6 +31,10 @@ execution for every auth selection, including when `--push` is supplied.
 Ordinary manual handoff or branch push is not a verified MR. Git may still use
 SSH to publish the source branch before the default API flow.
 
+GitLab supports HTTP and HTTPS. Explicit HTTP/HTTPS remotes preserve their
+scheme. SSH/scp/git remotes infer HTTP first, with same-host HTTPS compatibility
+fallback when HTTP is unavailable during project discovery.
+
 `--offline` uses only verified local state. `--no-update` skips network update
 work but does not bypass command or trust validation. Tokens and update URLs
 are never accepted as command-line options.

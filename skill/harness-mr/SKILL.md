@@ -39,10 +39,13 @@ harness-mrtool context --auth api --client codex-skill --client-version <skill-s
 
 Build the Request only after API context succeeds, using CLI-issued context and
 candidate identities together with repository evidence. If API credentials are
-missing or the host's HTTP API is incompatible, stop and explain the API blocker
+missing or API requests fail, stop and explain the API blocker
 and required next step. Never automatically fall back to manual mode, SSH MR
 creation, or a web handoff. API mode may still use ordinary Git SSH transport for
 branch pushes; API authentication controls GitLab MR operations.
+
+GitLab supports HTTP and HTTPS. Explicit HTTP/HTTPS remotes preserve their scheme;
+SSH/scp/git remotes infer HTTP first and try same-host HTTPS when HTTP is unavailable.
 
 ## API workflow and mandatory labels
 

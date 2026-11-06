@@ -1536,6 +1536,7 @@ CLI 尚未安装时，Skill 可调用其 bundled bootstrap script 安装公开 R
 - 自动化使用环境变量或受控 secret provider；
 - Token、Authorization header 和完整认证响应不得进入日志；
 - GitLab Host 必须来自当前 remote 或受信配置；
+- GitLab API 和 MR URL 支持普通主机上的 HTTP/HTTPS；显式 HTTP/HTTPS remote 保留原协议，SSH/scp/git remote 推断时优先 HTTP，不可用时兼容尝试同主机 HTTPS；
 - GitHub 更新 URL 只允许构建时固定的 owner/repo、Pages origin 和精确 Release tag；
 - manifest 签名公钥内置于 CLI；
 - 签名密钥轮换必须有旧密钥授权的新 key metadata；

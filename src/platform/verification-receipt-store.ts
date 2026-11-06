@@ -156,7 +156,7 @@ function normalizeLocator(value: unknown): VerificationReceiptLocator {
   } catch {
     throw unmanaged();
   }
-  if (origin.protocol !== "https:" || origin.username !== "" || origin.password !== "" ||
+  if ((origin.protocol !== "http:" && origin.protocol !== "https:") || origin.username !== "" || origin.password !== "" ||
       origin.search !== "" || origin.hash !== "" || origin.pathname !== "/" ||
       origin.origin !== input.gitlabOrigin || CREDENTIAL_SHAPE.test(canonicalizeJson(input))) {
     throw unmanaged();

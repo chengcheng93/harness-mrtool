@@ -343,10 +343,8 @@ function canonicalOrigin(value: unknown): string {
   if (typeof value !== "string") throw compositionError("GitLab origin is invalid");
   try {
     const parsed = new URL(value);
-    const loopbackHttp = parsed.protocol === "http:" &&
-      ["127.0.0.1", "localhost", "[::1]"].includes(parsed.hostname.toLowerCase());
     if (
-      (parsed.protocol !== "https:" && !loopbackHttp) ||
+      (parsed.protocol !== "https:" && parsed.protocol !== "http:") ||
       value !== parsed.origin ||
       parsed.username !== "" ||
       parsed.password !== ""
@@ -586,10 +584,8 @@ function snapshotMergeRequestPlan(
   if (plan.webUrl !== null) {
     try {
       const url = new URL(plan.webUrl as string);
-      const loopbackHttp = url.protocol === "http:" &&
-        ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname.toLowerCase());
       if (
-        (url.protocol !== "https:" && !loopbackHttp) ||
+        (url.protocol !== "https:" && url.protocol !== "http:") ||
         url.origin !== gitlabOrigin ||
         url.username !== "" ||
         url.password !== "" ||

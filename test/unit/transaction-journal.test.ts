@@ -654,10 +654,17 @@ test("partial failure receipts use an exact token-free identity and retry contra
     retryCommand: "harness-mrtool update 88 --input - --non-interactive --output json",
   };
   assert.doesNotThrow(() => validateTransactionFailureReceipt(valid));
+  const httpReceipt = validateTransactionFailureReceipt({
+    ...valid,
+    webUrl: "http://gitlab.example.test:8080/project/-/merge_requests/88",
+  });
+  assert.equal(httpReceipt.webUrl, "http://gitlab.example.test:8080/project/-/merge_requests/88");
   for (const malformed of [
     { ...valid, extra: true },
     { ...valid, iidUnavailable: true },
     { ...valid, webUrl: null },
+    { ...valid, webUrl: "ftp://gitlab.example.test/project/-/merge_requests/88" },
+    { ...valid, webUrl: "http://gitlab.example.test/project/-/merge_requests/88\n" },
     { ...valid, retryCommand: "harness-mrtool update 89 --input - --non-interactive --output json" },
     { ...valid, failedField: `mergeRequest.${"hmrc1_"}${"a".repeat(43)}` },
     { ...valid, completedSteps: ["create-draft", "create-draft"] },

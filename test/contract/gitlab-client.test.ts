@@ -289,6 +289,111 @@ test("reads every project and ancestor-group label page and applies project prec
   );
 });
 
+test("project label responses may repeat inherited labels without changing group identity or project precedence", async () => {
+  const fake = new FakeGitLab();
+  fake.enqueue("GET", "/api/v4/projects/258", { body: projectBody(258, "projectGroup/cloud-api") });
+  fake.enqueue("GET", "/api/v4/projects/258/groups?with_shared=false&per_page=100&page=1", {
+    headers: { "x-next-page": "" }, body: [{ id: 324, full_path: "projectGroup" }],
+  });
+  const inheritedPriority = {
+    id: 1481, name: "priority::p0", is_project_label: false,
+    description: null, description_html: "", text_color: "#FFFFFF", color: "#123456",
+    subscribed: false, priority: null,
+  };
+  const inheritedType = { ...inheritedPriority, id: 1482, name: "type::bug" };
+  fake.enqueue("GET", "/api/v4/projects/258/labels?include_ancestor_groups=false&per_page=100&page=1", {
+    headers: { "x-next-page": "" },
+    body: [
+      { ...inheritedPriority, id: 1058, name: "cloud-api", is_project_label: true },
+      { ...inheritedPriority, id: 1059, name: "type::bug", is_project_label: true },
+      inheritedPriority,
+      inheritedType,
+    ],
+  });
+  fake.enqueue("GET", "/api/v4/groups/324/labels?include_ancestor_groups=false&include_descendant_groups=false&only_group_labels=true&per_page=100&page=1", {
+    headers: { "x-next-page": "" }, body: [inheritedPriority, inheritedType],
+  });
+  fake.enqueue("POST", "/api/graphql", {
+    body: labelGraphql([
+      { id: "gid://gitlab/ProjectLabel/1058", title: "cloud-api" },
+      { id: "gid://gitlab/ProjectLabel/1059", title: "type::bug" },
+      { id: "gid://gitlab/GroupLabel/1481", title: "priority::p0" },
+      { id: "gid://gitlab/GroupLabel/1482", title: "type::bug" },
+    ], false, null, { id: "gid://gitlab/Project/258", fullPath: "projectGroup/cloud-api" }),
+  });
+
+  const inventory = await client(fake).labelInventory("258");
+  assert.deepEqual(inventory.all.map((label) => [label.restId, label.scopeKind, label.scopeId, label.globalId]), [
+    [1058, "project", "258", "gid://gitlab/ProjectLabel/1058"],
+    [1481, "group", "324", "gid://gitlab/GroupLabel/1481"],
+    [1482, "group", "324", "gid://gitlab/GroupLabel/1482"],
+    [1059, "project", "258", "gid://gitlab/ProjectLabel/1059"],
+  ]);
+  assert.deepEqual(inventory.effective.map((label) => [label.name, label.globalId]), [
+    ["cloud-api", "gid://gitlab/ProjectLabel/1058"],
+    ["priority::p0", "gid://gitlab/GroupLabel/1481"],
+    ["type::bug", "gid://gitlab/ProjectLabel/1059"],
+  ]);
+});
+
+test("project label responses reject malformed is_project_label values", async (t) => {
+  for (const isProjectLabel of [null, "false", 0]) {
+    await t.test(JSON.stringify(isProjectLabel), async () => {
+      const fake = new FakeGitLab();
+      fake.enqueue("GET", "/api/v4/projects/7", { body: projectBody() });
+      fake.enqueue("GET", "/api/v4/projects/7/groups?with_shared=false&per_page=100&page=1", {
+        headers: { "x-next-page": "" }, body: [],
+      });
+      fake.enqueue("GET", "/api/v4/projects/7/labels?include_ancestor_groups=false&per_page=100&page=1", {
+        headers: { "x-next-page": "" }, body: [{ ...restLabel(1, "type::bug"), is_project_label: isProjectLabel }],
+      });
+      fake.enqueue("POST", "/api/graphql", {
+        body: labelGraphql([{ id: "gid://gitlab/ProjectLabel/1", title: "type::bug" }], false, null),
+      });
+
+      await assert.rejects(client(fake).labelInventory("7"), {
+        code: "GITLAB_ERROR", message: "GitLab label.is_project_label validation failed",
+      });
+    });
+  }
+});
+
+test("label inventory defaults omitted archived to false and validates explicit values", async (t) => {
+  for (const [name, archived, expected] of [
+    ["omitted", undefined, false],
+    ["false", false, false],
+    ["true", true, true],
+    ["null", null, null],
+    ["string", "false", null],
+  ] as const) {
+    await t.test(name, async () => {
+      const fake = new FakeGitLab();
+      fake.enqueue("GET", "/api/v4/projects/7", { body: projectBody() });
+      fake.enqueue("GET", "/api/v4/projects/7/groups?with_shared=false&per_page=100&page=1", {
+        headers: { "x-next-page": "" }, body: [],
+      });
+      const label = restLabel(1, "type::bug");
+      if (archived === undefined) delete label.archived;
+      else label.archived = archived;
+      fake.enqueue("GET", "/api/v4/projects/7/labels?include_ancestor_groups=false&per_page=100&page=1", {
+        headers: { "x-next-page": "" }, body: [label],
+      });
+      fake.enqueue("POST", "/api/graphql", {
+        body: labelGraphql([{ id: "gid://gitlab/ProjectLabel/1", title: "type::bug" }], false, null),
+      });
+
+      const result = client(fake).labelInventory("7");
+      if (expected === null) {
+        await assert.rejects(result, { code: "GITLAB_ERROR", message: "GitLab label.archived validation failed" });
+      } else {
+        const inventory = await result;
+        assert.equal(inventory.all[0]?.archived, expected);
+        assert.deepEqual(inventory.effective.map((entry) => entry.name), expected ? [] : ["type::bug"]);
+      }
+    });
+  }
+});
+
 test("rejects labels when a GraphQL full path resolves to another project", async () => {
   const fake = new FakeGitLab();
   fake.enqueue("GET", "/api/v4/projects/7", { body: {
@@ -788,6 +893,50 @@ test("reads exact applied label IDs and the live target branch head", async () =
   assert.deepEqual((await api.getMergeRequest("group/project", 12)).labels, [
     { restId: 3, name: "status::doing", archived: false },
   ]);
+});
+
+test("Issue and MR labels default omitted archived to false and validate explicit values", async (t) => {
+  for (const resource of ["issue", "merge request"] as const) {
+    for (const [name, archived, expected] of [
+      ["omitted", undefined, false],
+      ["false", false, false],
+      ["true", true, true],
+      ["null", null, null],
+      ["string", "false", null],
+    ] as const) {
+      await t.test(`${resource}: ${name}`, async () => {
+        const fake = new FakeGitLab();
+        fake.enqueue("GET", "/api/v4/projects/7", { body: projectBody() });
+        const label: Record<string, unknown> = { id: 3, name: "status::doing" };
+        if (archived !== undefined) label.archived = archived;
+        if (resource === "issue") {
+          fake.enqueue("GET", "/api/v4/projects/7/issues/51?with_labels_details=true", { body: {
+            iid: 51, milestone: null, assignees: [], due_date: null, labels: [label],
+          } });
+        } else {
+          fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12?with_labels_details=true", { body: {
+            iid: 12, web_url: "https://gitlab.example.test/group/project/-/merge_requests/12",
+            title: "Draft: [fix][app] Fix labels", description: "", draft: true, state: "opened",
+            source_project_id: 7, source_branch: "fix/51-labels", target_project_id: 7,
+            target_branch: "develop", sha: "b".repeat(40),
+            author: { id: 40, username: "author", name: "Author", state: "active" },
+            assignees: [], reviewers: [], labels: [label],
+            squash: true, should_remove_source_branch: true, head_pipeline: null,
+          } });
+        }
+
+        const api = client(fake);
+        const result = resource === "issue" ? api.getIssue("7", 51) : api.getMergeRequest("7", 12);
+        if (expected === null) {
+          await assert.rejects(result, {
+            code: "GITLAB_ERROR", message: `GitLab ${resource} label.archived validation failed`,
+          });
+        } else {
+          assert.deepEqual((await result).labels, [{ restId: 3, name: "status::doing", archived: expected }]);
+        }
+      });
+    }
+  }
 });
 
 test("rejects a head pipeline whose SHA does not equal the MR source SHA", async () => {

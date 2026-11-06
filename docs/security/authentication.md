@@ -7,6 +7,10 @@ Missing credentials or API failures stop the flow; they do not automatically
 switch it to manual handoff.
 
 GitLab API authentication is host-scoped and resolved by the credential adapter.
+GitLab API origins and MR URLs support HTTP and HTTPS on ordinary hosts.
+Explicit HTTP/HTTPS remotes preserve their scheme. SSH/scp/git remotes infer
+HTTP first and try same-host HTTPS when HTTP is unavailable during project
+discovery. The selected origin remains bound to context and MR readback.
 The default provider accepts `HARNESS_MRTOOL_GITLAB_HOST` and
 `HARNESS_MRTOOL_GITLAB_TOKEN` from the local process environment and binds the
 token to the selected host. Never place token literals in argv, repository files,

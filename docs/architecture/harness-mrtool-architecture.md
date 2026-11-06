@@ -33,6 +33,7 @@ V1 的优先级依次为：
 | 外部依赖 | 仅纯 JavaScript、可静态 bundle 的依赖；V1 禁止 native addon |
 | 输入 | 交互、YAML/JSON 文件、YAML/JSON stdin；Codex 使用 JSON stdin |
 | GitLab 访问 | 生产 adapter 直接调用 REST/GraphQL；不依赖额外 CLI |
+| GitLab API 协议 | 支持 HTTP/HTTPS；显式 remote 保留协议；SSH/scp/git remote 推断时 HTTP 优先，不可用时兼容尝试同主机 HTTPS |
 | 模板事实源 | 公开 GitHub 仓库中的版本化 Template Bundle |
 | 自动更新 | 每次业务调用短预算检查，可信 last-known-good 离线继续 |
 | 默认认证 | CLI/Skill 默认 `api`；`auto` 只兼容选择 API，无 SSH fallback；手工交接仅在人类明确要求后显式 `manual --auth ssh` |

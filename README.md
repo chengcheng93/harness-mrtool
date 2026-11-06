@@ -94,11 +94,13 @@ hmr doctor --auth api --output json
 
 `git push` 是实际远端写入；确认目标后再执行。后续每次代码或远端引用变化，都重新获取 context。
 Git remote 可以继续使用 SSH 推送分支；Git 传输方式与创建 MR 的 API 认证方式相互独立。
+GitLab API 支持 HTTP 和 HTTPS。显式 `http://` / `https://` remote 保留原协议；
+SSH/scp/git remote 推断 API 地址时优先 HTTP，HTTP 不可用时兼容尝试同主机 HTTPS。
 
 ### API Token（自动 MR 功能必须配置）
 
 默认凭据适配器读取以下 **host-scoped 环境变量**。Host 与 Git remote 对应，只填写主机，
-不要带 `https://` 或项目路径。Token 需具备所需 GitLab API 读写权限及目标项目访问权。
+不要带 `http://`、`https://` 或项目路径。Token 需具备所需 GitLab API 读写权限及目标项目访问权。
 **不得把 Token 写进命令参数、remote URL、Request JSON、仓库或聊天。**
 
 Bash 使用隐藏输入，避免在历史中保存 Token 字面量：

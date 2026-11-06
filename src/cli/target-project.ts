@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { ToolError } from "../contracts/errors.ts";
 import { copyJsonValue, type JsonValue } from "../contracts/jcs.ts";
 import { GitLabClient } from "../gitlab/client.ts";
-import type { GitLabHttpTransport } from "../gitlab/http.ts";
+import { isGitLabRequestError, type GitLabHttpTransport } from "../gitlab/http.ts";
 import type { GitLabProject } from "../gitlab/types.ts";
 import {
   readGitText,
@@ -54,6 +54,7 @@ export interface GitLabTargetProjectResolverOptions {
 interface NormalizedGitLabRemote {
   readonly identity: GitLabProjectIdentity;
   readonly origin: string;
+  readonly inferredApiScheme: boolean;
 }
 
 function repositoryError(
@@ -121,7 +122,7 @@ function normalizedProjectPath(value: string): string | null {
     : path;
 }
 
-function normalizedRemote(hostValue: string, pathValue: string, origin: string): NormalizedGitLabRemote {
+function normalizedRemote(hostValue: string, pathValue: string, origin: string, inferredApiScheme = false): NormalizedGitLabRemote {
   const host = hostValue.toLowerCase();
   const path = normalizedProjectPath(pathValue);
   if (host === "" || path === null) {
@@ -134,6 +135,7 @@ function normalizedRemote(hostValue: string, pathValue: string, origin: string):
   return Object.freeze({
     identity: Object.freeze({ host, path }),
     origin,
+    inferredApiScheme,
   });
 }
 
@@ -157,7 +159,7 @@ function normalizeGitLabRemote(value: string): NormalizedGitLabRemote {
     const host = scpLike[1];
     const path = scpLike[2];
     if (host !== undefined && path !== undefined) {
-      return normalizedRemote(host, path, `https://${host.toLowerCase()}`);
+      return normalizedRemote(host, path, `http://${host.toLowerCase()}`, true);
     }
   }
   try {
@@ -172,10 +174,11 @@ function normalizeGitLabRemote(value: string): NormalizedGitLabRemote {
     ) {
       throw new TypeError("unsupported Git remote URL");
     }
-    const origin = url.protocol === "http:" || url.protocol === "https:"
+    const inferredApiScheme = url.protocol !== "http:" && url.protocol !== "https:";
+    const origin = !inferredApiScheme
       ? url.origin
-      : `https://${url.host.toLowerCase()}`;
-    return normalizedRemote(url.host, url.pathname, origin);
+      : `http://${url.host.toLowerCase()}`;
+    return normalizedRemote(url.host, url.pathname, origin, inferredApiScheme);
   } catch (error) {
     if (error instanceof ToolError) throw error;
     throw repositoryError(
@@ -287,19 +290,38 @@ export function createGitLabTargetSessionResolver(
       const target = await inspectTargetRemote(cwd, options);
       const usedCredentials = new Set<string>();
       const assertNoCredentialExposure = credentialExposureAssertion(usedCredentials);
-      const client = new GitLabClient({
-        origin: target.endpoint.origin,
+      let lastCredential: string | undefined;
+      const createClient = (origin: string, initialCredential?: string) => new GitLabClient({
+        origin,
         tokenProvider: async () => {
-          const token = await credentials.tokenForHost(target.endpoint.identity.host);
+          const token = initialCredential ?? await credentials.tokenForHost(target.endpoint.identity.host);
+          initialCredential = undefined;
+          lastCredential = token;
           usedCredentials.add(token);
           return token;
         },
         ...(options.transport === undefined ? {} : { transport: options.transport }),
         ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
         ...(options.maxResponseBytes === undefined ? {} : { maxResponseBytes: options.maxResponseBytes }),
-        allowInsecureLoopback: target.endpoint.origin.startsWith("http://"),
       });
-      const resolvedProject = await client.getProject(target.endpoint.identity.path);
+      let origin = target.endpoint.origin;
+      let client = createClient(origin);
+      let resolvedProject: GitLabProject;
+      try {
+        resolvedProject = await client.getProject(target.endpoint.identity.path);
+      } catch (error) {
+        const httpUnavailable = isGitLabRequestError(error) &&
+          (error.kind === "network" || error.kind === "timeout" ||
+            (error.kind === "http" && error.status !== null &&
+              [301, 302, 303, 307, 308, 404, 405, 426].includes(error.status)));
+        if (!target.endpoint.inferredApiScheme || !httpUnavailable) throw error;
+        // Only the read-only lookup may select the alternative protocol; all
+        // later reads and writes stay pinned to the resulting session origin.
+        origin = `https://${target.endpoint.identity.host}`;
+        // Seed fallback redaction with the HTTP credential, then resume rotation.
+        client = createClient(origin, lastCredential);
+        resolvedProject = await client.getProject(target.endpoint.identity.path);
+      }
       const identity = Object.freeze({
         host: target.endpoint.identity.host,
         path: target.endpoint.identity.path,
@@ -314,7 +336,7 @@ export function createGitLabTargetSessionResolver(
         assertNoCredentialExposure,
         gitlab: client,
         identity,
-        origin: target.endpoint.origin,
+        origin,
         project,
         targetRemote: target.remote,
       });

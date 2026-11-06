@@ -46,6 +46,8 @@ Missing credentials or API failures stop the flow; never automatically fall back
 to SSH or manual handoff. `--auth auto` remains a compatibility alias for API
 selection without SSH fallback. Git may still use SSH to push the source branch
 before the API flow; Git transport does not select the MR creation mode.
+GitLab supports HTTP and HTTPS. Explicit HTTP/HTTPS remotes preserve their scheme;
+SSH/scp/git remotes infer HTTP first and try same-host HTTPS when HTTP is unavailable.
 
 MR diffs and pushes use committed `HEAD` only. Staged, unstaged, and untracked
 files, including `.superpowers` reports, may remain in the worktree. The tool

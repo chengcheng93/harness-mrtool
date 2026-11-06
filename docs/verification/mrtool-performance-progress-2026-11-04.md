@@ -739,3 +739,68 @@ node scripts/build-sea.mjs
 ```
 
 本机真实 Git 测试需设置 HARNESS_MRTOOL_TEST_GIT_EXECUTABLE 为经过确认的绝对 Git.exe 路径；该变量只由测试 fixture 使用，生产工具不消费它。
+
+## 17. 2026-11-06：默认 API、允许本地改动及 HTTP 兼容
+
+第 1–16 节保留此前工作记录；当前分支和本轮交付范围以本节为准。
+
+### 17.1 目标和分支状态
+
+- 工作分支：`codex/mr-submit-performance`，沿用此前用户要求建立并推送的分支。
+- `9390ab0` 已移除工作区必须完全干净的阻断，并把默认 MR 操作设为 API；本轮继续在其上修复 GitLab HTTP 兼容。
+- 用户要求的“推送最新 mrtool”指向此分支的源码提交。包版本仍为 `0.1.7` 候选；本轮没有正式发布、合并主分支或替换已安装插件。
+
+### 17.2 本地文件不会阻止已提交代码的 MR
+
+仓库发现、推送规划和显式手工交接中的工作区清洁性阻断已删除。暂存、未暂存及未跟踪文件均可保留，包含 `.superpowers` 报告。工具使用已提交的 `HEAD` 计算 MR diff 和推送内容，不自动暂存、stash、清理或删除用户本地文件。
+
+HEAD、目标项目和分支身份、远端源提交以及实际提交 diff 的一致性校验继续执行。它们用于确保提交的是选定的代码；本地存在其他文件不再构成拒绝原因。
+
+默认创建、更新、upsert 和验证均走 API。API 失败会返回对应错误，不自动改用 SSH 创建 MR、浏览器交接或手工流程；手工模式需要用户明确要求。Git remote 的 SSH 分支传输与 GitLab MR API 是两个独立环节。
+
+### 17.3 GitLab HTTP 和 HTTPS 的选择
+
+1. 普通 GitLab 主机允许 `http://` 和 `https://`，不再要求 HTTP 是 loopback 或启用测试例外。
+2. remote 明确包含 HTTP/HTTPS 时保留其协议；不在失败后擅自改成另一个协议。
+3. SSH/scp/git remote 无 API 协议信息时，优先 HTTP。只读项目查找遇到网络、超时、升级重定向或端点不可用时，可尝试同一主机的 HTTPS。
+4. 协议选择仅发生在首次项目读取。选定后，本次会话的读取、MR 写入、回执保存和独立验证都绑定同一 origin；不会跨协议重试写入。
+5. 401/403 等认证拒绝直接返回。不会跟随重定向到其他主机。首次回退复用同一凭据，使错误脱敏历史得以保留；后续请求仍可读取轮换后的凭据。
+
+HTTP 支持覆盖底层 REST/GraphQL、CLI 只读规划、MR URL、事务失败回执和持久化验证回执。URL 中的用户名密码、跨 origin、非 HTTP(S) 协议等校验保留。GitHub 更新源和签名发布下载的协议规则不在本轮修改范围。
+
+### 17.4 真实 GitLab 17.10.3 的兼容修复
+
+实际服务位于 `http://yanfa-git.maxphotonics.com`；项目为 `bjxcjg/Luban/03-apps`，ID 为 `258`，默认目标分支为 `develop`。凭据只在验证进程内读取，未写入仓库或打印。
+
+真实读取发现并修复两处响应兼容问题：
+
+- 该版本的 REST 标签未返回 `archived` 字段。缺省按 `false` 处理；明确的 `true`/`false` 保留，null、字符串等畸形值仍拒绝。目录标签、Issue 和 MR 已应用标签均有覆盖。
+- 项目标签接口即使传入 `include_ancestor_groups=false`，仍返回带 `is_project_label:false` 的继承标签。此类条目从项目标签列表排除，随后由所属祖先组目录提供，保留 GroupLabel 全局 ID 以及项目同名标签优先级。显式畸形的类型标记仍拒绝。
+
+修复后真实 `labels list` 返回 `OK`，正确识别 GroupLabel、标签分类、默认优先级及生命周期标签。实际业务仓库的未跟踪 `luban-web-wasm/.superpowers/` 保留原状。本次真实服务检查未创建或修改业务 MR。
+
+完整 `context` 还暴露了原生 Windows PowerShell 误加载父进程 PowerShell 7 模块的问题：`Get-Acl` 模块加载失败，导致目录属主被误判为空。修复仅从原生 PowerShell 子进程环境中移除大小写不敏感的 `PSModulePath`，让它加载自己的模块；调用者环境、目录属主和权限校验均保留。先复现失败，再用不兼容模块 fixture 验证修复，既有 Everyone 访问规则拒绝测试继续通过。
+
+最终直接运行标准构建产物 `dist/main.cjs context --no-update --output json`，业务 cwd 为 `03-apps`，使用真实 GitLab、默认状态目录和原有父进程模块环境，返回 exit `0` / `OK`。无依赖替换或权限绕过；成功生成包含 diff、pushPlan、MR plan、标签及人员候选的完整 context，且未跟踪报告仍在。
+
+### 17.5 验证结果
+
+相关回归分组执行，以下为各组最终有效结果；不是全仓库测试套件的一次运行。
+
+| 范围 | 通过 | 跳过 |
+| --- | ---: | ---: |
+| GitLab client，包括旧版本标签响应兼容 | 59 | 0 |
+| HTTP transport、Skill 和插件打包 | 41 | 0 |
+| API 会话协议选择、凭据回退及后续轮换 | 26 | 0 |
+| 目标项目解析和生产只读命令 | 23 | 0 |
+| MR 事务与 transaction journal | 89 | 0 |
+| 持久化验证回执 store | 31 | 2 |
+| 真实 Git 的 HTTP/HTTPS 创建、更新和存储后独立验证 | 2 | 0 |
+| 原生 Windows ACL 与 PowerShell 模块环境兼容 | 4 | 0 |
+| 合计 | 275 | 2 |
+
+两项跳过为 Windows 环境的时间戳身份 fence 和不可用的符号链接用例。真实 Git 的两个用例使用真实仓库、生产 GitLabClient、模拟 HTTP 服务和实际回执存储；断言描述确实更新，重新组合的服务可读取已保存回执，且暂存、未暂存和 `.superpowers` 内容原样保留。它们没有向真实 GitLab 创建测试 MR。
+
+早期并发运行出现过本机锁等待和 Git 子进程 30 秒超时；最终使用固定 Node、串行运行后两个完整用例通过，未放宽生产超时或跳过实际锁实现。
+
+使用经官方 SHA256 校验的 Node `24.16.0`，类型检查、`git diff --check` 及标准构建通过；`dist/main.cjs version --output json` 和 `schema show --output json` 返回 `OK`，CLI `0.1.7`、Template `1.1.0`。构建保留两条已有的 CJS `import.meta` 警告。交付分支为 `origin/codex/mr-submit-performance`，可用 `git log -1` 与 `git ls-remote --heads origin codex/mr-submit-performance` 核对源码提交。

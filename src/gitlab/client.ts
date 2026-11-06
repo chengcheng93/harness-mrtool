@@ -304,7 +304,7 @@ function restLabel(
     name: string(record.name, "label.name"),
     description: nullableString(record.description, "label.description") ?? "",
     color: string(record.color, "label.color"),
-    archived: boolean(record.archived, "label.archived"),
+    archived: record.archived === undefined ? false : boolean(record.archived, "label.archived"),
     scopeKind: scope.kind,
     scopeId: scope.id,
     scopePath: scope.path,
@@ -339,7 +339,7 @@ function appliedLabels(value: JsonValue | undefined, subject: string): readonly 
     return Object.freeze({
       restId: integer(record.id, `${subject} label.id`),
       name: string(record.name, `${subject} label.name`),
-      archived: boolean(record.archived, `${subject} label.archived`),
+      archived: record.archived === undefined ? false : boolean(record.archived, `${subject} label.archived`),
     });
   });
   const identities = new Set<number>();
@@ -586,7 +586,10 @@ export class GitLabClient {
     const projectValues = await this.restPages(query(`/api/v4/projects/${encodeId(project.id)}/labels`, {
       include_ancestor_groups: "false",
     }));
-    const rest: RestLabel[] = projectValues.map((value) => restLabel(value, {
+    const rest: RestLabel[] = projectValues.filter((value) => {
+      const record = object(value, "project label");
+      return record.is_project_label === undefined || boolean(record.is_project_label, "label.is_project_label");
+    }).map((value) => restLabel(value, {
       kind: "project", id: project.id, path: project.fullPath,
     }));
     for (const group of groups) {

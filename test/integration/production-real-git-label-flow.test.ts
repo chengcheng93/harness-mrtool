@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
-import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { basename, resolve } from "node:path";
@@ -15,7 +15,7 @@ const sourceBranch = "feature/task7";
 const endpoint = "git@gitlab.example.test:group/project.git";
 const allowTestAcl = Object.freeze({ verify: async (_path: string): Promise<void> => undefined });
 
-async function setup(t: test.TestContext) {
+async function setup(t: test.TestContext, origin = "https://gitlab.example.test") {
   const git = await GitFixture.create();
   t.after(() => git.dispose());
   const stateDirectory = await mkdtemp(resolve(await realpath(tmpdir()), "mrtool-real-git-state-"));
@@ -54,7 +54,7 @@ async function setup(t: test.TestContext) {
   t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
   t.mock.method(globalThis, "fetch", async () => { throw new Error("Live HTTP is forbidden"); });
 
-  const transport = new RealGitLabelTransport(sourceSha, targetSha, sourceBranch);
+  const transport = new RealGitLabelTransport(sourceSha, targetSha, sourceBranch, origin);
   const client = new GitLabClient({ origin: transport.origin, tokenProvider: async () => "real-git-test-token", transport });
   const raw = JSON.parse(await readFile(resolve(root, "test/golden/fixtures/code-docs-request.json"), "utf8"));
   raw.intent = "draft";
@@ -94,7 +94,7 @@ async function setup(t: test.TestContext) {
     raw.mergeRequest.assigneeCandidateToken = users.find((candidate) => candidate.kind === "assignee" && candidate.username === "author")!.token;
     raw.review.reviewerCandidateTokens = [users.find((candidate) => candidate.kind === "reviewer" && candidate.username === "reviewer")!.token];
   }
-  return { git, sourceSha, targetSha, transport, commands, raw, run, issue };
+  return { git, sourceSha, targetSha, stateDirectory, transport, commands, raw, run, issue };
 }
 
 // Regresses wiring readChangeSet to the path-only reader: a plausible request
@@ -160,8 +160,9 @@ for (const drift of ["HEAD", "tracking"] as const) {
   });
 }
 
-test("real default Git create and update preserve staged, unstaged and untracked local files", async (t) => {
-  const f = await setup(t);
+for (const origin of ["https://gitlab.example.test", "http://gitlab.example.test"]) {
+test(`${origin} real default Git create, update and stored verify preserve staged, unstaged and untracked local files`, async (t) => {
+  const f = await setup(t, origin);
   await f.git.write("src/boundary.ts", "local staged work\n");
   await f.git.git(["add", "src/boundary.ts"]);
   await f.git.write("src/boundary.ts", "local unstaged work\n");
@@ -177,12 +178,36 @@ test("real default Git create and update preserve staged, unstaged and untracked
   const created = await f.run(["create"]);
   assert.equal(created.code, 0, created.stdout + created.stderr);
   assert.deepEqual(created.json.data.mandatoryLabels.names, ["type::bug", "priority::p2", "status::doing"]);
+  const createdDescription = String(f.transport.mr!.description);
   await f.issue(88);
+  f.raw.changes.summary = ["Update verification details for the committed boundary correction."];
   const updated = await f.run(["update", "88"]);
   assert.equal(updated.code, 0, updated.stdout + updated.stderr);
+  assert.notEqual(f.transport.mr!.description, createdDescription);
+  assert.match(String(f.transport.mr!.description), /Update verification details for the committed boundary correction\./u);
+  const receiptDirectory = resolve(f.stateDirectory, "verification-receipts");
+  const receipts = await Promise.all((await readdir(receiptDirectory))
+    .filter((name) => /^[a-f0-9]{64}\.json$/u.test(name))
+    .map(async (name) => JSON.parse(await readFile(resolve(receiptDirectory, name), "utf8"))));
+  assert.ok(receipts.length >= 1, "create and update must persist verification receipts");
+  for (const { locator, receipt } of receipts) {
+    assert.equal(locator.gitlabOrigin, origin);
+    assert.equal(receipt.gitlabOrigin, origin);
+    assert.equal(receipt.sourceHeadSha, f.sourceSha);
+  }
+  const writesBeforeVerify = [...f.transport.writes];
+  // Every run composes new default services/stores, so verify must reload the
+  // receipt from disk rather than inherit an in-memory create/update result.
   const verified = await f.run(["verify", "88", "--level", "structure"]);
   assert.equal(verified.code, 0, verified.stdout + verified.stderr);
+  assert.deepEqual(f.transport.writes, writesBeforeVerify);
+  assert.equal(f.transport.requests.every((request) => new URL(request.url).origin === origin), true);
+  assert.ok(f.transport.requests.some(({ method, path }) => method === "POST" && path === "/api/graphql"));
+  assert.ok(f.transport.requests.some(({ method, path }) => method === "POST" && path === "/api/v4/projects/7/merge_requests"));
+  assert.ok(f.transport.requests.some(({ method, path }) => method === "PUT" && path === "/api/v4/projects/7/merge_requests/88"));
+  assert.equal(f.transport.mr!.web_url, `${origin}/group/project/-/merge_requests/88`);
   assert.equal(f.transport.mr!.sha, f.sourceSha);
   assert.equal(await f.git.head(), f.sourceSha);
   assert.deepEqual(await localState(), before);
 });
+}

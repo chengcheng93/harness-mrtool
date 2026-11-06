@@ -8,9 +8,9 @@ type WireObject = Record<string, unknown>;
 
 /** Stateful HTTP boundary only: the actual GitLabClient parses inventory, mutations and readback. */
 export class RealGitLabelTransport implements GitLabHttpTransport {
-  readonly origin = "https://gitlab.example.test";
-  readonly project = { id: "7", fullPath: "group/project", defaultBranch: "main", webUrl: `${this.origin}/group/project` };
-  readonly requests: { method: string; path: string; body: WireObject }[] = [];
+  readonly origin: string;
+  readonly project: { id: string; fullPath: string; defaultBranch: string; webUrl: string };
+  readonly requests: { method: string; url: string; path: string; body: WireObject }[] = [];
   readonly writes: string[] = [];
   readonly unexpected: string[] = [];
   readonly labels = names.map((name, index) => ({ id: index + 1, name, description: name, color: "#123456", archived: false }));
@@ -18,7 +18,11 @@ export class RealGitLabelTransport implements GitLabHttpTransport {
   beforeFind: (() => Promise<void>) | undefined;
   private sequence = 0;
 
-  constructor(readonly sourceSha: string, readonly targetSha: string, readonly sourceBranch: string) {}
+  constructor(readonly sourceSha: string, readonly targetSha: string, readonly sourceBranch: string,
+    origin = "https://gitlab.example.test") {
+    this.origin = origin;
+    this.project = { id: "7", fullPath: "group/project", defaultBranch: "main", webUrl: `${origin}/group/project` };
+  }
 
   private current(): WireObject {
     assert.ok(this.mr, "MR readback must follow an actual create request");
@@ -30,7 +34,7 @@ export class RealGitLabelTransport implements GitLabHttpTransport {
     assert.equal(url.origin, this.origin);
     const path = decodeURIComponent(url.pathname);
     const body = request.body === null ? {} : JSON.parse(Buffer.from(request.body).toString("utf8")) as WireObject;
-    this.requests.push({ method: request.method, path, body });
+    this.requests.push({ method: request.method, url: request.url, path, body });
     const respond = (value: unknown): GitLabHttpResponse => ({
       status: 200, headers: { "x-request-id": `real-git-http-${++this.sequence}`, "x-next-page": "" },
       body: Buffer.from(JSON.stringify(value)),

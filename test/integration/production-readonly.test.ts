@@ -914,7 +914,7 @@ test("read-only port validation rejects accessors without invoking them", async 
   assert.equal(reads, 0);
 });
 
-test("MR plan URLs are bound to the GitLab origin while same-origin loopback HTTP is allowed", async () => {
+test("MR plan URLs stay bound to the GitLab origin while accepting HTTP and HTTPS hosts", async (t) => {
   const harness = await fixture();
   const invocation = parseCliInvocation(["context", "--mr", "88", "--output", "json"]);
   let issueCalls = 0;
@@ -942,41 +942,47 @@ test("MR plan URLs are bound to the GitLab origin while same-origin loopback HTT
   );
   assert.equal(issueCalls, 0);
 
-  const loopbackOrigin = "http://127.0.0.1:43123";
-  const loopback = createReadOnlyCommandServices({
-    ...harness.dependencies,
-    planner: {
-      prepare: async () => ({
-        ...harness.plan,
-        options: {
-          ...harness.plan.options,
-          operation: "update",
-          gitlabOrigin: loopbackOrigin,
-          mrIid: 88,
-          gitlab: { origin: loopbackOrigin } as GitLabClient,
+  for (const origin of [
+    "https://gitlab.example.test",
+    "http://gitlab.example.test",
+    "http://gitlab.example.test:8929",
+    "http://127.0.0.1:43123",
+  ]) {
+    await t.test(origin, async () => {
+      const sameOrigin = createReadOnlyCommandServices({
+        ...harness.dependencies,
+        planner: {
+          prepare: async () => ({
+            ...harness.plan,
+            options: {
+              ...harness.plan.options,
+              operation: "update",
+              gitlabOrigin: origin,
+              mrIid: 88,
+              gitlab: { origin } as GitLabClient,
+            },
+            mergeRequestPlan: {
+              action: "update",
+              iid: 88,
+              webUrl: `${origin}/group/project/-/merge_requests/88`,
+            },
+          }),
         },
-        mergeRequestPlan: {
-          action: "update",
-          iid: 88,
-          webUrl: `${loopbackOrigin}/group/project/-/merge_requests/88`,
+        issueContext: async () => {
+          throw new ToolError("GITLAB_ERROR", "Same-origin context probe reached issuance", {
+            field: "probe",
+            expected: "URL validation to accept the same HTTP or HTTPS origin",
+            actual: "issuance probe",
+            safeNextStep: "Stop after the URL validation probe.",
+          });
         },
-      }),
-    },
-    issueContext: async () => {
-      issueCalls += 1;
-      throw new ToolError("GITLAB_ERROR", "Loopback context probe reached issuance", {
-        field: "probe",
-        expected: "URL validation to accept the same loopback origin",
-        actual: "issuance probe",
-        safeNextStep: "Stop after the URL validation probe.",
       });
-    },
-  });
-  await assert.rejects(
-    async () => loopback.context!(invocation as never),
-    (error: unknown) => isToolError(error, "GITLAB_ERROR"),
-  );
-  assert.equal(issueCalls, 1);
+      await assert.rejects(
+        async () => sameOrigin.context!(invocation as never),
+        (error: unknown) => isToolError(error, "GITLAB_ERROR"),
+      );
+    });
+  }
 });
 
 test("prepared diff summaries and push plans are bound to the prepared Git snapshot", async () => {

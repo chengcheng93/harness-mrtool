@@ -246,6 +246,45 @@ test("stores and reloads a validated receipt under its exact locator digest", as
   assert.equal(process.platform === "win32" ? aclChecks.length >= 2 : aclChecks.length, process.platform === "win32" ? true : 0);
 });
 
+test("stores HTTP receipts under an exact origin locator distinct from HTTPS and other ports", async (t) => {
+  const stateDirectory = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-receipt-http-"));
+  t.after(async () => rm(stateDirectory, { recursive: true, force: true }));
+  const receipt = receiptFixture({
+    gitlabOrigin: "http://gitlab.example.test:8080",
+    webUrl: "http://gitlab.example.test:8080/group/project/-/merge_requests/88",
+  });
+  const locator = locatorFor(receipt);
+  const store = new VerificationReceiptStore({
+    stateDirectory,
+    windowsAclVerifier: { verify: async () => undefined },
+  });
+
+  await store.stageAuthenticated(receipt);
+
+  assert.deepEqual(await store.loadVerified(locator), { trusted: true, receipt });
+  assert.equal(await store.loadVerified({ ...locator, gitlabOrigin: "https://gitlab.example.test:8080" }), null);
+  assert.equal(await store.loadVerified({ ...locator, gitlabOrigin: "http://gitlab.example.test:8081" }), null);
+});
+
+test("HTTP receipt locators reject credentials, paths, queries, fragments, and noncanonical origins before disk access", async (t) => {
+  const stateDirectory = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-receipt-http-invalid-"));
+  t.after(async () => rm(stateDirectory, { recursive: true, force: true }));
+  const locator = { ...locatorFor(receiptFixture()), gitlabOrigin: "http://gitlab.example.test:8080" };
+  const store = new VerificationReceiptStore({ stateDirectory });
+
+  for (const gitlabOrigin of [
+    "ftp://gitlab.example.test:8080",
+    "http://user:password@gitlab.example.test:8080",
+    "http://gitlab.example.test:8080/group/project",
+    "http://gitlab.example.test:8080?query=value",
+    "http://gitlab.example.test:8080#fragment",
+    "http://gitlab.example.test:8080/",
+  ]) {
+    await assert.rejects(store.loadVerified({ ...locator, gitlabOrigin }), hasCode("UNMANAGED_MR"), gitlabOrigin);
+  }
+  assert.deepEqual(await readdir(stateDirectory), []);
+});
+
 test("records safe corruption evidence without moving non-canonical receipt bytes", async (t) => {
   const stateDirectory = await mkdtemp(resolve(await realpath(tmpdir()), "harness-mrtool-receipt-corrupt-"));
   t.after(async () => rm(stateDirectory, { recursive: true, force: true }));
