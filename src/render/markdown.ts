@@ -36,7 +36,7 @@ export interface RenderDescriptionInputs {
   readonly snapshotExpectation?: FinalSnapshotExpectation;
 }
 
-export type FinalSnapshotExpectation = "write-plan-applied" | "ready-transition-pending";
+export type FinalSnapshotExpectation = "write-plan-applied";
 
 export interface DerivedCheckboxState {
   readonly state: "checked" | "pending" | "not-applicable";
@@ -349,20 +349,18 @@ function assertRequestCheckboxContract(
 }
 
 function policyReview(bundle: LoadedTemplateBundle): {
-  readonly draftMinimumReviewers: number;
   readonly readyMinimumReviewers: number;
   readonly highRiskMinimumReviewers: number;
 } {
   const review = asObject(asObject(bundle.policy, "policy").review, "review policy");
-  for (const field of ["draftMinimumReviewers", "readyMinimumReviewers", "highRiskMinimumReviewers"] as const) {
+  for (const field of ["readyMinimumReviewers", "highRiskMinimumReviewers"] as const) {
     if (!Number.isSafeInteger(review[field]) || (review[field] as number) < 0) {
       throw renderError("review policy is invalid");
     }
   }
-  return review as unknown as {
-    draftMinimumReviewers: number;
-    readyMinimumReviewers: number;
-    highRiskMinimumReviewers: number;
+  return {
+    readyMinimumReviewers: review.readyMinimumReviewers as number,
+    highRiskMinimumReviewers: review.highRiskMinimumReviewers as number,
   };
 }
 
@@ -382,9 +380,9 @@ function assertLabelPolicy(inputs: PreparedInputs, labels: readonly SnapshotLabe
   }
   const lifecycle = asObject(labelPolicy.lifecycle, "label lifecycle");
   const expectedNames = asObject(lifecycle.expectedNames, "label lifecycle names");
-  const expectedStatus = inputs.request.intent === "draft" ? expectedNames.draft : expectedNames.ready;
+  const expectedStatus = expectedNames.ready;
   if (typeof expectedStatus !== "string" || !labels.some((candidate) => candidate.name === expectedStatus)) {
-    throw renderError("write plan lifecycle label does not match the request intent");
+    throw renderError("write plan lifecycle label does not match the Policy");
   }
   const title = asObject(asObject(inputs.bundle.policy, "policy").title, "title policy");
   const compatibility = asObject(title.typeLabelCompatibility, "title compatibility policy");
@@ -443,39 +441,11 @@ function assertWritePlan(inputs: PreparedInputs): {
 
   if (inputs.snapshotExpectation === "write-plan-applied") {
     const current = inputs.snapshot.mergeRequest;
-    if (current.lifecycle !== inputs.request.intent ||
+    if (current.lifecycle !== "ready" ||
         !sameStableIdSet(current.labelIds, inputs.writePlan.labelIds) ||
         current.assigneeUserId !== inputs.writePlan.assigneeUserId ||
         !sameStableIdSet(current.reviewerUserIds, inputs.writePlan.reviewerUserIds)) {
       throw renderError("final snapshot does not match the desired write plan");
-    }
-  } else if (inputs.snapshotExpectation === "ready-transition-pending") {
-    const current = inputs.snapshot.mergeRequest;
-    const labelPolicy = asObject(asObject(inputs.bundle.policy, "policy").labels, "label policy");
-    const expectedNames = asObject(
-      asObject(labelPolicy.lifecycle, "label lifecycle").expectedNames,
-      "label lifecycle names",
-    );
-    const draftName = canonicalString(expectedNames.draft, "label lifecycle draft name");
-    const readyName = canonicalString(expectedNames.ready, "label lifecycle ready name");
-    const desiredReadyLabels = labels.filter((label) => label.name === readyName);
-    const draftCandidates = inputs.snapshot.labelCandidates.filter((label) => label.name === draftName);
-    if (inputs.request.intent !== "ready" || current.lifecycle !== "draft" ||
-        desiredReadyLabels.length !== 1 || draftCandidates.length !== 1) {
-      throw renderError("pending Ready transition snapshot is not in the required Draft lifecycle state");
-    }
-    const desiredReadyLabelId = desiredReadyLabels[0]?.id;
-    const draftLabelId = draftCandidates[0]?.id;
-    if (desiredReadyLabelId === undefined || draftLabelId === undefined) {
-      throw renderError("pending Ready transition lifecycle labels are incomplete");
-    }
-    const expectedCurrentLabelIds = inputs.writePlan.labelIds
-      .filter((id) => id !== desiredReadyLabelId)
-      .concat(draftLabelId);
-    if (!sameStableIdSet(current.labelIds, expectedCurrentLabelIds) ||
-        current.assigneeUserId !== inputs.writePlan.assigneeUserId ||
-        !sameStableIdSet(current.reviewerUserIds, inputs.writePlan.reviewerUserIds)) {
-      throw renderError("pending Ready transition snapshot does not match the desired write plan");
     }
   }
   return { labels: labelsInPolicyOrder(inputs.bundle, labels), assignee, reviewers };
@@ -535,9 +505,8 @@ export function deriveReviewStates(
   const qualifiedRequested = qualified === null
     ? null
     : snapshot.mergeRequest.reviewerUserIds.filter((id) => qualified.has(id)).length;
-  const minimumReviewers = request.intent === "draft"
-    ? policy.draftMinimumReviewers
-    : policy.readyMinimumReviewers;
+  // Informational only: reviewers are never required to open a merge request.
+  const minimumReviewers = policy.readyMinimumReviewers;
   if ((request.workItem.relation === "none" && snapshot.issue.kind !== "none") ||
       (request.workItem.relation !== "none" &&
         (snapshot.issue.kind !== "linked" || snapshot.issue.iid !== request.workItem.iid))) {
@@ -584,13 +553,11 @@ export function deriveReviewStates(
     "ci-status": snapshot.ci.status === "passed"
       ? { state: "checked", reason: null }
       : { state: "pending", reason: ciReason[snapshot.ci.status] },
-    "reviewer-requested": minimumReviewers === 0
-      ? { state: "not-applicable", reason: "The current lifecycle does not require a reviewer." }
-      : qualifiedRequested === null
-        ? { state: "pending", reason: "Qualified reviewer information is unavailable." }
-        : qualifiedRequested >= minimumReviewers
-          ? { state: "checked", reason: null }
-          : { state: "pending", reason: `Only ${String(qualifiedRequested)} of ${String(minimumReviewers)} required qualified reviewers are requested.` },
+    "reviewer-requested": qualifiedRequested === null
+      ? { state: "pending", reason: "Qualified reviewer information is unavailable." }
+      : qualifiedRequested >= minimumReviewers
+        ? { state: "checked", reason: null }
+        : { state: "pending", reason: `Only ${String(qualifiedRequested)} of ${String(minimumReviewers)} suggested qualified reviewers are requested.` },
     "high-risk-reviewers": request.risk.level !== "high"
       ? { state: "not-applicable", reason: "Risk level is not high." }
       : qualifiedRequested === null
@@ -629,12 +596,10 @@ function prepareInputs(value: RenderDescriptionInputs | unknown): PreparedInputs
   }
   let snapshotExpectation: FinalSnapshotExpectation | null = null;
   if (input.snapshotExpectation !== undefined) {
-    if (!(["write-plan-applied", "ready-transition-pending"] as const).includes(
-      input.snapshotExpectation as FinalSnapshotExpectation,
-    )) {
+    if (input.snapshotExpectation !== "write-plan-applied") {
       throw renderError("snapshotExpectation is invalid");
     }
-    snapshotExpectation = input.snapshotExpectation as FinalSnapshotExpectation;
+    snapshotExpectation = input.snapshotExpectation;
   } else if (input.renderPhase === "final") {
     snapshotExpectation = "write-plan-applied";
   }

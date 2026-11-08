@@ -57,7 +57,6 @@ async function setup(t: test.TestContext, origin = "https://gitlab.example.test"
   const transport = new RealGitLabelTransport(sourceSha, targetSha, sourceBranch, origin);
   const client = new GitLabClient({ origin: transport.origin, tokenProvider: async () => "real-git-test-token", transport });
   const raw = JSON.parse(await readFile(resolve(root, "test/golden/fixtures/code-docs-request.json"), "utf8"));
-  raw.intent = "draft";
   raw.targetBranch = "main";
   raw.workItem = { relation: "none", noIssueReason: "A self-contained comparison boundary correction." };
   raw.mergeRequest.labelCandidateTokens = [];
@@ -104,11 +103,13 @@ test("real default Git adapter derives three bug labels and verifies HTTP readba
   await f.issue();
   const result = await f.run(["create"]);
   assert.equal(result.code, 0, result.stdout + result.stderr);
-  assert.deepEqual(result.json.data.mandatoryLabels.names, ["type::bug", "priority::p2", "status::doing"]);
+  assert.deepEqual(result.json.data.mandatoryLabels.names, ["type::bug", "priority::p2", "status::review"]);
   assert.deepEqual((f.transport.mr!.labels as { name: string }[]).map((label) => label.name).sort(),
-    ["priority::p2", "status::doing", "type::bug"]);
+    ["priority::p2", "status::review", "type::bug"]);
   assert.equal(f.transport.mr!.sha, f.sourceSha);
-  assert.match(String(f.transport.mr!.title), /^Draft: \[fix\]/u);
+  assert.match(String(f.transport.mr!.title), /^\[fix\]/u);
+  assert.equal(f.transport.mr!.draft, false);
+  assert.equal(result.json.data.lifecycle, "ready");
   const verified = await f.run(["verify", "88", "--level", "structure"]);
   assert.equal(verified.code, 0, verified.stdout + verified.stderr);
   assert.ok(f.commands.some((args) => args[0] === "cat-file" && args[1] === "blob"));
@@ -122,7 +123,7 @@ test("real default Git dry-run writes nothing and leaves its context reusable fo
   const remoteRefs = await f.git.git(["--git-dir", f.git.remotePath, "show-ref"]);
   const dry = await f.run(["create", "--dry-run"]);
   assert.equal(dry.code, 0, dry.stdout + dry.stderr);
-  assert.deepEqual(dry.json.data.mandatoryLabels.names, ["type::bug", "priority::p2", "status::doing"]);
+  assert.deepEqual(dry.json.data.mandatoryLabels.names, ["type::bug", "priority::p2", "status::review"]);
   assert.equal(dry.json.data.pushPlan.kind, "up-to-date");
   assert.deepEqual(f.transport.writes, []);
   assert.equal(f.transport.mr, null);
@@ -177,7 +178,7 @@ test(`${origin} real default Git create, update and stored verify preserve stage
   await f.issue();
   const created = await f.run(["create"]);
   assert.equal(created.code, 0, created.stdout + created.stderr);
-  assert.deepEqual(created.json.data.mandatoryLabels.names, ["type::bug", "priority::p2", "status::doing"]);
+  assert.deepEqual(created.json.data.mandatoryLabels.names, ["type::bug", "priority::p2", "status::review"]);
   const createdDescription = String(f.transport.mr!.description);
   await f.issue(88);
   f.raw.changes.summary = ["Update verification details for the committed boundary correction."];

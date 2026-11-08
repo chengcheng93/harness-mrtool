@@ -316,9 +316,9 @@ test("loader accepts canonical SemVer metadata but rejects aliases", async (cont
   const bundlePath = await createValidBundleFixture(context);
   const manifestPath = resolve(bundlePath, "bundle-manifest.json");
   const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as Record<string, unknown>;
-  manifest.version = "1.1.0+bundle.7";
+  manifest.version = "1.2.0+bundle.7";
   await writeFile(manifestPath, `${canonicalizeJson(manifest)}\n`, "utf8");
-  assert.equal((await loadTemplateBundle(bundlePath)).manifest.version, "1.1.0+bundle.7");
+  assert.equal((await loadTemplateBundle(bundlePath)).manifest.version, "1.2.0+bundle.7");
 
   manifest.version = "v1.0.0";
   await writeFile(manifestPath, `${canonicalizeJson(manifest)}\n`, "utf8");
@@ -713,7 +713,6 @@ test("policy declares dynamic label categories, exact lifecycle exception and re
       lifecycle: {
         statusCategory: "status",
         expectedNames: {
-          draft: "status::doing",
           ready: "status::review",
           merge: "status::review",
         },
@@ -734,12 +733,13 @@ test("policy declares dynamic label categories, exact lifecycle exception and re
       },
     },
     review: {
-      draftMinimumReviewers: 0,
       readyMinimumReviewers: 1,
       highRiskMinimumReviewers: 2,
     },
   });
   assert.equal(JSON.stringify(bundle.policy).includes("type::feature,"), false);
+  assert.equal(bundle.manifest.version, "1.2.0");
+  assert.equal(JSON.stringify(bundle.schema).includes("intent"), false);
 });
 
 test("all eight allowed profile selections compose as stable registry ID unions", async () => {
@@ -1043,7 +1043,7 @@ test("internal validate-bundle emits one schema-valid JSON success document", ()
   assert.equal(output.code, "OK");
   assert.deepEqual(output.versions, {
     cliVersion: packageMetadata.version,
-    templateVersion: "1.1.0",
+    templateVersion: "1.2.0",
     bundleHash: output.versions.bundleHash,
     releaseSetId: null,
     inputSchema: 1,

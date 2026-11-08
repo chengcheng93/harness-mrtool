@@ -38,19 +38,19 @@ async function fixture(t: test.TestContext) {
     envelope: typeof f.assets.receiptEnvelope === "string" ? f.assets.receiptEnvelope : new TextDecoder().decode(f.assets.receiptEnvelope),
     files: new Map(f.mutableFiles),
     trustConfig: f.trustConfig,
-    expectedTag: "templates-v1.1.0",
-    expectedVersion: "1.1.0",
+    expectedTag: "templates-v1.2.0",
+    expectedVersion: "1.2.0",
   };
   const sign = (overrides: JsonObject) => signedEnvelope(canonicalPayload({ ...f.receiptPayload, ...overrides }), [f.signingKey]);
   return { f, root, directory, receiptPath, options, sign };
 }
 
-test("valid 1.1.0 receipt verifies for publication without authorizing unanchored runtime loading", async (t) => {
+test("valid 1.2.0 receipt verifies for publication without authorizing unanchored runtime loading", async (t) => {
   const { f, options } = await fixture(t);
   const checked = verifyTemplatePublicationReceipt(options);
   assert.equal(checked.purpose, "template-publication-only");
-  assert.equal(checked.receipt.bundleVersion, "1.1.0");
-  assert.equal(checked.receipt.releaseTag, "templates-v1.1.0");
+  assert.equal(checked.receipt.bundleVersion, "1.2.0");
+  assert.equal(checked.receipt.releaseTag, "templates-v1.2.0");
   assert.equal(checked.payloadSha256, hash(canonicalPayload(f.receiptPayload)));
   assert.equal(checked.bundleManifestHash, hash(options.files.get("bundle-manifest.json")!));
   assert.equal(checked.signingKeyId, f.signingKey.keyId);
@@ -76,8 +76,8 @@ for (const attack of ["zero64", "wrong-key", "unsigned", "noncanonical-envelope"
       case "noncanonical-envelope": envelope = JSON.stringify(JSON.parse(envelope), null, 2); break;
       case "noncanonical-payload": envelope = signedEnvelope(Buffer.from(JSON.stringify(f.receiptPayload, null, 2)), [f.signingKey]); break;
       case "wrong-repo": envelope = sign({ repository: { owner: "different-owner", name: "harness-mrtool" } }); break;
-      case "wrong-tag": envelope = sign({ releaseTag: "templates-v1.1.1", bundleVersion: "1.1.1" }); break;
-      case "wrong-version": options.expectedVersion = "1.1.1"; break;
+      case "wrong-tag": envelope = sign({ releaseTag: "templates-v1.2.1", bundleVersion: "1.2.1" }); break;
+      case "wrong-version": options.expectedVersion = "1.2.1"; break;
       case "signer-mismatch": envelope = sign({ signingKeyId: "another-key" }); break;
       case "invalid-signing-sequence": envelope = sign({ signingSequence: 0 }); break;
       case "manifest-hash": envelope = sign({ bundleManifest: { sha256: "a".repeat(64), size: options.files.get("bundle-manifest.json")!.length } }); break;
@@ -113,9 +113,9 @@ test("unbranded supplied trust and omitted production trust reject fixture signa
 test("bounded disk input reads the exact tree for in-process publication verification", async (t) => {
   const { options, directory, receiptPath } = await fixture(t);
   const input = await readTemplatePublicationInputs({ directory, receipt: receiptPath, tag: options.expectedTag });
-  assert.equal(input.expectedVersion, "1.1.0");
+  assert.equal(input.expectedVersion, "1.2.0");
   assert.equal(input.files.size, 10);
-  assert.equal(verifyTemplatePublicationReceipt({ ...input, trustConfig: options.trustConfig }).receipt.bundleVersion, "1.1.0");
+  assert.equal(verifyTemplatePublicationReceipt({ ...input, trustConfig: options.trustConfig }).receipt.bundleVersion, "1.2.0");
 });
 
 for (const attack of ["extra", "missing", "file-link", "directory-link", "root-link", "receipt-link", "oversized-file", "oversized-receipt", "oversized-manifest", "noncanonical-root"] as const) {
@@ -165,7 +165,7 @@ test("disk reader enforces aggregate payload cap before reading the next file", 
 
 test("caller expected tag must agree with the independently expected version", async (t) => {
   const { options } = await fixture(t);
-  for (const expectedTag of ["templates-v1.1.1", "templates-v01.1.0", "cli-v1.1.0"]) {
+  for (const expectedTag of ["templates-v1.2.1", "templates-v01.2.0", "cli-v1.2.0"]) {
     assert.throws(() => verifyTemplatePublicationReceipt({ ...options, expectedTag }), security);
   }
 });

@@ -39,7 +39,7 @@ function fakeRepository(): RepositorySnapshot {
   };
 }
 
-test("manual handoff renders a token-free MR draft and never calls GitLab", async () => {
+test("manual handoff renders a token-free MR title and description and never calls GitLab", async () => {
   const bundle = await loadTemplateBundle(resolve(repositoryRoot, "template-bundle"));
   const raw = JSON.parse(await readFile(
     resolve(repositoryRoot, "test/golden/fixtures/code-docs-request.json"),
@@ -182,18 +182,19 @@ test("manual handoff rejects omitted, auto, or API auth before reading input or 
 test("SSH Push Options are explicit, newline-safe, and exclude metadata mutation", () => {
   assert.equal(isSshPushUrl("git@gitlab.example.test:team/project.git"), true);
   assert.equal(isSshPushUrl("https://gitlab.example.test/team/project.git"), false);
-  assert.deepEqual(buildSshMergeRequestPushOptions({
+  const options = buildSshMergeRequestPushOptions({
     targetBranch: "main",
-    title: "Draft title",
+    title: "[fix][app] Handoff title",
     description: "# Summary\nLine one",
-    draft: true,
-  }), [
+  });
+  assert.deepEqual(options, [
     "merge_request.create",
     "merge_request.target=main",
-    "merge_request.title=Draft title",
+    "merge_request.title=[fix][app] Handoff title",
     "merge_request.description=# Summary\\nLine one",
-    "merge_request.draft",
   ]);
+  assert.equal(options.length, 4);
+  assert.equal(options.includes("merge_request.draft"), false);
 });
 
 test("manual --ssh-mr cannot bypass mandatory labels through SSH push options", async () => {
@@ -218,7 +219,6 @@ test("manual --ssh-mr cannot bypass mandatory labels through SSH push options", 
       "merge_request.target=develop",
       "merge_request.title=placeholder",
       "merge_request.description=placeholder",
-      "merge_request.draft",
     ],
   };
   const services = createManualCommandServices({

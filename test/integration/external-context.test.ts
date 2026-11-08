@@ -211,10 +211,10 @@ test("reads a canonical tokenless external context without using a caller store 
     assert.equal(context.snapshot.targetRefSha, targetSha);
     assert.deepEqual(context.requiredLabelCategories, ["type", "priority"]);
     assert.deepEqual(context.lifecycleLabelNames, {
-      draft: "status::doing",
       ready: "status::review",
       merge: "status::review",
     });
+    assert.equal("draft" in context.lifecycleLabelNames, false);
     assert.deepEqual(context.audit, { requestIds: ["req-a", "req-z"] });
     assert.deepEqual(context.candidates, [
       {

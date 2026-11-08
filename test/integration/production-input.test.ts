@@ -130,7 +130,6 @@ function consoleFixture(options: {
   return {
     selectOne: async ({ id, choices }) => {
       const selected: Readonly<Record<string, number>> = {
-        intent: 1,
         "workItem.relation": options.relationIndex ?? 1,
         "impact.nature": 1,
         "risk.level": 1,

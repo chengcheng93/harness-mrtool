@@ -67,7 +67,7 @@ async function setup(t: test.TestContext) {
     createMergeRequest: async (_target: unknown, input: GitLabCreateMergeRequestInput) => {
       state.writes.push("create");
       state.mr = { iid: 88, webUrl: `${project.webUrl}/-/merge_requests/88`, title: input.title, description: input.description,
-        draft: true, state: "opened", sourceProjectId: "7", sourceBranch: "feature/labels", targetProjectId: "7", targetBranch: "develop",
+        draft: input.title.startsWith("Draft:"), state: "opened", sourceProjectId: "7", sourceBranch: "feature/labels", targetProjectId: "7", targetBranch: "develop",
         sha: sourceSha, author: user, assignees: [], reviewers: [], labels: [], squash: true, shouldRemoveSourceBranch: true, pipelineStatus: "passed" };
       if (state.driftAfterCreate) state.drift = true;
       return receipt({ iid: 88 });
@@ -83,7 +83,6 @@ async function setup(t: test.TestContext) {
     updateMergeRequest: async (_target: unknown, _iid: number, input: GitLabUpdateMergeRequestInput) => {
       state.writes.push(input.kind);
       state.mr = input.kind === "description" ? { ...state.mr!, description: input.description }
-        : input.kind === "title" ? { ...state.mr!, title: input.title, draft: input.title.startsWith("Draft:") }
         : { ...state.mr!, title: input.title, draft: input.title.startsWith("Draft:"), targetBranch: input.targetBranch,
           assignees: input.assigneeIds.map((id) => id === 42 ? user : reviewer), reviewers: input.reviewerIds.map((id) => id === 42 ? user : reviewer),
           squash: input.squash, shouldRemoveSourceBranch: input.removeSourceBranch };
@@ -117,7 +116,6 @@ async function setup(t: test.TestContext) {
       }
       return ({ kind: state.sourceMissing ? "missing" as const : "up-to-date" as const, remote: "origin", ref: repo.sourceRemoteRef, sourceHeadSha: sourceSha, remoteSha: state.sourceMissing ? null : sourceSha, command: state.sourceMissing ? `git push --no-force origin ${sourceSha}:${repo.sourceRemoteRef}` : null }); } };
   const raw = JSON.parse(await readFile(resolve(root, "test/golden/fixtures/code-docs-request.json"), "utf8"));
-  raw.intent = "draft";
   raw.workItem = { relation: "none", noIssueReason: "A self-contained maintenance change." };
   raw.mergeRequest.labelCandidateTokens = [];
   const contextStore = new CandidateContextStore({ stateDirectory, windowsAclVerifier: allowTestAcl });
@@ -181,48 +179,44 @@ test("default create detects canonical-diff drift immediately after the first mu
   assert.deepEqual(f.state.writes, ["create"]);
 });
 
-for (const intent of ["draft", "ready"] as const) {
-  test("default " + intent + " guards reject later local drift after label synchronization", async (t) => {
-    const f = await setup(t);
-    f.raw.intent = intent;
-    await f.issue();
-    f.state.driftAfterLabels = true;
-    const result = await f.run(["create"]);
-    assert.notEqual(result.code, 0, result.stdout);
-    assert.deepEqual(f.state.writes, ["create", "labels:ADD"], "fields/description/Ready writes must not follow drift");
-  });
-}
+test("default guards reject later local drift after label synchronization", async (t) => {
+  const f = await setup(t);
+  await f.issue();
+  f.state.driftAfterLabels = true;
+  const result = await f.run(["create"]);
+  assert.notEqual(result.code, 0, result.stdout);
+  assert.deepEqual(f.state.writes, ["create", "labels:ADD"], "fields/description writes must not follow drift");
+});
 
-test("default Draft readback rejects a new duplicate lifecycle label even when applied IDs are unchanged", async (t) => {
+test("default readback rejects a new duplicate lifecycle label even when applied IDs are unchanged", async (t) => {
   const f = await setup(t);
   await f.issue();
   f.state.duplicateAfterFields = true;
   const result = await f.run(["create"]);
   assert.notEqual(result.code, 0, result.stdout);
   assert.deepEqual(f.state.writes, ["create", "labels:ADD", "managed-fields"]);
-  assert.equal(f.state.mr!.labels.some((label) => label.name === "status::review"), false,
-    "the newly ambiguous lifecycle name must remain unapplied in this regression");
+  assert.equal(f.state.mr!.labels.some((label) => label.restId === 999), false,
+    "the newly ambiguous duplicate lifecycle label must remain unapplied in this regression");
+  assert.equal(f.state.mr!.labels.filter((label) => label.name === "status::review").length, 1,
+    "the originally applied lifecycle label must stay applied");
 });
 
-for (const intent of ["draft", "ready"] as const) {
-  test("default " + intent + " submission reuses each MR response while keeping inventory/member/review reads live", async (t) => {
-    const f = await setup(t);
-    f.raw.intent = intent;
-    await f.issue();
-    f.resetCalls();
-    const result = await f.run(["create"]);
-    assert.equal(result.code, 0, result.stdout);
-    assert.ok(f.calls.mergeRequestReceipt > 0, "the real remote must perform standalone MR reads");
-    assert.equal(f.calls.mergeRequest, 0, "a readback must not fetch the identical MR again during context discovery");
-    t.diagnostic(JSON.stringify({ intent, apiCalls: f.calls }));
-    assert.equal(f.calls.pushPlans, f.calls.discover, "every repository discovery retains push-plan verification");
-    assert.ok(f.calls.pushPlans >= f.state.writes.length, "every mutation retains a write guard");
-    assert.ok(f.calls.inventory >= f.calls.mergeRequestReceipt, "each readback still discovers the live label inventory");
-    assert.ok(f.calls.users >= f.calls.mergeRequestReceipt, "each readback still discovers current project members");
-    assert.ok(f.calls.review >= f.calls.mergeRequestReceipt, "each existing-MR readback still discovers approvals/discussions");
-    assert.equal(f.state.mr!.draft, intent === "draft");
-  });
-}
+test("default submission reuses each MR response while keeping inventory/member/review reads live", async (t) => {
+  const f = await setup(t);
+  await f.issue();
+  f.resetCalls();
+  const result = await f.run(["create"]);
+  assert.equal(result.code, 0, result.stdout);
+  assert.ok(f.calls.mergeRequestReceipt > 0, "the real remote must perform standalone MR reads");
+  assert.equal(f.calls.mergeRequest, 0, "a readback must not fetch the identical MR again during context discovery");
+  t.diagnostic(JSON.stringify({ apiCalls: f.calls }));
+  assert.equal(f.calls.pushPlans, f.calls.discover, "every repository discovery retains push-plan verification");
+  assert.ok(f.calls.pushPlans >= f.state.writes.length, "every mutation retains a write guard");
+  assert.ok(f.calls.inventory >= f.calls.mergeRequestReceipt, "each readback still discovers the live label inventory");
+  assert.ok(f.calls.users >= f.calls.mergeRequestReceipt, "each readback still discovers current project members");
+  assert.ok(f.calls.review >= f.calls.mergeRequestReceipt, "each existing-MR readback still discovers approvals/discussions");
+  assert.equal(f.state.mr!.draft, false, "the tool only creates normal (non-Draft) merge requests");
+});
 
 test("default dry-run preserves candidate tokens for the later real submission", async (t) => {
   const f = await setup(t);

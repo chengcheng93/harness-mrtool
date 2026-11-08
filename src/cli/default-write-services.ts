@@ -74,7 +74,7 @@ export function createDefaultWriteServices(
     let resume: Parameters<ReturnType<typeof createMergeRequestCommandAdapter>["create"]>[0]["resume"];
     if (command.kind === "create" && command.resumeIid !== undefined) {
       if (command.resumeFrom === undefined || readOnly.contextStore.loadRecoveryProof === undefined) {
-        throw new ToolError("INPUT_ERROR", "The original private context is required to resume this Draft", {
+        throw new ToolError("INPUT_ERROR", "The original private context is required to resume this merge request", {
           field: "--resume-from", expected: "the original request and its retained private context",
           actual: "recovery evidence is unavailable", safeNextStep: "Restore the original request and private context before resuming; no MR was changed.",
         });
@@ -108,7 +108,7 @@ export function createDefaultWriteServices(
     planned.assertNoCredentialExposure(snapshot);
     const selection = request === null ? null : selectMandatoryLabels({
       diff: planned.labelDiff, binding: snapshot, inventory: snapshot.labelCandidates,
-      intent: request.intent, options: labelOptionsForProductionInvocation(invocation),
+      options: labelOptionsForProductionInvocation(invocation),
     });
 
     let mutationStarted = false;
@@ -180,7 +180,7 @@ export function createDefaultWriteServices(
           });
           const matching = await dryRemote.findOpen(authorization.createInput);
           if (matching.value.length !== 1 || matching.value[0]?.iid !== resume.iid) {
-            throw new ToolError("INPUT_ERROR", "Resume requires one matching open Draft", {
+            throw new ToolError("INPUT_ERROR", "Resume requires one matching open merge request", {
               field: "--resume", expected: "the unique matching MR with the selected IID",
               actual: "the selected MR is absent or ambiguous", safeNextStep: "Inspect the matching open MRs before resuming; no MR was changed.",
             });
@@ -284,12 +284,10 @@ export function createDefaultWriteServices(
 function guardedRemote(remote: MergeRequestRemote, guard: () => Promise<void>): MergeRequestRemote {
   return {
     read: (iid) => remote.read(iid), findOpen: (input) => remote.findOpen(input),
-    createDraft: async (input) => { await guard(); return remote.createDraft(input); },
+    create: async (input) => { await guard(); return remote.create(input); },
     addLabels: async (iid, ids) => { await guard(); return remote.addLabels(iid, ids); },
     removeLabels: async (iid, ids) => { await guard(); return remote.removeLabels(iid, ids); },
     writeManagedFields: async (iid, input) => { await guard(); return remote.writeManagedFields(iid, input); },
     writeDescription: async (iid, description) => { await guard(); return remote.writeDescription(iid, description); },
-    markDraft: async (iid, title) => { await guard(); return remote.markDraft(iid, title); },
-    markReady: async (iid, title) => { await guard(); return remote.markReady(iid, title); },
   };
 }

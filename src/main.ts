@@ -163,7 +163,6 @@ function runContractProbe(): void {
     const requestProbe = {
       schemaVersion: 1,
       contextId: "context:contract-probe",
-      intent: "draft",
       profileIds: ["general"],
       targetBranch: "develop",
       title: { type: "chore", module: "mrtool", titleSummary: "Probe request contract" },
@@ -231,7 +230,6 @@ async function runRendererProbe(): Promise<void> {
     const request = normalizeAndValidateRequest({
       schemaVersion: 1,
       contextId: "context:renderer-probe",
-      intent: "draft",
       profileIds: ["general"],
       targetBranch: "develop",
       title: { type: "chore", module: "mrtool", titleSummary: "Probe deterministic renderer" },
@@ -298,14 +296,14 @@ async function runRendererProbe(): Promise<void> {
       issue: { kind: "none" as const },
       labelCandidates: [
         { id: "label:priority", name: "priority::p1" },
-        { id: "label:status", name: "status::doing" },
+        { id: "label:status", name: "status::review" },
         { id: "label:type", name: "type::chore" },
       ],
       userCandidates: [{ id: "user:author", username: "author", displayName: "Author User" }],
       mergeRequest: {
         iid: 1,
         authorUserId: "user:author",
-        lifecycle: "draft" as const,
+        lifecycle: "ready" as const,
         labelIds: ["label:priority", "label:status", "label:type"],
         assigneeUserId: "user:author",
         reviewerUserIds: [],
@@ -330,7 +328,7 @@ async function runRendererProbe(): Promise<void> {
     });
     const marker = verifyDiagnosticMarker(description);
     const projectTemplate = renderProjectTemplate("general", bundle);
-    titleAccepted = title === "Draft: [chore][mrtool] Probe deterministic renderer";
+    titleAccepted = title === "[chore][mrtool] Probe deterministic renderer";
     descriptionAccepted = description.match(/^## /gmu)?.length === 8;
     markerVerified = marker.renderPhase === "final";
     projectTemplateAccepted = projectTemplate.match(/^## /gmu)?.length === 8 &&

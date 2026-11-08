@@ -17,7 +17,6 @@ import {
 import {
   assertManagedFields,
   assertRemoteIdentity,
-  compensateReadyFailure,
   managedFields,
   readVerified,
   syncLabels,
@@ -33,10 +32,9 @@ import {
   candidateSelectionDigest,
   remoteSnapshotDigest,
   TransactionJournal,
-  type TransactionAuditV1,
+  type TransactionAudit,
 } from "./transaction-journal.ts";
 import {
-  assertReadyGate,
   assertTransactionStructure,
   isVerificationReceiptStageError,
   stageVerificationReceipt,
@@ -120,7 +118,7 @@ function updateResult(
   description: string,
   inputs: UpdateMergeRequestInputs,
   forcedDescriptionReplacement: boolean,
-  transaction: TransactionAuditV1,
+  transaction: TransactionAudit,
 ): UpdateMergeRequestResult {
   return Object.freeze({
     iid: current.iid,
@@ -156,7 +154,6 @@ export async function updateMergeRequest(
   const ownershipReleaseTag = inputs.migration?.previousReleaseTag ?? inputs.releaseTag;
   const labels = selectMandatoryLabels({
     diff: inputs.labelDiff, binding: inputs.initial.snapshot, inventory: inputs.initial.snapshot.labelCandidates,
-    intent: inputs.request.intent,
     ...(inputs.labelOptions === undefined ? {} : { options: inputs.labelOptions }),
   });
   inputs = { ...inputs, request: normalizeAndValidateRequest({
@@ -168,7 +165,7 @@ export async function updateMergeRequest(
       throw new ToolError("INPUT_ERROR", "Resume requires a verified provisional transaction prefix", {
         field: "--resume", expected: "resume without migration or description replacement overrides",
         actual: "conflicting update overrides",
-        safeNextStep: "Refresh context and resume the original provisional Draft without overrides.",
+        safeNextStep: "Refresh context and resume the original provisional merge request without overrides.",
       });
     }
     assertPristineResumeAuthorization(inputs.resumeAuthorization, inputs.initial, inputs);
@@ -238,48 +235,28 @@ export async function updateMergeRequest(
   }
 
   const completed: string[] = [];
-  let readyTransitionStarted = false;
   let recoveredUnknownOutcome = false;
   let renderSnapshot: ExternalContextSnapshot | null = null;
   let finalDescription: string | null = null;
 
   try {
-    if (!current.draft) {
-      current = await writeAndRead(
-        context,
-        current,
-        "mark-draft",
-        "normal",
-        completed,
-        () => inputs.remote.markDraft(current.iid, plan.draft.title),
-        () => { recoveredUnknownOutcome = true; },
-        (value) => {
-          if (!value.draft || value.title !== plan.draft.title) {
-            throw transactionError(
-              "POSTCONDITION_ERROR",
-              "The update could not prove that the MR returned to Draft",
-              value.webUrl,
-            );
-          }
-        },
-      );
-    }
-
     current = await syncLabels(
       context,
       current,
-      plan.draft.labelIds,
+      plan.desired.labelIds,
       plan.managedLabelIds,
       completed,
       () => { recoveredUnknownOutcome = true; },
     );
-    const resumeFieldsAlreadyWritten = inputs.resumeAuthorization !== undefined &&
-      current.title === plan.draft.title && current.targetBranch === inputs.request.targetBranch &&
-      current.assigneeUserId === plan.draft.assigneeUserId &&
-      canonicalizeJson([...current.reviewerUserIds].sort()) === canonicalizeJson([...plan.draft.reviewerUserIds].sort()) &&
-      current.squash === plan.draft.squash && current.removeSourceBranch === plan.draft.removeSourceBranch;
+    // A legacy Draft merge request is normalized here: writing the canonical
+    // title (without a Draft prefix) is what makes GitLab mark it ready.
+    const resumeFieldsAlreadyWritten = inputs.resumeAuthorization !== undefined && !current.draft &&
+      current.title === plan.desired.title && current.targetBranch === inputs.request.targetBranch &&
+      current.assigneeUserId === plan.desired.assigneeUserId &&
+      canonicalizeJson([...current.reviewerUserIds].sort()) === canonicalizeJson([...plan.desired.reviewerUserIds].sort()) &&
+      current.squash === plan.desired.squash && current.removeSourceBranch === plan.desired.removeSourceBranch;
     if (resumeFieldsAlreadyWritten) {
-      assertManagedFields(current, plan, inputs.request, true);
+      assertManagedFields(current, plan, inputs.request);
     } else {
       current = await writeAndRead(
         context,
@@ -289,10 +266,10 @@ export async function updateMergeRequest(
         completed,
         () => inputs.remote.writeManagedFields(
           current.iid,
-          managedFields(plan, inputs.request.targetBranch, true),
+          managedFields(plan, inputs.request.targetBranch),
         ),
         () => { recoveredUnknownOutcome = true; },
-        (value) => assertManagedFields(value, plan, inputs.request, true),
+        (value) => assertManagedFields(value, plan, inputs.request),
       );
     }
 
@@ -305,7 +282,6 @@ export async function updateMergeRequest(
       releaseTag: inputs.releaseTag,
       cliVersion: inputs.cliVersion,
       renderPhase: "final",
-      ...(plan.intent === "ready" ? { snapshotExpectation: "ready-transition-pending" as const } : {}),
     });
     await stageVerificationReceipt(inputs.verificationReceiptWriter, {
       gitlabOrigin: inputs.gitlabOrigin,
@@ -321,6 +297,7 @@ export async function updateMergeRequest(
       },
       bundle: inputs.bundle,
     });
+    // The final description write is the last remote write of the transaction.
     current = await writeAndRead(
       context,
       current,
@@ -330,54 +307,11 @@ export async function updateMergeRequest(
       () => inputs.remote.writeDescription(current.iid, finalDescription!),
       () => { recoveredUnknownOutcome = true; },
       (value) => {
-        assertManagedFields(value, plan, inputs.request, true);
+        assertManagedFields(value, plan, inputs.request);
         assertTransactionStructure(value, finalDescription!, inputs.bundle, inputs.releaseTag);
       },
     );
-
-    if (plan.intent === "draft") {
-      journal.setFinalState("draft-proven");
-      return updateResult(
-        current,
-        plan,
-        completed,
-        recoveredUnknownOutcome,
-        renderSnapshot,
-        finalDescription,
-        inputs,
-        forcedDescriptionReplacement,
-        journal.snapshot(),
-      );
-    }
-
-    readyTransitionStarted = true;
-    assertReadyGate(current.snapshot, inputs.request, plan.desired, inputs.bundle);
-    current = await syncLabels(
-      context,
-      current,
-      plan.desired.labelIds,
-      plan.managedLabelIds,
-      completed,
-      () => { recoveredUnknownOutcome = true; },
-      "normal",
-      true,
-    );
-    assertReadyGate(current.snapshot, inputs.request, plan.desired, inputs.bundle);
-    current = await writeAndRead(
-      context,
-      current,
-      "mark-ready",
-      "normal",
-      completed,
-      () => inputs.remote.markReady(current.iid, plan.desired.title),
-      () => { recoveredUnknownOutcome = true; },
-      (value) => {
-        assertManagedFields(value, plan, inputs.request, false);
-        assertTransactionStructure(value, finalDescription!, inputs.bundle, inputs.releaseTag);
-        assertReadyGate(value.snapshot, inputs.request, plan.desired, inputs.bundle);
-      },
-    );
-    journal.setFinalState("ready-proven");
+    journal.setFinalState("complete");
     return updateResult(
       current,
       plan,
@@ -391,36 +325,17 @@ export async function updateMergeRequest(
     );
   } catch (error) {
     let failure: unknown = error;
-    let verificationReceiptStageFailed = isVerificationReceiptStageError(error);
-    if (readyTransitionStarted && hasPossibleWrite(journal)) {
-      try {
-        current = await compensateReadyFailure(context, plan, current.iid, completed);
-        failure = transactionError(
-          isToolError(error, "PARTIAL_REMOTE_STATE") ? "PARTIAL_REMOTE_STATE" : "PARTIAL_DRAFT",
-          "The Ready update failed and the MR was compensated to Draft",
-          current.webUrl,
-          error,
-        );
-      } catch (compensationError) {
-        verificationReceiptStageFailed ||= isVerificationReceiptStageError(compensationError);
-        journal.setFinalState("unknown");
-        failure = transactionError(
-          "PARTIAL_REMOTE_STATE",
-          "The update failed and its Draft compensation could not be proven",
-          current.webUrl,
-          compensationError,
-        );
-      }
-    } else if (isToolError(error, "PARTIAL_REMOTE_STATE")) {
+    const verificationReceiptStageFailed = isVerificationReceiptStageError(error);
+    if (isToolError(error, "PARTIAL_REMOTE_STATE")) {
       journal.setFinalState("unknown");
     } else if (hasPossibleWrite(journal)) {
       try {
         current = await readVerified(context, current.iid);
-        if (!current.draft || current.state !== "opened") throw new Error("MR is not an open Draft");
-        journal.setFinalState("draft-proven");
+        if (current.state !== "opened") throw new Error("MR is not open");
+        journal.setFinalState("partial");
         failure = transactionError(
-          "PARTIAL_DRAFT",
-          "The merge request update did not complete and remains a verified Draft",
+          "PARTIAL_WRITE",
+          "The merge request update did not complete; its current state was read back",
           current.webUrl,
           error,
         );
@@ -428,7 +343,7 @@ export async function updateMergeRequest(
         journal.setFinalState("unknown");
         failure = transactionError(
           "PARTIAL_REMOTE_STATE",
-          "The update failed and its Draft state could not be proven",
+          "The update failed and the current remote state could not be proven",
           current.webUrl,
           readError,
         );
@@ -450,9 +365,6 @@ export async function updateMergeRequest(
               failedOperation: "verification-receipt-stage" as const,
               failedField: "verificationReceipt",
             }
-          : readyTransitionStarted && audit.steps.every((step) =>
-              step.postcondition === "matched" || step.postcondition === "not-applicable")
-          ? { failedOperation: "ready-gate" as const }
           : {}),
       });
     }

@@ -1,0 +1,263 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://harness-mrtool.invalid/schemas/request-v1.schema.json",
+  "title": "Harness MR Tool request V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "contextId",
+    "intent",
+    "profileIds",
+    "targetBranch",
+    "title",
+    "changes",
+    "motivation",
+    "workItem",
+    "impact",
+    "verification",
+    "documentation",
+    "risk",
+    "profileFields",
+    "review",
+    "mergeRequest"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "contextId": { "$ref": "#/definitions/opaque" },
+    "intent": { "enum": ["draft", "ready"] },
+    "profileIds": { "$ref": "#/definitions/nonEmptyIdArray" },
+    "targetBranch": { "$ref": "#/definitions/opaque" },
+    "title": { "$ref": "#/definitions/title" },
+    "changes": { "$ref": "#/definitions/changes" },
+    "motivation": { "$ref": "#/definitions/motivation" },
+    "workItem": { "$ref": "#/definitions/workItem" },
+    "impact": { "$ref": "#/definitions/impact" },
+    "verification": { "$ref": "#/definitions/verification" },
+    "documentation": { "$ref": "#/definitions/documentation" },
+    "risk": { "$ref": "#/definitions/risk" },
+    "profileFields": { "$ref": "#/definitions/profileFields" },
+    "review": { "$ref": "#/definitions/review" },
+    "mergeRequest": { "$ref": "#/definitions/mergeRequest" }
+  },
+  "definitions": {
+    "opaque": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\r\\n\\u2028\\u2029]+$"
+    },
+    "prose": { "type": "string", "minLength": 1 },
+    "proseArray": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/prose" }
+    },
+    "idArray": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/definitions/opaque" }
+    },
+    "nonEmptyIdArray": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/definitions/opaque" }
+    },
+    "title": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "module", "titleSummary"],
+      "properties": {
+        "type": { "$ref": "#/definitions/opaque" },
+        "module": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32,
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+        },
+        "titleSummary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 72,
+          "pattern": "^[^\\r\\n\\u2028\\u2029]+$",
+          "description": "Plain text under the conservative V1 title rule; Markdown-capable punctuation is rejected after schema validation."
+        }
+      }
+    },
+    "changes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summary", "technicalChanges", "outOfScope"],
+      "properties": {
+        "summary": { "$ref": "#/definitions/proseArray" },
+        "technicalChanges": { "$ref": "#/definitions/proseArray" },
+        "outOfScope": { "$ref": "#/definitions/proseArray" }
+      }
+    },
+    "motivation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["background", "whyNeeded"],
+      "properties": {
+        "background": { "$ref": "#/definitions/proseArray" },
+        "whyNeeded": { "$ref": "#/definitions/proseArray" }
+      }
+    },
+    "workItem": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["relation", "iid"],
+          "properties": {
+            "relation": { "enum": ["closes", "related"] },
+            "iid": { "type": "integer", "minimum": 1 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["relation", "noIssueReason"],
+          "properties": {
+            "relation": { "const": "none" },
+            "noIssueReason": { "$ref": "#/definitions/prose" }
+          }
+        }
+      ]
+    },
+    "impact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["areaIds", "nature", "details"],
+      "properties": {
+        "areaIds": { "$ref": "#/definitions/idArray" },
+        "nature": { "enum": ["functional", "non-functional", "docs-only"] },
+        "details": { "$ref": "#/definitions/proseArray" }
+      }
+    },
+    "verificationItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "state", "evidenceKind", "command", "result", "evidence"],
+      "properties": {
+        "id": { "$ref": "#/definitions/opaque" },
+        "state": { "enum": ["checked", "pending", "not-applicable"] },
+        "evidenceKind": {
+          "enum": [
+            "command-output",
+            "file-inspection",
+            "manual-verification",
+            "pending-reason",
+            "not-applicable-reason"
+          ]
+        },
+        "command": {
+          "anyOf": [{ "type": "null" }, { "$ref": "#/definitions/prose" }]
+        },
+        "result": {
+          "anyOf": [{ "type": "null" }, { "$ref": "#/definitions/prose" }]
+        },
+        "evidence": { "$ref": "#/definitions/prose" }
+      },
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "state": { "const": "checked" },
+                "evidenceKind": { "const": "command-output" },
+                "command": { "$ref": "#/definitions/prose" },
+                "result": { "$ref": "#/definitions/prose" }
+              }
+            },
+            {
+              "properties": {
+                "state": { "const": "checked" },
+                "evidenceKind": {
+                  "enum": ["file-inspection", "manual-verification"]
+                },
+                "result": { "$ref": "#/definitions/prose" }
+              }
+            },
+            {
+              "properties": {
+                "state": { "const": "pending" },
+                "evidenceKind": { "const": "pending-reason" },
+                "command": { "type": "null" },
+                "result": { "type": "null" }
+              }
+            },
+            {
+              "properties": {
+                "state": { "const": "not-applicable" },
+                "evidenceKind": { "const": "not-applicable-reason" },
+                "command": { "type": "null" },
+                "result": { "type": "null" }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "acceptanceEvidence", "knownGaps"],
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/verificationItem" }
+        },
+        "acceptanceEvidence": { "$ref": "#/definitions/proseArray" },
+        "knownGaps": { "$ref": "#/definitions/proseArray" }
+      }
+    },
+    "documentation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["itemIds", "details"],
+      "properties": {
+        "itemIds": { "$ref": "#/definitions/idArray" },
+        "details": { "$ref": "#/definitions/proseArray" }
+      }
+    },
+    "risk": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["level", "items", "compatibilityImpact", "rollbackPlan"],
+      "properties": {
+        "level": { "enum": ["low", "medium", "high"] },
+        "items": { "$ref": "#/definitions/proseArray" },
+        "compatibilityImpact": { "$ref": "#/definitions/proseArray" },
+        "rollbackPlan": { "$ref": "#/definitions/proseArray" }
+      }
+    },
+    "profileFields": {
+      "type": "object",
+      "propertyNames": { "$ref": "#/definitions/opaque" },
+      "additionalProperties": { "$ref": "#/definitions/proseArray" }
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reviewerCandidateTokens", "reviewerFocus", "additionalNotes"],
+      "properties": {
+        "reviewerCandidateTokens": { "$ref": "#/definitions/idArray" },
+        "reviewerFocus": { "$ref": "#/definitions/proseArray" },
+        "additionalNotes": { "$ref": "#/definitions/proseArray" }
+      }
+    },
+    "mergeRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["assigneeCandidateToken", "labelCandidateTokens", "removeSourceBranch", "squash"],
+      "properties": {
+        "assigneeCandidateToken": {
+          "anyOf": [{ "type": "null" }, { "$ref": "#/definitions/opaque" }]
+        },
+        "labelCandidateTokens": { "$ref": "#/definitions/idArray" },
+        "removeSourceBranch": { "type": "boolean" },
+        "squash": { "type": "boolean" }
+      }
+    }
+  }
+}

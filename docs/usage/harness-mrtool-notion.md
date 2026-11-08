@@ -2,7 +2,7 @@
 
 > 适合复制到 Notion 的项目说明文档
 >
-> 当前源码候选：CLI/Plugin `0.1.7`，Template Bundle `1.1.0`，默认 API 自动 MR；尚未发布。
+> 当前源码候选：CLI/Plugin `0.1.7`，Template Bundle `1.2.0`，默认 API 自动 MR；尚未发布。
 > 历史正式版本：`0.1.5`（当时为 SSH-first），不包含当前强制标签和默认流程改造。
 > GitHub 仓库：<https://github.com/chengcheng93/harness-mrtool>
 > 历史 Windows Release：<https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.5>
@@ -120,10 +120,13 @@ bytes
 检查是否已有同源 MR
         |
         v
-创建 Draft MR（临时正文）
+创建普通 MR（标题 [type][module] 摘要，临时正文，无标签、无人员）
         |
         v
-写入受管字段和最小标签 ADD/REMOVE
+同步恰好三个标签：type / priority / status::review（最小 ADD/REMOVE）
+        |
+        v
+写入标题、负责人、审核人、squash、删除源分支等受管字段
         |
         v
 独立回读并校验真实状态
@@ -132,20 +135,15 @@ bytes
 生成最终正文和 verification receipt
         |
         v
-写入最终 description，再次回读
-        |
-        +--> intent=draft：结束
-        |
-        v
-检查 ready gate，写入 ready 标签并切换 Ready
+写入最终 description（最后一次远端写入），再次回读
         |
         v
 只读最终回读，返回成功
 ```
 
-每一步都会写入事务 journal。远端 mutation 超时后不会盲目重试造成重复写入，而是先查询真实状态。若无法证明结果，返回 `PARTIAL_REMOTE_STATE`，而不是伪造成功。
+每一步都会写入事务 journal（`journalVersion: 2`）。远端 mutation 超时后不会盲目重试造成重复写入，而是先查询真实状态。若 MR 已存在、状态可回读但事务未完成，返回 `PARTIAL_WRITE`，用 `update <iid>` 或 `create --resume` 继续；若无法证明结果，返回 `PARTIAL_REMOTE_STATE`，而不是伪造成功。
 
-`Ready` 是正常流程最后一次远端写操作；切 Ready 后只做只读回读。这样即使最后一步失败，也不会留下“正文还没写完但 MR 已 Ready”的可控流程错误。
+最终 description 写入是正常流程最后一次远端写操作；之后只做只读回读。流程中没有草稿/就绪切换，也没有补偿写操作；审核人可以为空，之后在 GitLab 中添加。
 
 ### 4.6 update 的额外保护
 
@@ -257,7 +255,7 @@ create/update -> verify` 的 API 流程。API MR 命令不自动 push，需先�
 
 只有人类明确要求手工交接时，才改用 `manual --auth ssh` 生成本地材料。
 `manual --auth ssh --ssh-mr --push` 已禁用，返回 `LABEL_ERROR`，
-不会规划或执行 push，也不能请求基础 Draft MR。
+不会规划或执行 push，也不能请求基础 MR。
 
 也可以直接从 Release 页面下载 `harness-mrtool.exe`；但推荐使用 portable zip 和安装脚本，因为脚本会验证完整归档、receipt、SHA256SUMS 和安装目录所有权。
 
@@ -361,8 +359,8 @@ harness-mrtool verify 123 --auth api --level merge --output json
 | 等级 | 检查内容 |
 | --- | --- |
 | `structure` | marker、Bundle、标题、八段正文、受管字段 |
-| `ready` | structure + Ready 所需标签、验证和状态 |
-| `merge` | ready + 当前 MR、讨论、审批、CI 等合并前状态 |
+| `ready` | structure + 实时 MR 未被 GitLab 标记为草稿；不强制最少审核人数 |
+| `merge` | ready + merge 标签、CI 通过、无未解决讨论、足够的合格审批 |
 
 ### 7.6 仅在人类明确要求时使用手工交接
 
@@ -413,7 +411,7 @@ harness-mrtool manual --auth ssh --input C:\private\mr-input\request.json --push
 | `6` | 已发生但无法完全证明的远端部分状态 |
 | `7` | 内部错误 |
 
-出现 `PARTIAL_REMOTE_STATE` 时不要立即重复执行 create。先运行 `context`、读取 MR 实际状态或使用 `verify`，确认远端结果后再决定下一步。
+出现 `PARTIAL_WRITE` 时，MR 已创建且状态已回读，按输出的 safeNextStep 用 `update <iid>` 或 `create --resume` 继续。出现 `PARTIAL_REMOTE_STATE` 时不要立即重复执行 create。先运行 `context`、读取 MR 实际状态或使用 `verify`，确认远端结果后再决定下一步。
 
 ## 10. 安全边界
 

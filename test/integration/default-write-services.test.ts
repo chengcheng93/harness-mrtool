@@ -115,11 +115,10 @@ async function dryRunResumeFixture(failedRead: "read" | "findOpen" | null, readE
   rawSnapshot.labelCandidates = [
     { id: "gid://gitlab/ProjectLabel/20", name: "type::bug" },
     { id: "gid://gitlab/ProjectLabel/30", name: "priority::p2" },
-    { id: "gid://gitlab/ProjectLabel/40", name: "status::doing" },
     { id: "gid://gitlab/ProjectLabel/50", name: "status::review" },
   ];
   const snapshot = validateExternalContextSnapshot(rawSnapshot);
-  const originalRequest = normalizeAndValidateRequest({ ...base.request, intent: "draft", contextId: "original-context",
+  const originalRequest = normalizeAndValidateRequest({ ...base.request, contextId: "original-context",
     mergeRequest: { ...base.request.mergeRequest, labelCandidateTokens: [], assigneeCandidateToken: null },
     review: { ...base.request.review, reviewerCandidateTokens: [] } });
   const request = normalizeAndValidateRequest({ ...originalRequest, contextId: "fresh-context" });
@@ -139,15 +138,16 @@ async function dryRunResumeFixture(failedRead: "read" | "findOpen" | null, readE
   const labelDiff = bugLabelDiff(snapshot);
   const plan = buildWritePlan({ request: originalRequest, snapshot, resolvedCandidates: [],
     bundle: base.currentBundle.bundle, labelDiff });
+  // An interrupted create leaves a normal (non-Draft) MR with the provisional description.
   const currentSnapshot = validateExternalContextSnapshot({ ...snapshot,
-    mergeRequest: { ...snapshot.mergeRequest, iid: 157, lifecycle: "draft" } });
+    mergeRequest: { ...snapshot.mergeRequest, iid: 157, lifecycle: "ready" } });
   const current: GitLabMergeRequest = {
     iid: 157, webUrl: "https://gitlab.example.test/luban/luban-studio/-/merge_requests/157",
     title: plan.provisional.title,
     description: renderDescription({ request: originalRequest, snapshot, writePlan: plan.desired,
       bundle: base.currentBundle.bundle, releaseTag: base.currentBundle.releaseTag,
       cliVersion: base.options.cliVersion, renderPhase: "provisional" }),
-    draft: true, state: "opened", sourceProjectId: "100", sourceBranch: binding.sourceBranch,
+    draft: false, state: "opened", sourceProjectId: "100", sourceBranch: binding.sourceBranch,
     targetProjectId: "100", targetBranch: binding.targetBranch, sha: binding.sourceHeadSha,
     author: { id: "30", username: "author", displayName: "Author User", state: "active", accessLevel: 40 },
     assignees: [], reviewers: [], labels: [], squash: plan.provisional.squash,

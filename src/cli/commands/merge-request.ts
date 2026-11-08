@@ -12,7 +12,7 @@ import {
   remoteSnapshotDigest,
   remoteWriteFromTransactionAudit,
   validateTransactionAudit,
-  type TransactionAuditV1,
+  type TransactionAudit,
   type TransactionReadAudit,
   type TransactionStepOperation,
 } from "../../app/transaction-journal.ts";
@@ -192,10 +192,9 @@ function assertPreparedFields(value: object, extra: string): void {
 function assertRemotePort(remote: MergeRequestRemote): void {
   if (remote === null || typeof remote !== "object" ||
       typeof remote.findOpen !== "function" || typeof remote.read !== "function" ||
-      typeof remote.createDraft !== "function" || typeof remote.addLabels !== "function" ||
+      typeof remote.create !== "function" || typeof remote.addLabels !== "function" ||
       typeof remote.removeLabels !== "function" || typeof remote.writeManagedFields !== "function" ||
-      typeof remote.writeDescription !== "function" || typeof remote.markReady !== "function" ||
-      typeof remote.markDraft !== "function") {
+      typeof remote.writeDescription !== "function") {
     throw preparedInputFailure();
   }
 }
@@ -471,25 +470,19 @@ function stringArray(value: unknown): readonly string[] {
 function snapshotWritePlan(value: unknown) {
   const plan = jsonRecord(value);
   if (!exactFields(plan, [
-    "writePlanVersion", "intent", "provisional", "draft", "desired", "draftStatusLabelId",
-    "readyStatusLabelId", "managedLabelIds", "preservedLabelIds",
-  ]) || plan.writePlanVersion !== 1 || !["draft", "ready"].includes(String(plan.intent)) ||
-      !nonEmpty(plan.draftStatusLabelId) || !nonEmpty(plan.readyStatusLabelId)) {
+    "writePlanVersion", "provisional", "desired", "statusLabelId", "managedLabelIds", "preservedLabelIds",
+  ]) || plan.writePlanVersion !== 1 || !nonEmpty(plan.statusLabelId)) {
     throw preparedInputFailure();
   }
   const provisional = validateDesiredWritePlan(plan.provisional);
-  const draft = validateDesiredWritePlan(plan.draft);
   const desired = validateDesiredWritePlan(plan.desired);
   const managedLabelIds = stringArray(plan.managedLabelIds);
   const preservedLabelIds = stringArray(plan.preservedLabelIds);
   return deepFreeze({
     writePlanVersion: 1 as const,
-    intent: plan.intent as "draft" | "ready",
     provisional,
-    draft,
     desired,
-    draftStatusLabelId: plan.draftStatusLabelId,
-    readyStatusLabelId: plan.readyStatusLabelId,
+    statusLabelId: plan.statusLabelId,
     managedLabelIds,
     preservedLabelIds,
   });
@@ -526,7 +519,7 @@ function assertFinalIdentity(final: RemoteMergeRequest, binding: ContextBinding)
 function expectedAuditSnapshot(
   command: "create" | "update",
   upsert: boolean,
-  audit: TransactionAuditV1,
+  audit: TransactionAudit,
   preparedSnapshot: ExternalContextSnapshot,
   final: RemoteMergeRequest,
   proof: GatedRemoteProof,
@@ -544,13 +537,11 @@ function expectedAuditSnapshot(
 }
 
 const MUTATION_METHOD_OPERATIONS: Readonly<Record<MutationMethod, readonly TransactionStepOperation[]>> = {
-  createDraft: ["create-draft"],
-  addLabels: ["labels-add", "lifecycle-status-ready-add", "compensation-labels-add"],
-  removeLabels: ["labels-remove", "lifecycle-status-ready-remove", "compensation-labels-remove"],
-  writeManagedFields: ["fields-write", "compensation-fields"],
-  writeDescription: ["description-write", "compensation-description"],
-  markReady: ["mark-ready"],
-  markDraft: ["mark-draft"],
+  create: ["create"],
+  addLabels: ["labels-add"],
+  removeLabels: ["labels-remove"],
+  writeManagedFields: ["fields-write"],
+  writeDescription: ["description-write"],
 };
 
 type PreparedWriteCommand = PreparedCreateMergeRequestCommand | PreparedUpdateMergeRequestCommand;
@@ -580,7 +571,7 @@ function assertReturnedQuery(
 function assertBusinessQueries(
   command: "create" | "update",
   upsert: boolean,
-  audit: TransactionAuditV1,
+  audit: TransactionAudit,
   prepared: PreparedWriteCommand,
   leading: readonly QueryAttemptProof[],
 ): string | null {
@@ -631,7 +622,7 @@ function assertReadProof(
 function assertExactMutationProof(
   command: "create" | "update",
   upsert: boolean,
-  audit: TransactionAuditV1,
+  audit: TransactionAudit,
   completedWrites: readonly string[],
   prepared: PreparedWriteCommand,
   final: RemoteMergeRequest,
@@ -702,7 +693,7 @@ function assertExactMutationProof(
     }
     if (step.mutation !== null) {
       const directlyProven = step.postRead.outcome === "succeeded" && step.postcondition === "matched";
-      const recoveredCreate = step.operation === "create-draft" && step.mutation.outcome === "unknown";
+      const recoveredCreate = step.operation === "create" && step.mutation.outcome === "unknown";
       if (!directlyProven && !recoveredCreate) throw preparedInputFailure();
       expectedCompleted.push(
         step.mutation.outcome === "unknown" ? `${step.operation}.recovered` : step.operation,
@@ -714,13 +705,13 @@ function assertExactMutationProof(
     throw preparedInputFailure();
   }
   const unknownCreate = audit.steps.find((step) =>
-    step.operation === "create-draft" && step.mutation?.outcome === "unknown");
+    step.operation === "create" && step.mutation?.outcome === "unknown");
   if (unknownCreate !== undefined) {
     const recovered = recoveryQuery?.openValues;
     const value = recovered?.[0];
     if (createQueryDigest === null || recoveryQuery === null ||
         recoveryQuery.queryDigest !== createQueryDigest || recovered?.length !== 1 || value === undefined ||
-        value.iid !== final.iid || value.webUrl !== final.webUrl || value.draft !== true ||
+        value.iid !== final.iid || value.webUrl !== final.webUrl || value.draft !== false ||
         value.state !== "opened" || value.sourceProjectId !== final.sourceProjectId ||
         value.sourceBranch !== final.sourceBranch || value.targetProjectId !== final.targetProjectId ||
         value.targetBranch !== final.targetBranch || value.sourceHeadSha !== final.sourceHeadSha) {
@@ -789,8 +780,7 @@ function validateSuccessfulWrite(
         verificationSnapshot.targetProject.id !== prepared.binding.targetProject.id ||
         verificationSnapshot.sourceHeadSha !== prepared.binding.sourceHeadSha ||
         verificationSnapshot.mergeRequest.iid !== final.iid ||
-        writePlan.intent !== (final.draft ? "draft" : "ready") ||
-        final.title !== (final.draft ? writePlan.draft.title : writePlan.desired.title) ||
+        final.draft || final.title !== writePlan.desired.title ||
         final.assigneeUserId !== writePlan.desired.assigneeUserId ||
         canonicalizeJson(final.reviewerUserIds) !== canonicalizeJson(writePlan.desired.reviewerUserIds) ||
         final.squash !== writePlan.desired.squash ||
@@ -807,9 +797,8 @@ function validateSuccessfulWrite(
       proof,
     );
     const expectedDigest = candidateSelectionDigest(prepared.request, candidates, digestSnapshot);
-    const expectedFinalState = final.draft ? "draft-proven" : "ready-proven";
     if (audit.sourceHeadSha !== prepared.binding.sourceHeadSha ||
-        audit.candidateSelectionDigest !== expectedDigest || audit.finalState !== expectedFinalState ||
+        audit.candidateSelectionDigest !== expectedDigest || audit.finalState !== "complete" ||
         result.iid !== final.iid || result.webUrl !== final.webUrl ||
         result.recoveredUnknownOutcome !== audit.recoveredUnknownOutcome) {
       throw preparedInputFailure();
@@ -860,7 +849,7 @@ function writeExecution(
     recoveredUnknownOutcome: result.recoveredUnknownOutcome,
     selectedCandidates: selectedCandidates(candidates),
     mandatoryLabels: selectMandatoryLabels({ diff: prepared.labelDiff, binding: result.final.snapshot,
-      inventory: result.final.snapshot.labelCandidates, intent: prepared.request.intent,
+      inventory: result.final.snapshot.labelCandidates,
       ...(prepared.labelOptions === undefined ? {} : { options: prepared.labelOptions }),
     }),
     transaction: result.transaction,
@@ -1037,13 +1026,11 @@ function verifyExecution(result: MergeRequestVerificationResult): CliCommandExec
 }
 
 type MutationMethod =
-  | "createDraft"
+  | "create"
   | "addLabels"
   | "removeLabels"
   | "writeManagedFields"
-  | "writeDescription"
-  | "markReady"
-  | "markDraft";
+  | "writeDescription";
 
 interface MutationAttemptProof {
   readonly sequence: number;
@@ -1101,7 +1088,7 @@ function mutationGatedRemote(
     proof.pendingMutationCalls += 1;
     try {
       try {
-        if (allowedMutationIid !== undefined && (method === "createDraft" || iid !== allowedMutationIid)) {
+        if (allowedMutationIid !== undefined && (method === "create" || iid !== allowedMutationIid)) {
           throw preparedInputFailure();
         }
         await beforeMutation();
@@ -1202,15 +1189,13 @@ function mutationGatedRemote(
         };
       },
     ),
-    createDraft: (input) => mutate("createDraft", null, () => remote.createDraft(input)),
+    create: (input) => mutate("create", null, () => remote.create(input)),
     addLabels: (iid, labelIds) => mutate("addLabels", iid, () => remote.addLabels(iid, labelIds)),
     removeLabels: (iid, labelIds) => mutate("removeLabels", iid, () => remote.removeLabels(iid, labelIds)),
     writeManagedFields: (iid, input) =>
       mutate("writeManagedFields", iid, () => remote.writeManagedFields(iid, input)),
     writeDescription: (iid, description) =>
       mutate("writeDescription", iid, () => remote.writeDescription(iid, description)),
-    markReady: (iid, title) => mutate("markReady", iid, () => remote.markReady(iid, title)),
-    markDraft: (iid, title) => mutate("markDraft", iid, () => remote.markDraft(iid, title)),
   };
   return Object.freeze({ remote: Object.freeze(wrapper), proof });
 }
@@ -1265,7 +1250,7 @@ export function createMergeRequestCommandAdapter(
       ? "migrate" : writeOperation;
     const expectedSnapshot = snapshotOf(original);
     const selection = selectMandatoryLabels({ diff: original.labelDiff, binding: expectedSnapshot,
-      inventory: expectedSnapshot.labelCandidates, intent: original.request.intent,
+      inventory: expectedSnapshot.labelCandidates,
       ...(original.labelOptions === undefined ? {} : { options: original.labelOptions }),
     });
     const prepared = { ...original, request: normalizeAndValidateRequest({ ...original.request,

@@ -27,12 +27,11 @@ export interface BuildWritePlanInputs {
 
 export interface MergeRequestWritePlan {
   readonly writePlanVersion: 1;
-  readonly intent: "draft" | "ready";
+  /** The label-free, people-free state the merge request is created with. */
   readonly provisional: DesiredWritePlanSnapshot;
-  readonly draft: DesiredWritePlanSnapshot;
+  /** The complete managed state every create/update converges on. */
   readonly desired: DesiredWritePlanSnapshot;
-  readonly draftStatusLabelId: string;
-  readonly readyStatusLabelId: string;
+  readonly statusLabelId: string;
   readonly managedLabelIds: readonly string[];
   readonly preservedLabelIds: readonly string[];
 }
@@ -47,12 +46,8 @@ interface LabelCategory {
 interface PolicyContract {
   readonly categories: readonly LabelCategory[];
   readonly statusCategory: string;
-  readonly draftName: string;
-  readonly readyName: string;
+  readonly statusName: string;
   readonly typeCompatibility: Readonly<Record<string, RegExp>>;
-  readonly draftMinimumReviewers: number;
-  readonly readyMinimumReviewers: number;
-  readonly highRiskMinimumReviewers: number;
 }
 
 function policyError(code: "LABEL_ERROR" | "POLICY_ERROR" | "INPUT_ERROR", reason: string): ToolError {
@@ -116,16 +111,11 @@ function readPolicy(bundle: LoadedTemplateBundle): PolicyContract {
   for (const [id, pattern] of Object.entries(rawCompatibility)) {
     typeCompatibility[id] = regex(pattern, `Policy title compatibility ${id}`);
   }
-  const review = object(bundle.policy.review, "Policy review");
   return Object.freeze({
     categories: Object.freeze(categories),
     statusCategory: scalar(lifecycle.statusCategory, "Policy status category"),
-    draftName: scalar(expected.draft, "Policy draft lifecycle name"),
-    readyName: scalar(expected.ready, "Policy ready lifecycle name"),
+    statusName: scalar(expected.ready, "Policy lifecycle name"),
     typeCompatibility: Object.freeze(typeCompatibility),
-    draftMinimumReviewers: integer(review.draftMinimumReviewers, "Policy draft reviewer minimum"),
-    readyMinimumReviewers: integer(review.readyMinimumReviewers, "Policy ready reviewer minimum"),
-    highRiskMinimumReviewers: integer(review.highRiskMinimumReviewers, "Policy high-risk reviewer minimum"),
   });
 }
 
@@ -157,7 +147,6 @@ function validateSelections(
   request: Request,
   snapshot: ExternalContextSnapshot,
   candidates: readonly Candidate[],
-  policy: PolicyContract,
 ): {
   readonly assigneeUserId: string | null;
   readonly reviewerUserIds: readonly string[];
@@ -181,16 +170,8 @@ function validateSelections(
   if (new Set(reviewerIds).size !== reviewerIds.length || reviewerIds.includes(snapshot.mergeRequest.authorUserId)) {
     throw policyError("INPUT_ERROR", "reviewer selection contains duplicates or the MR author");
   }
-  const minimum = request.intent === "draft"
-    ? policy.draftMinimumReviewers
-    : request.risk.level === "high"
-      ? Math.max(policy.readyMinimumReviewers, policy.highRiskMinimumReviewers)
-      : policy.readyMinimumReviewers;
-  const qualified = snapshot.review.qualifiedReviewerUserIds;
-  if (reviewerIds.length < minimum ||
-      (minimum > 0 && (qualified === null || reviewerIds.filter((id) => qualified.includes(id)).length < minimum))) {
-    throw policyError("INPUT_ERROR", "reviewer selection does not satisfy the current Policy minimum");
-  }
+  // Reviewers are optional: the tool submits the merge request and leaves
+  // reviewer coverage to the people working in GitLab.
   return {
     assigneeUserId: assignees[0]?.userId ?? null,
     reviewerUserIds: Object.freeze(reviewerIds),
@@ -219,66 +200,49 @@ export function buildWritePlan(input: BuildWritePlanInputs): MergeRequestWritePl
       diff: input.labelDiff,
       binding: snapshot,
       inventory: snapshot.labelCandidates,
-      intent: request.intent,
       ...(input.labelOptions === undefined ? {} : { options: input.labelOptions }),
     });
     const effectiveRequest = normalizeAndValidateRequest({
       ...request, title: { ...request.title, type: selection.titleType },
     });
-    const selected = validateSelections(effectiveRequest, snapshot, input.resolvedCandidates, policy);
+    const selected = validateSelections(effectiveRequest, snapshot, input.resolvedCandidates);
     const selectedLabelIds = selection.ids.slice(0, 2);
-    const draftStatusLabelId = exactLifecycleLabel(snapshot, policy, policy.draftName);
-    const readyStatusLabelId = exactLifecycleLabel(snapshot, policy, policy.readyName);
+    const statusLabelId = exactLifecycleLabel(snapshot, policy, policy.statusName);
     // This policy owns the complete label set: old week/out-of-pool labels are
     // removed, not silently preserved alongside the three mandatory labels.
     const preservedLabelIds: string[] = [];
     const currentManagedLabelIds = snapshot.mergeRequest.labelIds;
     const managedLabelIds = [
       ...selectedLabelIds,
-      draftStatusLabelId,
-      readyStatusLabelId,
+      statusLabelId,
       ...currentManagedLabelIds,
     ]
       .filter((id, index, values) => values.indexOf(id) === index)
       .sort();
+    const title = renderTitle(effectiveRequest, input.bundle);
     const base = {
       writePlanVersion: 1 as const,
-      assigneeUserId: selected.assigneeUserId,
-      reviewerUserIds: selected.reviewerUserIds,
+      title,
       removeSourceBranch: effectiveRequest.mergeRequest.removeSourceBranch,
       squash: effectiveRequest.mergeRequest.squash,
     };
-    const readyTitle = renderTitle(effectiveRequest, input.bundle);
-    const draftTitle = effectiveRequest.intent === "draft"
-      ? readyTitle
-      : renderTitle({ ...effectiveRequest, intent: "draft" }, input.bundle);
     const provisional = validateDesiredWritePlan({
       ...base,
-      title: draftTitle,
       labelIds: [],
       assigneeUserId: null,
       reviewerUserIds: [],
     });
-    const draft = validateDesiredWritePlan({
+    const desired = validateDesiredWritePlan({
       ...base,
-      title: draftTitle,
-      labelIds: [...selectedLabelIds, draftStatusLabelId, ...preservedLabelIds],
+      labelIds: [...selectedLabelIds, statusLabelId, ...preservedLabelIds],
+      assigneeUserId: selected.assigneeUserId,
+      reviewerUserIds: selected.reviewerUserIds,
     });
-    const desired = effectiveRequest.intent === "ready"
-      ? validateDesiredWritePlan({
-          ...base,
-          title: readyTitle,
-          labelIds: [...selectedLabelIds, readyStatusLabelId, ...preservedLabelIds],
-        })
-      : draft;
     return freezePlan({
       writePlanVersion: 1,
-      intent: effectiveRequest.intent,
       provisional,
-      draft,
       desired,
-      draftStatusLabelId,
-      readyStatusLabelId,
+      statusLabelId,
       managedLabelIds,
       preservedLabelIds: Object.freeze(preservedLabelIds),
     });

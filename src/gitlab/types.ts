@@ -116,5 +116,4 @@ export type GitLabUpdateMergeRequestInput =
       readonly squash: boolean;
       readonly removeSourceBranch: boolean;
     }
-  | { readonly kind: "description"; readonly description: string }
-  | { readonly kind: "title"; readonly title: string };
+  | { readonly kind: "description"; readonly description: string };

@@ -77,12 +77,12 @@ test("CLI failure derives partial remote writes and safe audit data from the att
   const output = new CliJsonOutput({ cliVersion: "0.1.0-dev" }, sink);
   const error = new ToolError("PARTIAL_REMOTE_STATE", "Remote state is unknown", {
     field: "mergeRequest",
-    expected: "a proven Draft or Ready MR",
+    expected: "a fully read-back merge request matching the verified write plan",
     actual: "readback unavailable",
     safeNextStep: "Inspect the MR and refresh context.",
   });
   const journal = new TransactionJournal("create", SHA, DIGEST);
-  const step = journal.start("normal", "create-draft", null);
+  const step = journal.start("normal", "create", null);
   step.mutation("unknown", "request-1");
   step.readFailed("request-2");
   journal.setFinalState("unknown");
@@ -96,8 +96,8 @@ test("CLI failure derives partial remote writes and safe audit data from the att
     remoteWrite: { state: string; operations: string[] };
     data: { transaction: { journalVersion: number; finalState: string } };
   };
-  assert.deepEqual(envelope.remoteWrite, { state: "unknown", operations: ["create-draft"] });
-  assert.equal(envelope.data.transaction.journalVersion, 1);
+  assert.deepEqual(envelope.remoteWrite, { state: "unknown", operations: ["create"] });
+  assert.equal(envelope.data.transaction.journalVersion, 2);
   assert.equal(envelope.data.transaction.finalState, "unknown");
   assert.equal(serialized.includes("hmrc1_"), false);
   assert.equal(serialized.includes("hmrx1_"), false);
@@ -111,14 +111,22 @@ test("CLI partial failure projects the known MR and failed field without resolvi
     safeNextStep: "Inspect the MR and refresh context before retrying.",
   });
   attachTransactionAudit(error, {
-    journalVersion: 1,
-    operation: "update",
+    journalVersion: 2,
+    operation: "create",
     sourceHeadSha: SHA,
     candidateSelectionDigest: DIGEST,
     finalState: "unknown",
     recoveredUnknownOutcome: false,
     steps: [{
       sequence: 1,
+      phase: "normal",
+      operation: "create",
+      preRead: { outcome: "not-applicable", requestId: null, snapshotDigest: null },
+      mutation: { outcome: "confirmed", requestId: "request-create" },
+      postRead: { outcome: "succeeded", requestId: "request-create-readback", snapshotDigest: "c".repeat(64) },
+      postcondition: "matched",
+    }, {
+      sequence: 2,
       phase: "normal",
       operation: "labels-add",
       preRead: { outcome: "succeeded", requestId: "request-before", snapshotDigest: "c".repeat(64) },
@@ -133,7 +141,7 @@ test("CLI partial failure projects the known MR and failed field without resolvi
     iidUnavailable: false,
     webUrl: "http://gitlab.example.test/group/project/-/merge_requests/88",
     webUrlUnavailable: false,
-    completedSteps: ["mark-draft: matched"],
+    completedSteps: ["create"],
     failedOperation: "labels-add",
     failedField: "mergeRequest.labels",
     retryCommand: "harness-mrtool update 88 --input - --non-interactive --output json",
@@ -152,7 +160,7 @@ test("CLI partial failure projects the known MR and failed field without resolvi
     data: { transaction: { finalState: string }; failureReceipt: TransactionFailureReceiptV1 };
   };
   assert.equal(envelope.code, "PARTIAL_REMOTE_STATE");
-  assert.deepEqual(envelope.remoteWrite, { state: "unknown", operations: ["labels-add"] });
+  assert.deepEqual(envelope.remoteWrite, { state: "unknown", operations: ["create", "labels-add"] });
   assert.equal(envelope.data.transaction.finalState, "unknown");
   assert.deepEqual(envelope.data.failureReceipt, receipt);
   assert.match(envelope.error.safeNextStep, /!88/u);
@@ -202,11 +210,11 @@ test("CLI partial failure preserves an unavailable MR receipt even without a jou
 
 test("CLI receipt projection rejects bearer-shaped receipt text before stdout", async () => {
   const credential = "Bearer receipt-secret-canary";
-  const error = new ToolError("PARTIAL_DRAFT", "Draft needs inspection", {
+  const error = new ToolError("PARTIAL_WRITE", "The merge request needs inspection", {
     field: "mergeRequest",
     expected: "completed fields",
     actual: "incomplete fields",
-    safeNextStep: "Inspect the Draft.",
+    safeNextStep: "Inspect the merge request.",
   });
   attachTransactionFailureReceipt(error, {
     receiptVersion: 1,

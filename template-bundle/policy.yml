@@ -16,7 +16,6 @@ labels:
   lifecycle:
     statusCategory: status
     expectedNames:
-      draft: "status::doing"
       ready: "status::review"
       merge: "status::review"
 title:
@@ -32,6 +31,5 @@ title:
     ci: "^type::ci$"
     chore: "^type::chore$"
 review:
-  draftMinimumReviewers: 0
   readyMinimumReviewers: 1
   highRiskMinimumReviewers: 2

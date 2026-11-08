@@ -58,9 +58,13 @@ test("partial JSON failures flush the MR locator and failed step with the origin
         safeNextStep: "Inspect the MR and refresh context before retrying."
       });
       attachTransactionAudit(error, {
-        journalVersion: 1, operation: "update", sourceHeadSha: "a".repeat(40), candidateSelectionDigest: "b".repeat(64),
+        journalVersion: 2, operation: "create", sourceHeadSha: "a".repeat(40), candidateSelectionDigest: "b".repeat(64),
         finalState: "unknown", recoveredUnknownOutcome: false,
-        steps: [{ sequence: 1, phase: "normal", operation: "labels-add",
+        steps: [{ sequence: 1, phase: "normal", operation: "create",
+          preRead: { outcome: "not-applicable", requestId: null, snapshotDigest: null },
+          mutation: { outcome: "confirmed", requestId: "request-create" },
+          postRead: { outcome: "succeeded", requestId: "request-create-readback", snapshotDigest: "c".repeat(64) }, postcondition: "matched" },
+        { sequence: 2, phase: "normal", operation: "labels-add",
           preRead: { outcome: "succeeded", requestId: "request-before", snapshotDigest: "c".repeat(64) },
           mutation: { outcome: "unknown", requestId: "request-labels" },
           postRead: { outcome: "failed", requestId: "request-readback", snapshotDigest: null }, postcondition: "unavailable" }]
@@ -68,7 +72,7 @@ test("partial JSON failures flush the MR locator and failed step with the origin
       attachTransactionFailureReceipt(error, {
         receiptVersion: 1, iid: 88, iidUnavailable: false,
         webUrl: "http://gitlab.example.test/group/project/-/merge_requests/88", webUrlUnavailable: false,
-        completedSteps: ["mark-draft: matched"], failedOperation: "labels-add", failedField: "mergeRequest.labels",
+        completedSteps: ["create"], failedOperation: "labels-add", failedField: "mergeRequest.labels",
         retryCommand: "harness-mrtool update 88 --input - --non-interactive --output json"
       });
       const result = await new CliJsonOutput({ cliVersion: "0.1.0-dev" }, process.stdout).failure(error);
@@ -88,7 +92,7 @@ test("partial JSON failures flush the MR locator and failed step with the origin
     data: { failureReceipt: { iid: number; webUrl: string; failedOperation: string; failedField: string } };
   };
   assert.equal(output.code, "PARTIAL_REMOTE_STATE");
-  assert.deepEqual(output.remoteWrite, { state: "unknown", operations: ["labels-add"] });
+  assert.deepEqual(output.remoteWrite, { state: "unknown", operations: ["create", "labels-add"] });
   assert.equal(output.data.failureReceipt.iid, 88);
   assert.equal(output.data.failureReceipt.webUrl, "http://gitlab.example.test/group/project/-/merge_requests/88");
   assert.equal(output.data.failureReceipt.failedOperation, "labels-add");

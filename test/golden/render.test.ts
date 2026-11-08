@@ -37,28 +37,27 @@ test("ready title matches the canonical UTF-8 golden", async () => {
   assert.equal(renderTitle(request, bundle), expected.replace(/\r?\n$/u, ""));
 });
 
-test("title format and 100-Unicode-scalar limit are exact for Ready and Draft", async () => {
+test("title format and 100-Unicode-scalar limit are exact and never carry a Draft prefix", async () => {
   const [requestValue, bundle] = await Promise.all([
     readFile(resolve(import.meta.dirname, "fixtures/code-docs-request.json"), "utf8").then(JSON.parse),
     loadTemplateBundle(resolve(repositoryRoot, "template-bundle")),
   ]);
   requestValue.title.module = "m".repeat(20);
   requestValue.title.titleSummary = "界".repeat(72);
-  const readyRequest = normalizeAndValidateRequest(requestValue);
-  const readyTitle = renderTitle(readyRequest, bundle);
+  const request = normalizeAndValidateRequest(requestValue);
+  const title = renderTitle(request, bundle);
 
-  assert.equal([...readyTitle].length, 100);
-  assert.equal(readyTitle, `[fix][${"m".repeat(20)}] ${"界".repeat(72)}`);
+  assert.equal([...title].length, 100);
+  assert.equal(title, `[fix][${"m".repeat(20)}] ${"界".repeat(72)}`);
+  assert.doesNotMatch(title, /^Draft:/u);
   const tamperedBundle = {
     ...structuredClone(bundle),
     layout: { ...structuredClone(bundle.layout), markdown: "## Invalid\n" },
   };
-  assert.throws(() => renderTitle(readyRequest, tamperedBundle), /renderer input is invalid/u);
-  const draftRequest = normalizeAndValidateRequest({ ...requestValue, intent: "draft" });
-  assert.throws(
-    () => renderTitle(draftRequest, bundle),
-    /exceeds 100 Unicode scalar values/u,
-  );
+  assert.throws(() => renderTitle(request, tamperedBundle), /renderer input is invalid/u);
+  // The request contract no longer carries an intent: a legacy field is rejected.
+  assert.throws(() => normalizeAndValidateRequest({ ...requestValue, intent: "draft" }));
+  assert.throws(() => normalizeAndValidateRequest({ ...requestValue, intent: "ready" }));
 });
 
 test("diagnostic marker hashes the LF body without hashing itself", async () => {
@@ -444,7 +443,7 @@ test("MR label display order follows policy categories despite token and API ord
   assert.match(description, /Merge Request Labels: week&#58;&#58;[^,]+, type&#58;&#58;bug, priority&#58;&#58;p1, status&#58;&#58;review/u);
 });
 
-test("final Ready rendering distinguishes the pending transition snapshot from a postcondition snapshot", async () => {
+test("final rendering requires the live snapshot to match the desired write plan as a non-Draft merge request", async () => {
   const fixture = (name: string) => resolve(import.meta.dirname, "fixtures", name);
   const [requestValue, snapshotValue, writePlan, bundle] = await Promise.all([
     readFile(fixture("code-docs-request.json"), "utf8").then(JSON.parse),
@@ -452,69 +451,43 @@ test("final Ready rendering distinguishes the pending transition snapshot from a
     readFile(fixture("code-docs-write-plan.json"), "utf8").then(JSON.parse),
     loadTemplateBundle(resolve(repositoryRoot, "template-bundle")),
   ]);
-  const snapshot = structuredClone(snapshotValue);
-  snapshot.labelCandidates.push({ id: "label:status-doing", name: "status::doing" });
-  snapshot.mergeRequest.lifecycle = "draft";
-  snapshot.mergeRequest.labelIds = snapshot.mergeRequest.labelIds.map((id: string) =>
-    id === "label:status" ? "label:status-doing" : id);
-  const inputs = {
-    request: normalizeAndValidateRequest(requestValue), snapshot, writePlan, bundle,
-    releaseTag: "templates-v1.0.0", cliVersion: "0.1.0-dev", renderPhase: "final" as const,
-  };
+  const render = (snapshot: typeof snapshotValue, snapshotExpectation?: "write-plan-applied") =>
+    renderDescription({
+      request: normalizeAndValidateRequest(requestValue), snapshot, writePlan, bundle,
+      releaseTag: "templates-v1.0.0", cliVersion: "0.1.0-dev", renderPhase: "final",
+      ...(snapshotExpectation === undefined ? {} : { snapshotExpectation }),
+    });
 
-  assert.throws(
-    () => renderDescription(inputs),
-    /final snapshot does not match the desired write plan/u,
-  );
-  const description = renderDescription({
-    ...inputs,
-    snapshotExpectation: "ready-transition-pending",
-  });
+  const description = render(snapshotValue);
   const marker = parseDiagnosticMarker(description);
-
+  assert.equal(render(snapshotValue, "write-plan-applied"), description);
   assert.match(description, /Merge Request Labels: .*status&#58;&#58;review/u);
   assert.equal(marker.renderPhase, "final");
   assert.equal(marker.snapshotDigest, createHash("sha256").update(
-    canonicalizeJson(validateExternalContextSnapshot(snapshot)),
+    canonicalizeJson(validateExternalContextSnapshot(snapshotValue)),
   ).digest("hex"));
   assert.equal(marker.writePlanDigest, createHash("sha256").update(
     canonicalizeJson(validateDesiredWritePlan(writePlan)),
   ).digest("hex"));
-  assert.notEqual(marker.snapshotDigest, marker.writePlanDigest);
-});
 
-test("pending Ready transition rendering rejects snapshots outside the exact Draft boundary", async () => {
-  const fixture = (name: string) => resolve(import.meta.dirname, "fixtures", name);
-  const [requestValue, snapshotValue, writePlan, bundle] = await Promise.all([
-    readFile(fixture("code-docs-request.json"), "utf8").then(JSON.parse),
-    readFile(fixture("code-docs-snapshot.json"), "utf8").then(JSON.parse),
-    readFile(fixture("code-docs-write-plan.json"), "utf8").then(JSON.parse),
-    loadTemplateBundle(resolve(repositoryRoot, "template-bundle")),
-  ]);
-  const render = (snapshot: typeof snapshotValue) => renderDescription({
-    request: normalizeAndValidateRequest(requestValue), snapshot, writePlan, bundle,
-    releaseTag: "templates-v1.0.0", cliVersion: "0.1.0-dev", renderPhase: "final",
-    snapshotExpectation: "ready-transition-pending",
-  });
+  // A merge request that is still a GitLab Draft is never a valid final state.
   const draftSnapshot = structuredClone(snapshotValue);
-  draftSnapshot.labelCandidates.push({ id: "label:status-doing", name: "status::doing" });
   draftSnapshot.mergeRequest.lifecycle = "draft";
-  draftSnapshot.mergeRequest.labelIds = draftSnapshot.mergeRequest.labelIds.map((id: string) =>
-    id === "label:status" ? "label:status-doing" : id);
-
-  assert.doesNotThrow(() => render(draftSnapshot));
-  assert.throws(() => render(snapshotValue), /pending Ready transition/u);
-  const missingDraftStatus = structuredClone(draftSnapshot);
-  missingDraftStatus.mergeRequest.labelIds = snapshotValue.mergeRequest.labelIds;
-  assert.throws(() => render(missingDraftStatus), /pending Ready transition/u);
-  const missingManagedLabel = structuredClone(draftSnapshot);
+  assert.throws(() => render(draftSnapshot), /final snapshot does not match the desired write plan/u);
+  const missingManagedLabel = structuredClone(snapshotValue);
   missingManagedLabel.mergeRequest.labelIds = missingManagedLabel.mergeRequest.labelIds.filter(
     (id: string) => id !== "label:priority",
   );
-  assert.throws(() => render(missingManagedLabel), /pending Ready transition/u);
-  const wrongAssignee = structuredClone(draftSnapshot);
+  assert.throws(() => render(missingManagedLabel), /final snapshot does not match the desired write plan/u);
+  const wrongAssignee = structuredClone(snapshotValue);
   wrongAssignee.mergeRequest.assigneeUserId = null;
-  assert.throws(() => render(wrongAssignee), /pending Ready transition/u);
+  assert.throws(() => render(wrongAssignee), /final snapshot does not match the desired write plan/u);
+  // The retired pending-transition expectation is rejected as an invalid input.
+  assert.throws(() => renderDescription({
+    request: normalizeAndValidateRequest(requestValue), snapshot: snapshotValue, writePlan, bundle,
+    releaseTag: "templates-v1.0.0", cliVersion: "0.1.0-dev", renderPhase: "final",
+    snapshotExpectation: "ready-transition-pending" as unknown as "write-plan-applied",
+  }), /snapshotExpectation is invalid/u);
 });
 
 test("opaque context tokens never enter snapshot or decoded marker metadata", async () => {
@@ -598,11 +571,12 @@ test("all ten Review / CI states derive only from declared snapshot sources", as
   const highChecked = derive(twoReviewers, highRequest);
   assert.equal(highChecked["high-risk-reviewers"]?.state, "checked");
 
-  const draftRequest = normalizeAndValidateRequest({ ...requestValue, intent: "draft" });
-  const draftSnapshot = structuredClone(snapshotValue);
-  draftSnapshot.mergeRequest.lifecycle = "draft";
-  const draft = derive(draftSnapshot, draftRequest);
-  assert.equal(draft["reviewer-requested"]?.state, "not-applicable");
+  // Reviewers are optional: an empty reviewer list is reported, never blocked.
+  const noReviewers = structuredClone(snapshotValue);
+  noReviewers.mergeRequest.reviewerUserIds = [];
+  const unrequested = derive(noReviewers);
+  assert.equal(unrequested["reviewer-requested"]?.state, "pending");
+  assert.match(unrequested["reviewer-requested"]?.reason ?? "", /suggested qualified reviewers/u);
 
   const newSnapshot = structuredClone(snapshotValue);
   newSnapshot.mergeRequest.iid = null;

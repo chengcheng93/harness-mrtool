@@ -909,18 +909,17 @@ function snapshotAudit(value: unknown): { readonly requestIds: readonly string[]
 }
 
 function snapshotLifecycle(value: unknown): {
-  readonly draft: string;
   readonly ready: string;
   readonly merge: string;
 } {
-  const lifecycle = jsonSnapshot(value, ["draft", "ready", "merge"]);
-  if (typeof lifecycle.draft !== "string" || !scalar(lifecycle.draft) ||
-      typeof lifecycle.ready !== "string" || !scalar(lifecycle.ready) ||
+  // Contexts written before the Draft stage was removed still carry a draft
+  // name; it is tolerated on read and dropped.
+  const lifecycle = jsonSnapshot(value, ["ready", "merge"], ["draft"]);
+  if (typeof lifecycle.ready !== "string" || !scalar(lifecycle.ready) ||
       typeof lifecycle.merge !== "string" || !scalar(lifecycle.merge)) {
     throw compositionError("lifecycle label names are invalid");
   }
   return deepFreeze({
-    draft: lifecycle.draft,
     ready: lifecycle.ready,
     merge: lifecycle.merge,
   });
@@ -1460,7 +1459,7 @@ export function createReadOnlyCommandServices(
       }
       const snapshot = validateExternalContextSnapshot(resolved.snapshot);
       const selection = selectMandatoryLabels({ diff: prepared.labelDiff, binding: snapshot,
-        inventory: snapshot.labelCandidates, intent: request.intent, options: labelOptionsForProductionInvocation(invocation) });
+        inventory: snapshot.labelCandidates, options: labelOptionsForProductionInvocation(invocation) });
       request = normalizeProductionRequest({ ...request, title: { ...request.title, type: selection.titleType } });
       const writePlan = buildWritePlan({
         labelDiff: prepared.labelDiff,

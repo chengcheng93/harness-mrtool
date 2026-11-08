@@ -4,8 +4,10 @@ import test from "node:test";
 import {
   TransactionJournal,
   attachTransactionAudit,
+  attachTransactionFailure,
   candidateSelectionDigest,
   getTransactionAudit,
+  getTransactionFailureReceipt,
   validateTransactionFailureReceipt,
   remoteSnapshotDigest,
   remoteWriteFromTransactionAudit,
@@ -33,7 +35,7 @@ const DIGEST = "b".repeat(64);
 
 function emptyAudit() {
   return {
-    journalVersion: 1 as const,
+    journalVersion: 2 as const,
     operation: "create" as const,
     sourceHeadSha: SHA,
     candidateSelectionDigest: DIGEST,
@@ -47,7 +49,7 @@ function completedStep(overrides: Record<string, unknown> = {}) {
   return {
     sequence: 1,
     phase: "normal",
-    operation: "create-draft",
+    operation: "create",
     preRead: {
       outcome: "not-applicable",
       requestId: null,
@@ -71,9 +73,9 @@ function snapshotState(id = 88) {
   return {
     iid: id,
     webUrl: `https://gitlab.example.test/project/-/merge_requests/${String(id)}`,
-    title: "Draft: [fix][app] Deterministic journal",
+    title: "[fix][app] Deterministic journal",
     description: "Description\n",
-    draft: true,
+    draft: false,
     state: "opened" as const,
     sourceProjectId: "100",
     sourceBranch: "fix/journal",
@@ -118,7 +120,7 @@ function externalContextSnapshot(): ExternalContextSnapshot {
     mergeRequest: {
       iid: 88,
       authorUserId: author.id,
-      lifecycle: "draft",
+      lifecycle: "ready",
       labelIds: [label.id],
       assigneeUserId: assignee.id,
       reviewerUserIds: [reviewer.id],
@@ -138,7 +140,7 @@ function externalContextSnapshot(): ExternalContextSnapshot {
   };
 }
 
-test("an empty transaction audit has an exact frozen V1 JCS contract", () => {
+test("an empty transaction audit has an exact frozen journal-version-2 JCS contract", () => {
   const input = emptyAudit();
   const audit = validateTransactionAudit(input);
 
@@ -167,7 +169,7 @@ test("an empty transaction audit has an exact frozen V1 JCS contract", () => {
 test("transaction audit validation rejects extra fields and malformed scalar contracts", () => {
   for (const value of [
     { ...emptyAudit(), extra: true },
-    { ...emptyAudit(), journalVersion: 2 },
+    { ...emptyAudit(), journalVersion: 1 },
     { ...emptyAudit(), operation: "delete" },
     { ...emptyAudit(), sourceHeadSha: "not-a-sha" },
     { ...emptyAudit(), candidateSelectionDigest: "not-a-digest" },
@@ -184,6 +186,9 @@ test("transaction audit validation rejects malformed steps and non-consecutive s
     { ...completedStep(), sequence: 2 },
     { ...completedStep(), phase: "other" },
     { ...completedStep(), operation: "delete-mr" },
+    { ...completedStep(), operation: "create-draft" },
+    { ...completedStep(), operation: "mark-ready" },
+    { ...completedStep(), phase: "compensation" },
     { ...completedStep(), mutation: { outcome: "confirmed", requestId: "bad\r\nid" } },
     {
       ...completedStep(),
@@ -212,13 +217,13 @@ test("transaction audit validation rejects malformed steps and non-consecutive s
 test("a confirmed mutation with a matching readback derives a written result", () => {
   const audit = validateTransactionAudit({
     ...emptyAudit(),
-    finalState: "draft-proven",
+    finalState: "partial",
     steps: [completedStep()],
   });
 
   assert.deepEqual(remoteWriteFromTransactionAudit(audit), {
     state: "written",
-    operations: ["create-draft"],
+    operations: ["create"],
   });
 });
 
@@ -243,11 +248,11 @@ test("a confirmed mutation followed by a failed read remains auditable and unkno
   });
   assert.deepEqual(remoteWriteFromTransactionAudit(audit), {
     state: "unknown",
-    operations: ["create-draft"],
+    operations: ["create"],
   });
 });
 
-test("journal snapshots use the same exact V1 contract", () => {
+test("journal snapshots use the same exact journal contract", () => {
   const journal = new TransactionJournal("create", SHA, DIGEST);
   assert.deepEqual(journal.snapshot(), validateTransactionAudit(emptyAudit()));
 });
@@ -291,75 +296,128 @@ test("a rejected mutation and a failed pre-read do not count as remote writes", 
   });
 });
 
-test("a proven compensation is distinguished from an unproven compensation", () => {
-  const journal = new TransactionJournal("update", SHA, DIGEST);
-  const normal = journal.start("normal", "mark-ready", snapshotState(), "ready-pre-read");
-  normal.mutation("unknown", "mark-ready-request");
-  normal.readFailed("mark-ready-read");
+test("final state complete requires description-write as the last matched step", () => {
+  const prefix = () => {
+    const journal = new TransactionJournal("create", SHA, DIGEST);
+    const create = journal.start("normal", "create", null);
+    create.mutation("confirmed", "create-request");
+    create.readSucceeded("create-read", snapshotState());
+    create.postcondition("matched");
+    for (const operation of ["labels-add", "fields-write"] as const) {
+      const step = journal.start("normal", operation, snapshotState(), `${operation}-pre-read`);
+      step.mutation("confirmed", `${operation}-request`);
+      step.readSucceeded(`${operation}-read`, snapshotState());
+      step.postcondition("matched");
+    }
+    return journal;
+  };
 
-  const compensation = journal.start("compensation", "mark-draft", snapshotState(), "draft-pre-read");
-  compensation.mutation("confirmed", "mark-draft-request");
-  compensation.readSucceeded("mark-draft-read", snapshotState());
-  compensation.postcondition("matched");
-  const fields = journal.start("compensation", "compensation-fields", snapshotState(), "fields-pre-read");
+  const incomplete = prefix();
+  incomplete.setFinalState("complete");
+  assert.throws(() => incomplete.snapshot(), /final state complete requires description-write/i);
+  incomplete.setFinalState("partial");
+  assert.deepEqual(remoteWriteFromTransactionAudit(incomplete.snapshot()), {
+    state: "written",
+    operations: ["create", "labels-add", "fields-write"],
+  });
+
+  const unreadable = prefix();
+  const failedDescription = unreadable.start("normal", "description-write", snapshotState(), "description-pre-read");
+  failedDescription.mutation("confirmed", "description-request");
+  failedDescription.readFailed("description-read");
+  unreadable.setFinalState("complete");
+  assert.throws(() => unreadable.snapshot(), /final state complete requires description-write/i);
+  unreadable.setFinalState("unknown");
+  assert.equal(remoteWriteFromTransactionAudit(unreadable.snapshot()).state, "unknown");
+
+  const complete = prefix();
+  const description = complete.start("normal", "description-write", snapshotState(), "description-pre-read");
+  description.mutation("unknown", "description-request");
+  description.readSucceeded("description-read", snapshotState());
+  description.postcondition("matched");
+  complete.setFinalState("complete");
+  const audit = complete.snapshot();
+  assert.equal(audit.finalState, "complete");
+  assert.equal(audit.recoveredUnknownOutcome, true);
+  assert.deepEqual(remoteWriteFromTransactionAudit(audit), {
+    state: "written",
+    operations: ["create", "labels-add", "fields-write", "description-write"],
+  });
+});
+
+test("partial requires a matched normal write and not-started forbids any possible write", () => {
+  const journal = new TransactionJournal("update", SHA, DIGEST);
+  const labels = journal.start("normal", "labels-add", snapshotState(), "labels-pre-read");
+  labels.mutation("confirmed", "labels-request");
+  labels.readFailed("labels-read");
+  journal.setFinalState("partial");
+  assert.throws(() => journal.snapshot(), /partial final state requires a matched remote write/i);
+  journal.setFinalState("not-started");
+  assert.throws(() => journal.snapshot(), /not-started cannot contain a possible remote write/i);
+  journal.setFinalState("unknown");
+  assert.deepEqual(remoteWriteFromTransactionAudit(journal.snapshot()), {
+    state: "unknown",
+    operations: ["labels-add"],
+  });
+
+  const matched = new TransactionJournal("update", SHA, DIGEST);
+  const fields = matched.start("normal", "fields-write", snapshotState(), "fields-pre-read");
   fields.mutation("confirmed", "fields-request");
   fields.readSucceeded("fields-read", snapshotState());
   fields.postcondition("matched");
-  const description = journal.start("compensation", "compensation-description", snapshotState(), "description-pre-read");
-  description.mutation("confirmed", "description-request");
-  description.readSucceeded("description-read", snapshotState());
-  description.postcondition("matched");
-  journal.setFinalState("compensated-draft");
-  assert.deepEqual(remoteWriteFromTransactionAudit(journal.snapshot()), {
-    state: "compensated",
-    operations: ["mark-ready", "mark-draft", "compensation-fields", "compensation-description"],
+  matched.setFinalState("partial");
+  assert.deepEqual(remoteWriteFromTransactionAudit(matched.snapshot()), {
+    state: "written",
+    operations: ["fields-write"],
   });
-
-  const failedJournal = new TransactionJournal("update", SHA, DIGEST);
-  const failedReady = failedJournal.start("normal", "mark-ready", snapshotState(), "ready-pre-read");
-  failedReady.mutation("unknown", "mark-ready-request");
-  failedReady.readFailed("mark-ready-read");
-  const failedDraft = failedJournal.start(
-    "compensation",
-    "mark-draft",
-    snapshotState(),
-    "failed-draft-pre-read",
-  );
-  failedDraft.mutation("confirmed", "failed-draft-request");
-  failedDraft.readSucceeded("failed-draft-read", snapshotState());
-  failedDraft.postcondition("matched");
-  const failed = failedJournal.start(
-    "compensation",
-    "compensation-description",
-    snapshotState(),
-    "failed-description-pre-read",
-  );
-  failed.mutation("confirmed", "description-request");
-  failed.readFailed("description-read");
-  failedJournal.setFinalState("unknown");
-  assert.equal(remoteWriteFromTransactionAudit(failedJournal.snapshot()).state, "unknown");
 });
 
-test("mark-ready seals later normal or recovery mutations but permits reads and compensation", () => {
+test("failure receipts derive the failed operation and field from the incomplete step", () => {
   const journal = new TransactionJournal("create", SHA, DIGEST);
-  journal.start("normal", "mark-ready", snapshotState());
+  const create = journal.start("normal", "create", null);
+  create.mutation("confirmed", "create-request");
+  create.readSucceeded("create-read", snapshotState());
+  create.postcondition("matched");
+  const labels = journal.start("normal", "labels-add", snapshotState(), "labels-pre-read");
+  labels.mutation("unknown", "labels-request");
+  labels.readFailed("labels-read");
+  journal.setFinalState("unknown");
+  const audit = journal.snapshot();
+  const webUrl = "https://gitlab.example.test/project/-/merge_requests/88";
 
-  assert.throws(
-    () => journal.start("normal", "description-write", snapshotState()),
-    /closed after mark-ready/i,
-  );
-  assert.throws(
-    () => journal.start("recovery", "labels-add", snapshotState()),
-    /closed after mark-ready|phase.*operation/i,
-  );
-  assert.doesNotThrow(() => {
-    const query = journal.start("recovery", "create-outcome-query", null);
-    query.readSucceeded("query-read", snapshotState());
-    query.postcondition("matched");
+  const derived = new Error("labels unknown");
+  attachTransactionFailure(derived, { audit, iid: 88, webUrl, completedSteps: ["create"], retry: "update" });
+  assert.deepEqual(getTransactionFailureReceipt(derived), {
+    receiptVersion: 1,
+    iid: 88,
+    iidUnavailable: false,
+    webUrl,
+    webUrlUnavailable: false,
+    completedSteps: ["create"],
+    failedOperation: "labels-add",
+    failedField: "mergeRequest.labels",
+    retryCommand: "harness-mrtool update 88 --input - --non-interactive --output json",
   });
-  assert.doesNotThrow(() => {
-    journal.start("compensation", "mark-draft", snapshotState());
-  });
+
+  for (const [failedOperation, failedField] of [
+    ["create", "mergeRequest"],
+    ["labels-remove", "mergeRequest.labels"],
+    ["fields-write", "mergeRequest.fields"],
+    ["description-write", "mergeRequest.description"],
+    ["create-outcome-query", "mergeRequest.createOutcome"],
+    ["verification-receipt-stage", "verificationReceipt"],
+  ] as const) {
+    const error = new Error(failedOperation);
+    attachTransactionFailure(error, {
+      audit, iid: 88, webUrl: null, completedSteps: ["create"], retry: "verify", failedOperation,
+    });
+    const receipt = getTransactionFailureReceipt(error);
+    assert.equal(receipt?.failedOperation, failedOperation);
+    assert.equal(receipt?.failedField, failedField);
+    assert.equal(receipt?.webUrlUnavailable, true);
+    assert.equal(receipt?.retryCommand, "harness-mrtool verify 88 --level structure --output json");
+  }
+  assert.equal(getTransactionFailureReceipt({}), null);
 });
 
 test("create-outcome-query is structurally read-only", () => {
@@ -371,24 +429,23 @@ test("create-outcome-query is structurally read-only", () => {
 test("transaction phase and operation pairs cannot disguise a normal write", () => {
   const journal = new TransactionJournal("create", SHA, DIGEST);
   for (const [phase, operation] of [
+    ["recovery", "create"],
     ["recovery", "labels-add"],
+    ["recovery", "description-write"],
     ["normal", "create-outcome-query"],
-    ["compensation", "mark-ready"],
-    ["compensation", "labels-add"],
-    ["normal", "compensation-description"],
   ] as const) {
     assert.throws(
       () => journal.start(phase, operation, snapshotState()),
       /phase.*operation|operation.*phase/i,
     );
   }
-  assert.doesNotThrow(() => journal.start("normal", "mark-draft", snapshotState()));
-  assert.doesNotThrow(() => journal.start("compensation", "mark-draft", snapshotState()));
+  assert.doesNotThrow(() => journal.start("normal", "create", null));
+  assert.doesNotThrow(() => journal.start("recovery", "create-outcome-query", null));
 });
 
 test("a read-only create outcome query records an empty successful result after unknown create", () => {
   const journal = new TransactionJournal("create", SHA, DIGEST);
-  const create = journal.start("normal", "create-draft", null);
+  const create = journal.start("normal", "create", null);
   create.mutation("unknown", "unknown-create");
   const query = journal.start("recovery", "create-outcome-query", null);
   query.readResultSucceeded("query-request", []);
@@ -403,7 +460,7 @@ test("a read-only create outcome query records an empty successful result after 
 
 test("a recorder cannot overwrite an earlier mutation or read receipt", () => {
   const journal = new TransactionJournal("create", SHA, DIGEST);
-  const recorder = journal.start("normal", "create-draft", snapshotState(), "first-pre-read");
+  const recorder = journal.start("normal", "create", snapshotState(), "first-pre-read");
   assert.throws(() => recorder.preReadSucceeded("second-pre-read", snapshotState(89)), /already recorded/i);
   assert.throws(() => recorder.preReadFailed("third-pre-read"), /already recorded/i);
   recorder.mutation("confirmed", "first-write");
@@ -423,7 +480,7 @@ test("transaction audit validation rejects impossible operation histories", () =
   ) => completedStep({
     sequence,
     operation,
-    ...(operation === "create-draft" || operation === "create-outcome-query"
+    ...(operation === "create" || operation === "create-outcome-query"
       ? {}
       : {
           preRead: {
@@ -435,86 +492,64 @@ test("transaction audit validation rejects impossible operation histories", () =
     ...overrides,
   });
 
+  const unknownCreate = (sequence = 1) => step(sequence, "create", {
+    mutation: { outcome: "unknown", requestId: "unknown-create" },
+    postRead: { outcome: "failed", requestId: "failed-create-read", snapshotDigest: null },
+    postcondition: "unavailable",
+  });
+  const recoveryQuery = (sequence: number, postcondition = "mismatched") =>
+    step(sequence, "create-outcome-query", { phase: "recovery", mutation: null, postcondition });
+
   const impossible = [
+    // a create audit must begin with create
+    { ...emptyAudit(), finalState: "partial", steps: [step(1, "labels-add")] },
+    // an update audit cannot create a merge request
+    { ...emptyAudit(), operation: "update", finalState: "partial", steps: [step(1, "create")] },
+    // create is unique and first
+    { ...emptyAudit(), finalState: "partial", steps: [step(1, "create"), step(2, "create")] },
+    // normal operation order cannot run backwards
     {
       ...emptyAudit(),
-      finalState: "ready-proven",
-      steps: [
-        step(1, "mark-ready"),
-        step(2, "description-write"),
-      ],
+      finalState: "partial",
+      steps: [step(1, "create"), step(2, "fields-write"), step(3, "labels-add")],
     },
+    // normal operations cannot repeat
     {
       ...emptyAudit(),
-      finalState: "draft-proven",
-      steps: [step(1, "mark-ready")],
+      operation: "update",
+      finalState: "partial",
+      steps: [step(1, "fields-write"), step(2, "fields-write")],
     },
+    // the recovery query cannot precede the unknown create it recovers
     {
       ...emptyAudit(),
-      finalState: "compensated-draft",
-      steps: [
-        step(1, "mark-ready"),
-        step(2, "mark-draft", { phase: "compensation" }),
-      ],
-    },
-    {
-      ...emptyAudit(),
-      finalState: "draft-proven",
+      finalState: "partial",
       recoveredUnknownOutcome: true,
-      steps: [
-        step(1, "create-outcome-query", { phase: "recovery", mutation: null }),
-        step(2, "create-draft", { mutation: { outcome: "unknown", requestId: "unknown-create" } }),
-      ],
+      steps: [recoveryQuery(1, "matched"), unknownCreate(2)],
     },
-    {
-      ...emptyAudit(),
-      finalState: "unknown",
-      steps: [],
-    },
-    {
-      ...emptyAudit(),
-      operation: "update",
-      finalState: "unknown",
-      steps: [
-        step(1, "fields-write"),
-        step(2, "compensation-fields", { phase: "compensation" }),
-        step(3, "compensation-description", { phase: "compensation" }),
-      ],
-    },
-    {
-      ...emptyAudit(),
-      operation: "update",
-      finalState: "draft-proven",
-      steps: [
-        step(1, "fields-write"),
-        step(2, "fields-write"),
-      ],
-    },
-    {
-      ...emptyAudit(),
-      finalState: "unknown",
-      steps: [
-        step(1, "create-draft", {
-          mutation: { outcome: "unknown", requestId: "unknown-create" },
-          postRead: { outcome: "failed", requestId: "failed-create-read", snapshotDigest: null },
-          postcondition: "unavailable",
-        }),
-        step(2, "create-outcome-query", {
-          phase: "recovery",
-          mutation: null,
-          postcondition: "mismatched",
-        }),
-        step(3, "fields-write"),
-      ],
-    },
+    // an unknown create must be recovered before any later normal step
+    { ...emptyAudit(), finalState: "unknown", steps: [unknownCreate(), recoveryQuery(2), step(3, "fields-write")] },
+    // the recovery query cannot repeat
+    { ...emptyAudit(), finalState: "unknown", steps: [unknownCreate(), recoveryQuery(2), recoveryQuery(3)] },
+    // a recovery query cannot follow a confirmed create
+    { ...emptyAudit(), finalState: "partial", steps: [step(1, "create"), recoveryQuery(2)] },
+    // an update audit has no create to recover
+    { ...emptyAudit(), operation: "update", finalState: "unknown", steps: [recoveryQuery(1)] },
+    // only create may mutate without a successful pre-read
     {
       ...emptyAudit(),
       operation: "update",
       finalState: "unknown",
-      steps: [
-        step(1, "compensation-fields", { phase: "compensation" }),
-      ],
+      steps: [step(1, "labels-add", {
+        preRead: { outcome: "failed", requestId: null, snapshotDigest: null },
+        postRead: { outcome: "not-attempted", requestId: null, snapshotDigest: null },
+        postcondition: "unavailable",
+      })],
     },
+    // unknown requires a possible remote write
+    { ...emptyAudit(), finalState: "unknown", steps: [] },
+    // not-started forbids any possible remote write
+    { ...emptyAudit(), finalState: "not-started", steps: [step(1, "create")] },
   ];
 
   for (const [index, audit] of impossible.entries()) {
@@ -523,16 +558,22 @@ test("transaction audit validation rejects impossible operation histories", () =
 });
 
 test("final states cannot claim proof without a matching successful step", () => {
-  for (const finalState of ["draft-proven", "ready-proven", "compensated-draft"] as const) {
+  for (const finalState of ["partial", "complete", "unknown"] as const) {
     assert.throws(
       () => validateTransactionAudit({ ...emptyAudit(), finalState }),
       /final state/i,
     );
   }
+  const descriptionWrite = (postcondition: "matched" | "mismatched") => completedStep({
+    sequence: 2,
+    operation: "description-write",
+    preRead: { outcome: "succeeded", requestId: "pre-read-2", snapshotDigest: "d".repeat(64) },
+    postcondition,
+  });
   assert.throws(
     () => validateTransactionAudit({
       ...emptyAudit(),
-      finalState: "ready-proven",
+      finalState: "complete",
       steps: [completedStep()],
     }),
     /final state/i,
@@ -540,11 +581,27 @@ test("final states cannot claim proof without a matching successful step", () =>
   assert.throws(
     () => validateTransactionAudit({
       ...emptyAudit(),
-      finalState: "compensated-draft",
-      steps: [completedStep()],
+      finalState: "complete",
+      steps: [completedStep(), descriptionWrite("mismatched")],
     }),
     /final state/i,
   );
+  assert.throws(
+    () => validateTransactionAudit({
+      ...emptyAudit(),
+      finalState: "partial",
+      steps: [completedStep({
+        postRead: { outcome: "failed", requestId: "failed-read", snapshotDigest: null },
+        postcondition: "unavailable",
+      })],
+    }),
+    /final state/i,
+  );
+  assert.doesNotThrow(() => validateTransactionAudit({
+    ...emptyAudit(),
+    finalState: "complete",
+    steps: [completedStep(), descriptionWrite("matched")],
+  }));
 });
 
 test("recovered unknown outcome must be proven exactly by the recorded steps", () => {
@@ -558,14 +615,14 @@ test("recovered unknown outcome must be proven exactly by the recorded steps", (
   assert.throws(
     () => validateTransactionAudit({
       ...emptyAudit(),
-      finalState: "draft-proven",
+      finalState: "partial",
       steps: [unknownMatched],
     }),
     /recovered unknown/i,
   );
   assert.doesNotThrow(() => validateTransactionAudit({
     ...emptyAudit(),
-    finalState: "draft-proven",
+    finalState: "partial",
     recoveredUnknownOutcome: true,
     steps: [unknownMatched],
   }));
@@ -575,7 +632,7 @@ test("recovered unknown outcome must be proven exactly by the recorded steps", (
     recoveredUnknownOutcome: true,
     steps: [
       completedStep({
-        operation: "create-draft",
+        operation: "create",
         mutation: { outcome: "unknown", requestId: "unknown-create" },
         postRead: { outcome: "not-attempted", requestId: null, snapshotDigest: null },
         postcondition: "unavailable",
@@ -592,13 +649,13 @@ test("recovered unknown outcome must be proven exactly by the recorded steps", (
 
 test("journal snapshots are deeply frozen copies isolated from later recording", () => {
   const journal = new TransactionJournal("create", SHA, DIGEST);
-  const recorder = journal.start("normal", "create-draft", null);
+  const recorder = journal.start("normal", "create", null);
   const before = journal.snapshot();
 
   recorder.mutation("confirmed", "create-request");
   recorder.readSucceeded("create-read", snapshotState());
   recorder.postcondition("matched");
-  journal.setFinalState("draft-proven");
+  journal.setFinalState("partial");
   const after = journal.snapshot();
 
   assert.equal(before.finalState, "not-started");
@@ -648,7 +705,7 @@ test("partial failure receipts use an exact token-free identity and retry contra
     iidUnavailable: false,
     webUrl: "https://gitlab.example.test/project/-/merge_requests/88",
     webUrlUnavailable: false,
-    completedSteps: ["create-draft", "labels-add"],
+    completedSteps: ["create", "labels-add"],
     failedOperation: "fields-write",
     failedField: "mergeRequest.fields",
     retryCommand: "harness-mrtool update 88 --input - --non-interactive --output json",
@@ -667,7 +724,9 @@ test("partial failure receipts use an exact token-free identity and retry contra
     { ...valid, webUrl: "http://gitlab.example.test/project/-/merge_requests/88\n" },
     { ...valid, retryCommand: "harness-mrtool update 89 --input - --non-interactive --output json" },
     { ...valid, failedField: `mergeRequest.${"hmrc1_"}${"a".repeat(43)}` },
-    { ...valid, completedSteps: ["create-draft", "create-draft"] },
+    { ...valid, completedSteps: ["create", "create"] },
+    { ...valid, failedOperation: "mark-ready" },
+    { ...valid, failedOperation: "ready-gate" },
   ]) {
     assert.throws(() => validateTransactionFailureReceipt(malformed), /failure receipt/i);
   }
@@ -837,7 +896,7 @@ test("candidate selection digest binds the complete external context snapshot", 
     { ...snapshot, issue: { ...snapshot.issue, iid: 52 } },
     { ...snapshot, labelCandidates: [{ ...snapshot.labelCandidates[0]!, name: "type::bug" }] },
     { ...snapshot, userCandidates: [{ ...snapshot.userCandidates[0]!, displayName: "Changed" }, ...snapshot.userCandidates.slice(1)] },
-    { ...snapshot, mergeRequest: { ...snapshot.mergeRequest, lifecycle: "ready" } },
+    { ...snapshot, mergeRequest: { ...snapshot.mergeRequest, lifecycle: "closed" } },
     { ...snapshot, localChecks: { ...snapshot.localChecks, secretScan: { status: "failed", evidence: "failed" } } },
     { ...snapshot, metadataRead: { status: "unavailable", evidence: "offline" } },
     { ...snapshot, ci: { status: "running" } },

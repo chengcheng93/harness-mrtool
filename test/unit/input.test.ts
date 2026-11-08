@@ -32,7 +32,6 @@ function validRequest(): Record<string, unknown> {
   return {
     schemaVersion: 1,
     contextId: "context:test",
-    intent: "draft",
     profileIds: ["future-profile"],
     targetBranch: "develop",
     title: {
@@ -401,6 +400,13 @@ test("rejects unknown properties at every fixed request object boundary", () => 
   root.unexpected = "secret-value";
   assertInvalidRequest(root);
 
+  // The Draft stage is gone: the retired `intent` field is an unknown property.
+  for (const intent of ["draft", "ready"]) {
+    const legacy = validRequest();
+    legacy.intent = intent;
+    assertInvalidRequest(legacy);
+  }
+
   const nested = validRequest();
   (nested.title as Record<string, unknown>).unexpected = true;
   assertInvalidRequest(nested);
@@ -752,7 +758,7 @@ test("normalizes only declared semantic empties and preserves prose whitespace a
   assert.equal(normalized.verification.items[0]?.command, null);
   assert.equal(normalized.verification.items[0]?.result, "  result passed  ");
 
-  for (const requiredField of ["intent", "targetBranch", "workItem", "risk", "mergeRequest"]) {
+  for (const requiredField of ["targetBranch", "workItem", "risk", "mergeRequest"]) {
     const missing = validRequest();
     delete missing[requiredField];
     assertInvalidRequest(missing);

@@ -12,7 +12,6 @@ import { DEFAULT_LABEL_POOL } from "../../src/app/label-defaults.ts";
 const root = resolve(import.meta.dirname, "../..");
 async function fixture() {
   const raw = JSON.parse(await readFile(resolve(root, "test/golden/fixtures/code-docs-request.json"), "utf8"));
-  raw.intent = "draft";
   raw.title.type = "fix"; // caller type is intentionally not authoritative
   raw.mergeRequest.labelCandidateTokens = [];
   raw.mergeRequest.assigneeCandidateToken = null;
@@ -34,7 +33,7 @@ async function fixture() {
 test("write plan automatically selects fixed pool labels with no caller tokens and overrides misleading title", async () => {
   const data = await fixture();
   const plan = buildWritePlan(data);
-  assert.deepEqual(plan.desired.labelIds.map((id) => data.snapshot.labelCandidates.find((label) => label.id === id)!.name).sort(), ["priority::p2", "status::doing", "type::doc"]);
+  assert.deepEqual(plan.desired.labelIds.map((id) => data.snapshot.labelCandidates.find((label) => label.id === id)!.name).sort(), ["priority::p2", "status::review", "type::doc"]);
   assert.match(plan.desired.title, /docs/u);
 });
 test("omitting canonical diff is rejected at the domain write-plan boundary", async () => {
@@ -49,7 +48,7 @@ test("updating a plan removes old week and unrelated labels so exactly three rem
   const data = await fixture();
   const snapshot = validateExternalContextSnapshot({ ...data.snapshot,
     labelCandidates: [...data.snapshot.labelCandidates, { id: "old-week", name: "week::old" }, { id: "old-manual", name: "manual::keep" }],
-    mergeRequest: { ...data.snapshot.mergeRequest, labelIds: ["old-week", "old-manual"], lifecycle: "draft", iid: 1 },
+    mergeRequest: { ...data.snapshot.mergeRequest, labelIds: ["old-week", "old-manual"], lifecycle: "ready", iid: 1 },
   });
   const plan = buildWritePlan({ ...data, snapshot });
   assert.equal(plan.desired.labelIds.length, 3);

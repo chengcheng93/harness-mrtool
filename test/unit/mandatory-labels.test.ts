@@ -10,19 +10,21 @@ const diff: CanonicalLabelChangeSet = {
 };
 const binding = { sourceHeadSha: diff.sourceHeadSha, targetRefSha: diff.targetRefSha, mergeBaseSha: diff.mergeBaseSha };
 const inventory = DEFAULT_LABEL_POOL.map((name, index) => ({ id: String(index + 1), name }));
-const input = { diff, binding, inventory, intent: "ready" as const };
+const input = { diff, binding, inventory };
 
 test("automatically selects exactly doc/p2/review without any caller title or label tokens", () => {
   const selection = mandatory.selectMandatoryLabels(input);
   assert.deepEqual(selection.names, ["type::doc", "priority::p2", "status::review"]);
   assert.equal(selection.titleType, "docs");
-  assert.deepEqual(selection.ids, ["3", "12", "14"]);
+  assert.deepEqual(selection.ids, ["3", "12", "13"]);
   assert.equal(selection.source, "diff");
   assert.equal(Object.isFrozen(selection.names), true);
 });
-test("Draft defaults to doing and priority is not inferred from sensitive filenames", () => {
-  const selection = mandatory.selectMandatoryLabels({ ...input, intent: "draft" });
-  assert.deepEqual(selection.names, ["type::doc", "priority::p2", "status::doing"]);
+test("the review lifecycle status is fixed and exported; no selection yields a Draft status", () => {
+  assert.equal(mandatory.MANDATORY_STATUS_LABEL, "status::review");
+  const selection = mandatory.selectMandatoryLabels(input);
+  assert.equal(selection.names[2], mandatory.MANDATORY_STATUS_LABEL);
+  assert.equal(selection.names.includes("status::doing"), false);
 });
 test("an explicit priority elevation requires a reason and does not change type selection", () => {
   assert.throws(() => mandatory.selectMandatoryLabels({ ...input, options: { priority: "p0" } }), { code: "LABEL_ERROR" });
@@ -57,10 +59,9 @@ test("invented priority/type and incomplete diff evidence are rejected", () => {
   assert.throws(() => mandatory.selectMandatoryLabels({ ...input, options: { priority: "p9" as never } }), { code: "LABEL_ERROR" });
   assert.throws(() => mandatory.selectMandatoryLabels({ ...input, diff: undefined as never }), { code: "LABEL_ERROR" });
   assert.throws(() => mandatory.selectMandatoryLabels({ ...input, diff: { ...diff, items: [] } }), { code: "LABEL_ERROR" });
-  assert.throws(() => mandatory.selectMandatoryLabels({ ...input, intent: "anything" as never }), { code: "LABEL_ERROR" });
 });
 test("final-label validation rejects week, foreign names, missing/duplicate categories and status drift", () => {
-  assert.doesNotThrow(() => mandatory.assertMandatoryLabelNames(["type::bug", "priority::p2", "status::review"], "ready"));
+  assert.doesNotThrow(() => mandatory.assertMandatoryLabelNames(["type::bug", "priority::p2", "status::review"]));
   for (const names of [
     ["type::bug", "priority::p2"],
     ["type::bug", "priority::p2", "status::review", "week::2026-w36"],
@@ -68,5 +69,5 @@ test("final-label validation rejects week, foreign names, missing/duplicate cate
     ["type::bug", "type::doc", "status::review"],
     ["type::invented", "priority::p2", "status::review"],
     ["type::bug", "priority::p2", "status::doing"],
-  ]) assert.throws(() => mandatory.assertMandatoryLabelNames(names, "ready"), { code: "LABEL_ERROR" });
+  ]) assert.throws(() => mandatory.assertMandatoryLabelNames(names), { code: "LABEL_ERROR" });
 });

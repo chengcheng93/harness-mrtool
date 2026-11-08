@@ -145,8 +145,18 @@ const MANIFEST_FIELDS = new Set([
 const MANIFEST_FILE_FIELDS = new Set(["path", "size", "sha256"]);
 const LOWER_SHA256 = /^[a-f0-9]{64}$/;
 const BUNDLE_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-const REQUEST_SCHEMA_V1_BYTES_SHA256 =
+// Bundles before 1.2.0 carried the request `intent` field; 1.2.0 removed it
+// together with the Draft stage. Each signed generation keeps its exact bytes.
+const REQUEST_SCHEMA_V1_BYTES_SHA256_BEFORE_1_2 =
   "b1b8fd17c81119946abae5c4c30ed7b6b64fca9b72a8bbc939628294ba300e0e";
+const REQUEST_SCHEMA_V1_BYTES_SHA256 =
+  "0328b721e938423e4a215781109839572624f1875f3315e4a67ad643ba6beab2";
+const DIRECT_MERGE_REQUEST_BUNDLE_VERSION = "1.2.0-0";
+
+/** True for template bundles published after the Draft stage was removed. */
+export function bundleCreatesDirectMergeRequests(version: string): boolean {
+  return new SemVer(version, { loose: false }).compare(DIRECT_MERGE_REQUEST_BUNDLE_VERSION) >= 0;
+}
 
 
 
@@ -602,7 +612,10 @@ async function loadVerifiedBundle(
   };
   const markdown = decodeUtf8(payload("layout.md"), "layout.md");
   const schemaBytes = payload("schema.json");
-  if (sha256(schemaBytes) !== REQUEST_SCHEMA_V1_BYTES_SHA256) {
+  const expectedSchemaBytesSha256 = bundleCreatesDirectMergeRequests(manifest.version)
+    ? REQUEST_SCHEMA_V1_BYTES_SHA256
+    : REQUEST_SCHEMA_V1_BYTES_SHA256_BEFORE_1_2;
+  if (sha256(schemaBytes) !== expectedSchemaBytesSha256) {
     throw templateError("request schema payload does not match the exact V1 byte contract");
   }
   const schema = parseBundleJson(schemaBytes, "schema.json");

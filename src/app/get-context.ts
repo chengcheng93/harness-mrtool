@@ -82,7 +82,6 @@ export interface DiscoveredContext {
   readonly userCandidates: readonly ContextUserCandidate[];
   readonly requiredLabelCategories: readonly string[];
   readonly lifecycleLabelNames: {
-    readonly draft: string;
     readonly ready: string;
     readonly merge: string;
   };
@@ -100,7 +99,7 @@ interface PolicyView {
   readonly categories: readonly LabelCategory[];
   readonly lifecycle: {
     readonly statusCategory: string;
-    readonly expectedNames: { readonly draft: string; readonly ready: string; readonly merge: string };
+    readonly expectedNames: { readonly ready: string; readonly merge: string };
   };
 }
 
@@ -150,12 +149,13 @@ function policy(bundle: LoadedTemplateBundle): PolicyView {
   }
   const lifecycle = asObject(labels.lifecycle, "lifecycle");
   const expected = asObject(lifecycle.expectedNames, "lifecycle names");
+  // Bundles before 1.2.0 also declare a draft lifecycle name. The tool no
+  // longer creates Drafts, so that entry is ignored rather than required.
   return Object.freeze({
     categories: Object.freeze(categories),
     lifecycle: Object.freeze({
       statusCategory: nonEmpty(lifecycle.statusCategory, "lifecycle status category"),
       expectedNames: Object.freeze({
-        draft: nonEmpty(expected.draft, "draft lifecycle label"),
         ready: nonEmpty(expected.ready, "ready lifecycle label"),
         merge: nonEmpty(expected.merge, "merge lifecycle label"),
       }),

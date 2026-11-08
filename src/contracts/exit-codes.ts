@@ -4,7 +4,6 @@ export type RemoteWriteState =
   | "not-attempted"
   | "not-written"
   | "written"
-  | "compensated"
   | "unknown";
 
 export interface RemoteWrite {
@@ -24,11 +23,7 @@ export function exitCodeFor({
   if (code === "OK" || code === "UPDATE_CHECK_WARNING") {
     return 0;
   }
-  if (
-    remoteWriteState === "written" ||
-    remoteWriteState === "compensated" ||
-    remoteWriteState === "unknown"
-  ) {
+  if (remoteWriteState === "written" || remoteWriteState === "unknown") {
     return 6;
   }
 
@@ -43,7 +38,7 @@ export function exitCodeFor({
     case "CONCURRENT_UPDATE":
       return 4;
     case "POSTCONDITION_ERROR":
-    case "PARTIAL_DRAFT":
+    case "PARTIAL_WRITE":
     case "PARTIAL_REMOTE_STATE":
       return 6;
     case "INTERNAL_ERROR":

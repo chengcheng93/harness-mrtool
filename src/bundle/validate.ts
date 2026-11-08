@@ -10,7 +10,11 @@ import {
   type JsonValue,
 } from "../contracts/jcs.ts";
 import { COMPOSABLE_PROFILE_ORDER, composeProfiles } from "./compose.ts";
-import { REQUIRED_H2_HEADINGS, type LoadedTemplateBundle } from "./load.ts";
+import {
+  REQUIRED_H2_HEADINGS,
+  bundleCreatesDirectMergeRequests,
+  type LoadedTemplateBundle,
+} from "./load.ts";
 
 const PROFILE_IDS = ["code", "docs", "general", "ops"] as const;
 const TITLE_TYPES = [
@@ -41,8 +45,12 @@ const CHECKBOX_REGISTRY_V1_SHA256 =
   "7de0a2e0bfd867a9670e350d905541371898307cde31f00c7895c439c53d5fdf";
 const LAYOUT_V1_SHA256 =
   "1c505761b5cd3114be41782c3309b292eb064681117d19c3f22b7ebde6cff114";
-const REQUEST_SCHEMA_V1_CANONICAL_SHA256 =
+// Bundles before 1.2.0 required the request `intent` field (Draft/Ready).
+// 1.2.0 removed it together with the Draft stage; both generations stay exact.
+const REQUEST_SCHEMA_V1_CANONICAL_SHA256_BEFORE_1_2 =
   "ee80e940cb4bb97575bd204fc5ab00cfb68da18836cde48a19d766befccb7559";
+const REQUEST_SCHEMA_V1_CANONICAL_SHA256 =
+  "ff3b2692d1d15660977272a9c25487e46316537240ebe4b1d56712c2c6e66e92";
 const FIELD_IDS = [
   "docs.target-audience",
   "docs.content-impact",
@@ -461,8 +469,17 @@ function validatePolicy(bundle: JsonObject): void {
   const lifecycle = asRecord(labels.lifecycle, "label lifecycle");
   exactFields(lifecycle, new Set(["statusCategory", "expectedNames"]), "label lifecycle");
   const expectedNames = asRecord(lifecycle.expectedNames, "lifecycle names");
-  exactFields(expectedNames, new Set(["draft", "ready", "merge"]), "lifecycle names");
-  if (lifecycle.statusCategory !== "status" || expectedNames.draft !== "status::doing" ||
+  // Bundle 1.2 removes the Draft stage: merge requests are created directly,
+  // so the policy no longer names a draft lifecycle label or a draft reviewer
+  // minimum. Earlier signed releases keep their exact contract.
+  const directMergeRequests = bundleCreatesDirectMergeRequests(manifest.version as string);
+  exactFields(
+    expectedNames,
+    new Set(directMergeRequests ? ["ready", "merge"] : ["draft", "ready", "merge"]),
+    "lifecycle names",
+  );
+  if (lifecycle.statusCategory !== "status" ||
+      (!directMergeRequests && expectedNames.draft !== "status::doing") ||
       expectedNames.ready !== "status::review" || expectedNames.merge !== "status::review") {
     throw templateError("lifecycle exact label names are invalid");
   }
@@ -480,11 +497,11 @@ function validatePolicy(bundle: JsonObject): void {
     }
   }
   const review = asRecord(policy.review, "review policy");
-  exactFields(review, new Set([
-    "draftMinimumReviewers", "readyMinimumReviewers", "highRiskMinimumReviewers",
-  ]), "review policy");
-  if (review.draftMinimumReviewers !== 0 || review.readyMinimumReviewers !== 1 ||
-      review.highRiskMinimumReviewers !== 2) {
+  exactFields(review, new Set(directMergeRequests
+    ? ["readyMinimumReviewers", "highRiskMinimumReviewers"]
+    : ["draftMinimumReviewers", "readyMinimumReviewers", "highRiskMinimumReviewers"]), "review policy");
+  if ((!directMergeRequests && review.draftMinimumReviewers !== 0) ||
+      review.readyMinimumReviewers !== 1 || review.highRiskMinimumReviewers !== 2) {
     throw templateError("review defaults are invalid");
   }
 }
@@ -492,7 +509,10 @@ function validatePolicy(bundle: JsonObject): void {
 function validateSchemaVersions(bundle: JsonObject): void {
   const manifest = asRecord(bundle.manifest, "manifest");
   const schema = asRecord(bundle.schema, "request schema");
-  if (sha256CanonicalJson(schema) !== REQUEST_SCHEMA_V1_CANONICAL_SHA256) {
+  const expectedSchemaSha256 = bundleCreatesDirectMergeRequests(manifest.version as string)
+    ? REQUEST_SCHEMA_V1_CANONICAL_SHA256
+    : REQUEST_SCHEMA_V1_CANONICAL_SHA256_BEFORE_1_2;
+  if (sha256CanonicalJson(schema) !== expectedSchemaSha256) {
     throw templateError("request schema does not match the canonical V1 contract");
   }
   const properties = asRecord(schema.properties, "request schema properties");

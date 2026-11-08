@@ -893,9 +893,7 @@ export class GitLabClient {
           squash: input.squash,
           remove_source_branch: input.removeSourceBranch,
         }
-      : input.kind === "description"
-        ? { description: input.description }
-        : { title: input.title };
+      : { description: input.description };
     const response = await this.mutate(
       "PUT",
       `/api/v4/projects/${encodeId(project.id)}/merge_requests/${String(iid)}`,

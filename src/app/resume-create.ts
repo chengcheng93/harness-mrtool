@@ -7,7 +7,7 @@ import type { CanonicalLabelChangeSet } from "../git/change-set.ts";
 import { normalizeAndValidateRequest } from "../input/normalize.ts";
 import { renderDescription } from "../render/markdown.ts";
 import { validateExternalContextSnapshot, verifyDiagnosticMarker, type ExternalContextSnapshot } from "../render/marker.ts";
-import type { CreateDraftInput, RemoteMergeRequest } from "./create-mr.ts";
+import type { CreateMergeRequestInput, RemoteMergeRequest } from "./create-mr.ts";
 import { selectMandatoryLabels, type LabelSelectionOptions } from "./mandatory-labels.ts";
 import { candidateSelectionDigest, remoteSnapshotDigest } from "./transaction-journal.ts";
 import { buildWritePlan, type MergeRequestWritePlan } from "./write-plan.ts";
@@ -30,7 +30,7 @@ export interface PristineCreateResumeInputs {
 /** Only this module can authorize bypassing final-description ownership for resume. */
 export interface PristineCreateResumeAuthorization {
   readonly iid: number;
-  readonly createInput: CreateDraftInput;
+  readonly createInput: CreateMergeRequestInput;
   readonly writePlan: MergeRequestWritePlan;
   readonly originalCandidateSelectionDigest: string;
   readonly currentSnapshotDigest: string;
@@ -57,11 +57,11 @@ function writeIntentDigest(intent: PristineResumeWriteIntent): string {
 }
 
 function denied(reason: string): ToolError<"INPUT_ERROR"> {
-  return new ToolError("INPUT_ERROR", "The provisional Draft cannot be resumed safely", {
+  return new ToolError("INPUT_ERROR", "The provisional merge request cannot be resumed safely", {
     field: "--resume",
     expected: "the original provisional description and a complete transaction prefix, with private proof and fresh equivalent candidate selections",
     actual: reason,
-    safeNextStep: "Preserve the Draft and its original local evidence; refresh context and preview an equivalent request before resuming.",
+    safeNextStep: "Preserve the merge request and its original local evidence; refresh context and preview an equivalent request before resuming.",
   });
 }
 
@@ -138,7 +138,7 @@ export function validatePristineCreateResume(inputs: PristineCreateResumeInputs)
     const effectiveRequest = (raw: Request, binding: ExternalContextSnapshot): Request => {
       const normalized = normalizeAndValidateRequest(raw);
       const selection = selectMandatoryLabels({ diff: inputs.labelDiff, binding,
-        inventory: binding.labelCandidates, intent: normalized.intent,
+        inventory: binding.labelCandidates,
         ...(inputs.labelOptions === undefined ? {} : { options: inputs.labelOptions }) });
       return normalizeAndValidateRequest({ ...normalized,
         title: { ...normalized.title, type: selection.titleType } });
@@ -177,7 +177,7 @@ export function validatePristineCreateResume(inputs: PristineCreateResumeInputs)
     if (!same(oldPlan, writePlan) || marker.writePlanDigest !== sha256CanonicalJson(oldPlan.desired)) {
       throw denied("original and fresh write plans differ");
     }
-    const createInput: CreateDraftInput = {
+    const createInput: CreateMergeRequestInput = {
       title: oldPlan.provisional.title,
       description: renderDescription({ request: originalRequest, snapshot: oldSnapshot, writePlan: oldPlan.desired,
         bundle: inputs.bundle, releaseTag: inputs.releaseTag, cliVersion: original.binding.cliVersion,
@@ -188,20 +188,22 @@ export function validatePristineCreateResume(inputs: PristineCreateResumeInputs)
       removeSourceBranch: oldPlan.provisional.removeSourceBranch,
     };
     const live = current.snapshot.mergeRequest;
+    // Accepted prefixes of an interrupted create: nothing written yet; the full
+    // planned label set without people; the full label set with all people.
     const emptyMetadata = current.assigneeUserId === null && current.reviewerUserIds.length === 0;
-    const completeMetadata = current.assigneeUserId === oldPlan.draft.assigneeUserId &&
-      sameIds(current.reviewerUserIds, oldPlan.draft.reviewerUserIds);
-    const completeLabels = sameIds(current.labelIds, oldPlan.draft.labelIds);
+    const completeMetadata = current.assigneeUserId === oldPlan.desired.assigneeUserId &&
+      sameIds(current.reviewerUserIds, oldPlan.desired.reviewerUserIds);
+    const completeLabels = sameIds(current.labelIds, oldPlan.desired.labelIds);
     const completePrefix = (current.labelIds.length === 0 && emptyMetadata) ||
       (completeLabels && (emptyMetadata || completeMetadata));
     const expectedUrl = `${inputs.binding.gitlabOrigin}/${inputs.binding.targetProject.fullPath}/-/merge_requests/${String(inputs.iid)}`;
     if (current.webUrl !== expectedUrl || current.title !== createInput.title ||
-        current.description !== createInput.description || current.state !== "opened" || !current.draft ||
+        current.description !== createInput.description || current.state !== "opened" || current.draft ||
         current.sourceProjectId !== createInput.sourceProjectId || current.sourceBranch !== createInput.sourceBranch ||
         current.targetProjectId !== createInput.targetProjectId || current.targetBranch !== createInput.targetBranch ||
         current.targetBranch !== inputs.binding.targetBranch || current.sourceHeadSha !== createInput.sourceHeadSha ||
         current.squash !== createInput.squash || current.removeSourceBranch !== createInput.removeSourceBranch ||
-        !completePrefix || live.iid !== inputs.iid || live.lifecycle !== "draft" ||
+        !completePrefix || live.iid !== inputs.iid || live.lifecycle !== "ready" ||
         !sameIds(current.labelIds, live.labelIds) || current.assigneeUserId !== live.assigneeUserId ||
         !sameIds(current.reviewerUserIds, live.reviewerUserIds)) {
       throw denied("the selected MR does not match a complete pre-description transaction prefix");
@@ -216,7 +218,7 @@ export function validatePristineCreateResume(inputs: PristineCreateResumeInputs)
     return authorization;
   } catch (error) {
     if (error instanceof ToolError && error.code === "INPUT_ERROR" && error.details.field === "--resume") throw error;
-    throw denied("the original evidence or provisional Draft could not be verified");
+    throw denied("the original evidence or provisional merge request could not be verified");
   }
 }
 

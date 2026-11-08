@@ -3,7 +3,7 @@
 | 项目 | 内容 |
 | --- | --- |
 | 文档编号 | HMR-ARCH-001 |
-| 对应需求 | HMR-REQ-001 v0.3.0 |
+| 对应需求 | HMR-REQ-001 v0.4.0 |
 | 架构版本 | v0.1.0 |
 | 状态 | Reviewing |
 | 目标平台 | Windows x64 |
@@ -106,7 +106,7 @@ schema show -> profiles list -> context --auth api -> Request -> preview -> crea
 schema show -> profiles list -> manual --auth ssh -> review -> SSH push -> GitLab Web MR
 ```
 
-`manual` 必须显式使用 `--auth ssh`，只生成本地 handoff 和普通分支 push plan。`--ssh-mr` 对所有认证选择均返回 `LABEL_ERROR`，在 push 规划或执行前停止，不能绕过强制标签策略创建基础 MR。Git SSH 传输仍可用于 API 流程之前的普通分支发布。新的事务层从绑定 merge-base/HEAD 的 diff 自动计算类型，默认 `priority::p2`，按 Draft/Ready 选择状态；不再使用排期标签。必须写入并回读恰好三个固定池标签。默认 production 入口已装配 create/update/upsert/verify，交互向导也接入相同自动标签选择器。普通手工 handoff/push 不是已验证 MR。可执行入口的本地实现不等于已发布或真实 GitLab 验收通过。
+`manual` 必须显式使用 `--auth ssh`，只生成本地 handoff 和普通分支 push plan。`--ssh-mr` 对所有认证选择均返回 `LABEL_ERROR`，在 push 规划或执行前停止，不能绕过强制标签策略创建基础 MR。Git SSH 传输仍可用于 API 流程之前的普通分支发布。新的事务层从绑定 merge-base/HEAD 的 diff 自动计算类型，默认 `priority::p2`，状态固定为 `status::review`；不再使用排期标签。必须写入并回读恰好三个固定池标签。默认 production 入口已装配 create/update/upsert/verify，交互向导也接入相同自动标签选择器。普通手工 handoff/push 不是已验证 MR。可执行入口的本地实现不等于已发布或真实 GitLab 验收通过。
 
 context 必须使用当前用户私有目录、原子替换和跨进程锁。Windows 通过 ACL 保障当前用户可读；类 Unix 目标若以后支持则要求 mode `0600`。原始 token 不写日志、marker 或诊断文件。
 
@@ -146,11 +146,11 @@ profiles/general.yml
 
 ### 5.4 标签解析
 
-新 Template Bundle `1.1.0` 的固定池包含 14 个标签：
+新 Template Bundle `1.2.0` 的固定池包含 13 个标签：
 
 - `type::feature`、`type::bug`、`type::doc`、`type::test`、`type::refactor`、`type::performance`、`type::build`、`type::ci`、`type::chore`；
 - `priority::p0`、`priority::p1`、`priority::p2`；
-- `status::doing`、`status::review`。
+- `status::review`。
 
 CLI 从 GitLab 实时读取项目及祖先组库存并解析真实 ID；所需标签必须已存在，
 缺失或仍有歧义则失败关闭，绝不自动创建远端标签定义。
@@ -158,7 +158,7 @@ CLI 从 GitLab 实时读取项目及祖先组库存并解析真实 ID；所需�
 - `type` 基于 canonical actual committed diff，绑定 source HEAD、target SHA、merge-base 和规范化 diff digest，不信任标题/分支名或调用者摘要；
 - 有界分类无法确定类型时必须显式提供类型与匹配 digest，不兜底为 chore；`--type` 标题提示不是确认，过期或冲突确认必须拒绝；
 - `priority` 默认 p2，提升为 p0/p1 必须明确选择并提供非空理由；
-- Draft 使用 `status::doing`，Ready 使用 `status::review`；
+- 每个 MR 都使用 `status::review`；项目不再需要 `status::doing`；
 - 最终恰好三个标签，type/priority/status 各一；新策略拥有完整标签集合，更新移除 week 和池外人工标签，不再保留额外标签；
 - mutation 可通过必要的 ID ADD/REMOVE 达到精确集合替换，不能把最小 mutation 理解为保留额外标签；
 - preview 披露计划，写前重验 diff/库存，写后回读完整集合。自动向导使用同一选择器并收集歧义确认和提优先级理由。
@@ -172,19 +172,14 @@ GitLab 没有 MR 字段 CAS，不能声称无并发窗口。实现采用即时�
 ```mermaid
 stateDiagram-v2
     [*] --> LocalValidated
-    LocalValidated --> DraftCreated: create provisional Draft
-    DraftCreated --> ManagedFieldsWritten: labels / assignee / reviewers
-    ManagedFieldsWritten --> SnapshotRead: read actual GitLab state
-    SnapshotRead --> FinalDescriptionWritten: render final marker and write
-    FinalDescriptionWritten --> StructureVerified: read and verify
-    StructureVerified --> Ready: status label then mark ready
-    StructureVerified --> DraftComplete: draft intent
-    Ready --> FinalReadback: read-only
-    DraftComplete --> FinalReadback: read-only
+    LocalValidated --> Created: create ordinary MR with provisional description
+    Created --> ManagedFieldsWritten: labels / title / assignee / reviewers / options
+    ManagedFieldsWritten --> StructureVerified: read actual state, write final description, read and verify
+    StructureVerified --> FinalReadback: read-only
     FinalReadback --> [*]: success
 ```
 
-`Ready` 是正常流程最后一次远端写操作。切 Ready 前必须已经完成所有可能失败的正文写入和 structure 校验；切换后只做只读回读。任何未知结果都先查询实际状态。若切 Ready 或 lifecycle label 更新形成不一致，执行有界补偿回 Draft + Draft status；补偿无法证明时返回 `PARTIAL_REMOTE_STATE`，不得报告成功。
+最终 description 写入是正常流程最后一次远端写操作：标签同步（`labels-add` / `labels-remove`）和受管字段写入（`fields-write`）都在它之前完成，`description-write` 之后只做只读回读。任何未知结果都先查询实际状态（`create` 自身的未知结果通过 `create-outcome-query` 确认）。MR 已存在、状态可回读但事务未完成时返回 `PARTIAL_WRITE`（退出码 `6`），由 `update <iid>` 或 `create --resume` 继续；无法证明远端状态时返回 `PARTIAL_REMOTE_STATE`。流程中没有草稿/就绪切换，也没有补偿写操作；部分状态不得报告为成功。
 
 `preview` 和 API create/update 的 `--dry-run` 执行计划校验但不推送、不写 GitLab、
 不消费候选 context；实时只读请求仍可发生，不能将 dry-run 当作离线或已完成 MR。
@@ -194,7 +189,7 @@ create context 的 Bundle 不同，当前路径失败关闭并提示 `context --
 后 `update <iid>` 或显式迁移，而不是自动回退当前 Bundle。默认 production
 迁移 adapter 验证旧 receipt 与精确历史 Bundle，绑定迁移 context，并校验
 old:new manifest-hash 显式确认；事务使用目标 Bundle 写入并生成新回执。
-受控生产入口测试覆盖旧 1.0.0 week 策略迁移至 1.1.0；真实 GitLab 验收另行记录。
+受控生产入口测试覆盖旧 1.0.0 week 策略迁移至 1.2.0；真实 GitLab 验收另行记录。
 
 update 默认使用 MR marker 固定的原 Bundle。description 有人工漂移时默认拒绝，只有显式 `--force-replace-description` 才可覆盖受管 description；无合法 marker 的 MR 返回 `UNMANAGED_MR`，V1 不接管。
 
@@ -213,7 +208,7 @@ update 默认使用 MR marker 固定的原 Bundle。description 有人工漂移�
 ### 7.2 历史 Bundle 收据
 
 旧签名 Bundle/policy 在可信证据校验后仍可读取和验证；不能为适配新规则而
-原地改写历史 policy 或将旧 MR 静默重新解释为 `1.1.0`。历史可读性不取消
+原地改写历史 policy 或将旧 MR 静默重新解释为 `1.2.0`。历史可读性不取消
 新写入的三标签后置条件；更换模板必须走显式迁移。
 
 MR marker 可被 MR 作者修改，因此不是信任根。每个 `templates-v*` Immutable Release 必须包含 `bundle-receipt.envelope.json`，其 payload 至少固定：
@@ -313,6 +308,15 @@ SEA 配置固定 `useSnapshot=false`、`useCodeCache=false`、`execArgvExtension
 本地构建可以注入测试 origin/key；正式产物必须固化最终公开 origin 和 production public key，且不得保留任意 URL override。
 
 ## 12. 修订记录
+
+### 工作树更新说明（2026-11-06，未发布）
+
+Bundle `1.2.0` 把固定池收缩为 13 个标签（9 type、3 priority、1 status），每个 MR 都写入
+`status::review`，项目不再需要 `status::doing`。`create` 直接创建标题为
+`[type][module] 摘要` 的普通 MR，随后同步标签、写入受管字段、写入最终 description 并回读；
+没有草稿/就绪切换，也没有补偿写操作。Request 移除 `intent` 字段；`PARTIAL_DRAFT` 改名为
+`PARTIAL_WRITE`（退出码仍为 `6`）；事务审计升级为 `journalVersion: 2`；审核人最少人数不再强制，
+Policy 中的数值只驱动信息性 Review checkbox 和 `verify --level merge` 的审批数检查。
 
 ### 工作树更新说明（2026-09-14，未发布）
 

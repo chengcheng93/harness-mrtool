@@ -6,7 +6,7 @@ import {
   type RemoteReadFailureReason,
 } from "../app/remote-outcome.ts";
 import type {
-  CreateDraftInput,
+  CreateMergeRequestInput,
   ManagedFieldsInput,
   MergeRequestRemote,
   RemoteMergeRequest,
@@ -189,10 +189,10 @@ export class GitLabMergeRequestRemote implements MergeRequestRemote {
     }
   }
 
-  async createDraft(input: CreateDraftInput) {
+  async create(input: CreateMergeRequestInput) {
     try {
-      if (input.targetProjectId !== this.targetProject.id || !input.title.startsWith("Draft:")) {
-        throw new TypeError("Draft create input is not bound to the target project");
+      if (input.targetProjectId !== this.targetProject.id) {
+        throw new TypeError("Create input is not bound to the target project");
       }
       const receipt = await this.gitlab.createMergeRequest(this.targetProject, {
         title: input.title,
@@ -210,7 +210,7 @@ export class GitLabMergeRequestRemote implements MergeRequestRemote {
     }
   }
 
-  async findOpen(input: CreateDraftInput) {
+  async findOpen(input: CreateMergeRequestInput) {
     try {
       if (input.targetProjectId !== this.targetProject.id) throw new TypeError("Target project mismatch");
       const receipt = await this.gitlab.listOpenMergeRequestReceipts(
@@ -267,23 +267,12 @@ export class GitLabMergeRequestRemote implements MergeRequestRemote {
   }
 
   async writeDescription(iid: number, description: string) {
-    return this.updateTitleOrDescription(iid, { kind: "description", description });
+    return this.updateDescription(iid, { kind: "description", description });
   }
 
-  async markReady(iid: number, title: string) {
-    if (title.startsWith("Draft:")) throw new RemoteMutationError("rejected", "validation", null);
-    return this.updateTitleOrDescription(iid, { kind: "title", title });
-  }
-
-  async markDraft(iid: number, title: string) {
-    if (!title.startsWith("Draft:")) throw new RemoteMutationError("rejected", "validation", null);
-    return this.updateTitleOrDescription(iid, { kind: "title", title });
-  }
-
-  private async updateTitleOrDescription(
+  private async updateDescription(
     iid: number,
-    input: { readonly kind: "description"; readonly description: string } |
-      { readonly kind: "title"; readonly title: string },
+    input: { readonly kind: "description"; readonly description: string },
   ) {
     try {
       const receipt = await this.gitlab.updateMergeRequest(this.targetProject, iid, input);

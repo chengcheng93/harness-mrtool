@@ -134,7 +134,6 @@ function requestValue(overrides: {
   return {
     schemaVersion: 1,
     contextId: overrides.contextId ?? CONTEXT,
-    intent: "ready",
     profileIds: ["code"],
     targetBranch: "develop",
     title: { type: "fix", module: "runtime", titleSummary: "Resolve selected candidates" },

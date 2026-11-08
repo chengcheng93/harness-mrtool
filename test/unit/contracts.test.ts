@@ -44,7 +44,7 @@ const EXPECTED_ERROR_CODES = [
   "MANUAL_DESCRIPTION_CHANGE",
   "UNMANAGED_MR",
   "POSTCONDITION_ERROR",
-  "PARTIAL_DRAFT",
+  "PARTIAL_WRITE",
   "PARTIAL_REMOTE_STATE",
   "INTERNAL_ERROR",
 ] as const satisfies readonly ErrorCode[];
@@ -74,7 +74,7 @@ const NOT_WRITTEN_EXIT_CODES: Readonly<Record<"OK" | ErrorCode, number>> = {
   MANUAL_DESCRIPTION_CHANGE: 2,
   UNMANAGED_MR: 2,
   POSTCONDITION_ERROR: 6,
-  PARTIAL_DRAFT: 6,
+  PARTIAL_WRITE: 6,
   PARTIAL_REMOTE_STATE: 6,
   INTERNAL_ERROR: 7,
 };
@@ -93,7 +93,6 @@ for (const [code, expected] of Object.entries(NOT_WRITTEN_EXIT_CODES) as [
 
 for (const remoteWriteState of [
   "written",
-  "compensated",
   "unknown",
 ] as const satisfies readonly RemoteWriteState[]) {
   test(`remote ${remoteWriteState} takes precedence over an input failure`, () => {
@@ -375,7 +374,7 @@ test("output factory snapshots caller-owned nested JSON values", () => {
     field: "labels",
     expected,
     actual: null,
-    safeNextStep: "Inspect the draft MR",
+    safeNextStep: "Inspect the merge request",
   });
   const failure = createFailureOutput(context, error);
 
@@ -394,7 +393,7 @@ test("failure output exposes ToolError details and top-level remote writes", () 
     field: "labels",
     expected: [12, 14],
     actual: [12],
-    safeNextStep: "Inspect the draft MR and retry verification",
+    safeNextStep: "Inspect the merge request and retry verification",
   });
   const output = createFailureOutput(
     {

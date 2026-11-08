@@ -11,7 +11,7 @@ import { bugLabelDiff } from "../helpers/label-diff.ts";
 
 const binding = { sourceHeadSha: "a".repeat(40), targetRefSha: "b".repeat(40), mergeBaseSha: "c".repeat(40) };
 const diff = bugLabelDiff(binding);
-const inventory = ["type::bug", "type::feature", "priority::p2", "priority::p1", "priority::p0", "status::doing", "status::review"]
+const inventory = ["type::bug", "type::feature", "priority::p2", "priority::p1", "priority::p0", "status::review"]
   .map((name, index) => ({ id: String(index + 1), name }));
 const catalog: WizardCatalog = {
   contextId: "context:wizard-labels", issueIid: null, targetBranch: "develop",
@@ -30,7 +30,7 @@ const longForm = {
 };
 
 function journey(options: {
-  catalog?: WizardCatalog; args?: string[]; intent?: number; escalate?: boolean; priority?: number;
+  catalog?: WizardCatalog; args?: string[]; escalate?: boolean; priority?: number;
   reason?: string; type?: string; digest?: string; accept?: boolean; editorFails?: boolean; editorInvalid?: boolean;
   answerShownConfirmation?: boolean; confirmationValues?: Readonly<Record<string, string>>;
 } = {}) {
@@ -43,7 +43,6 @@ function journey(options: {
       shown.push(input); selections.push(input.id);
       if (input.id === "labels.confirm-type") return input.choices.findIndex(({ label }) => label === (options.type ?? "bug"));
       if (input.id === "labels.priority") return options.priority ?? 0;
-      if (input.id === "intent") return options.intent ?? 1;
       return 0;
     },
     selectMany: async (input) => {
@@ -84,18 +83,19 @@ function journey(options: {
     editorCalls: () => editorCalls, closes: () => closes };
 }
 
-for (const [intent, status] of [[0, "status::doing"], [1, "status::review"]] as const) {
-  test(`wizard displays automatic bug/p2/${status} and never offers managed tokens or title type`, async () => {
-    const run = journey({ intent, args: ["preview", "--type", "feat"] });
-    const request = await run.read();
-    assert.equal(request.title.type, "fix");
-    assert.deepEqual(request.mergeRequest.labelCandidateTokens, []);
-    assert.equal(run.selections.some((id) => id.startsWith("labels.") || id === "title.type"), false);
-    const summary = run.shown.find(({ id }) => id === "labels.accept")?.prompt ?? "";
-    for (const expected of ["type::bug", "priority::p2", status, labelDiffDigest(diff)]) assert.ok(summary.includes(expected), expected);
-    assert.equal(run.closes(), 1);
-  });
-}
+test("wizard displays automatic bug/p2/review and never offers managed tokens, a title type or an intent", async () => {
+  const run = journey({ args: ["preview", "--type", "feat"] });
+  const request = await run.read();
+  assert.equal(request.title.type, "fix");
+  assert.equal(Object.hasOwn(request, "intent"), false);
+  assert.deepEqual(request.mergeRequest.labelCandidateTokens, []);
+  assert.equal(run.selections.some((id) => id.startsWith("labels.") || id === "title.type" || id === "intent"), false);
+  assert.equal(run.shown.some(({ id }) => id === "intent"), false);
+  const summary = run.shown.find(({ id }) => id === "labels.accept")?.prompt ?? "";
+  for (const expected of ["type::bug", "priority::p2", "status::review", labelDiffDigest(diff)]) assert.ok(summary.includes(expected), expected);
+  assert.equal(summary.includes("status::doing"), false);
+  assert.equal(run.closes(), 1);
+});
 
 const unknownCatalog: WizardCatalog = { ...catalog, automaticLabels: {
   ...catalog.automaticLabels!, diff: { ...diff, items: [{ status: "modified", newPath: "src/value.ts", binary: false, submodule: false,
@@ -112,20 +112,20 @@ test("ambiguous wizard type is explicitly digest-confirmed and survives the prod
   assert.equal(Object.hasOwn(request, "confirmedType"), false);
   const effective = productionInvocation.labelOptionsForProductionInvocation(run.invocation);
   assert.deepEqual(effective, { confirmedType: "feature", confirmationDigest: labelDiffDigest(unknownCatalog.automaticLabels!.diff) });
-  const selected = selectMandatoryLabels({ ...unknownCatalog.automaticLabels!, intent: request.intent, options: effective });
+  const selected = selectMandatoryLabels({ ...unknownCatalog.automaticLabels!, options: effective });
   assert.deepEqual(selected.names, ["type::feature", "priority::p2", "status::review"]);
 });
 
 for (const [priority, expected] of [[0, "p1"], [1, "p0"]] as const) {
   test(`wizard explicit escalation to ${expected} carries its reason without modifying frozen CLI options`, async () => {
     const run = journey({ escalate: true, priority, reason: "  Customer outage  " });
-    const request = await run.read();
+    await run.read();
     const effective = productionInvocation.labelOptionsForProductionInvocation(run.invocation);
     assert.deepEqual(effective, { priority: expected, priorityReason: "Customer outage" });
     assert.equal(run.invocation.options.priority, null);
     assert.equal(Object.isFrozen(run.invocation.options), true);
     assert.equal(Object.isFrozen(effective), true);
-    assert.deepEqual(selectMandatoryLabels({ ...catalog.automaticLabels!, intent: request.intent, options: effective }).names,
+    assert.deepEqual(selectMandatoryLabels({ ...catalog.automaticLabels!, options: effective }).names,
       ["type::bug", `priority::${expected}`, "status::review"]);
     assert.deepEqual(productionInvocation.labelOptionsForProductionInvocation(parseCliInvocation(["preview"])), {});
   });
@@ -201,7 +201,7 @@ test("stale explicit CLI confirmation is rejected rather than replaced by a wiza
 test("numeric terminal journey confirms an ambiguous diff, escalates priority and produces effective write options", async () => {
   const digest = labelDiffDigest(unknownCatalog.automaticLabels!.diff);
   const answers: Array<[string, string]> = [
-    ["Select work item relation", "1"], ["Select request profiles", "1"], ["Select merge request intent", "2"],
+    ["Select work item relation", "1"], ["Select request profiles", "1"],
     ["Diff type is ambiguous", "1"], ["Type the exact diff digest", digest], ["Automatic labels", "y"],
     ["Select explicit priority escalation", "1"], ["Explain why", "Customer outage"], ["Automatic labels", ""],
     ["Enter title module", "boundary"], ["Enter title summary", "Add boundary handler"],
@@ -229,9 +229,11 @@ test("numeric terminal journey confirms an ambiguous diff, escalates priority an
   const request = await createProductionRequestSource({ stdinIsTerminal: () => true, wizard }).read(invocation);
   const effective = productionInvocation.labelOptionsForProductionInvocation(invocation);
   assert.deepEqual(effective, { confirmedType: "feature", confirmationDigest: digest, priority: "p1", priorityReason: "Customer outage" });
-  assert.deepEqual(selectMandatoryLabels({ ...unknownCatalog.automaticLabels!, intent: request.intent, options: effective }).names,
+  assert.deepEqual(selectMandatoryLabels({ ...unknownCatalog.automaticLabels!, options: effective }).names,
     ["type::feature", "priority::p1", "status::review"]);
   assert.equal(request.title.type, "feat");
+  assert.equal(Object.hasOwn(request, "intent"), false);
+  assert.equal(transcript.some((prompt) => prompt.startsWith("Select merge request intent")), false);
   assert.deepEqual(request.mergeRequest.labelCandidateTokens, []);
   assert.ok(transcript.some((prompt) => prompt.includes("priority::p1") && prompt.includes(digest)));
   assert.deepEqual(answers, []);

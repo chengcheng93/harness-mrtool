@@ -1,7 +1,6 @@
 {
   "schemaVersion": 1,
   "contextId": "context:REPLACE_FROM_CONTEXT_OUTPUT",
-  "intent": "draft",
   "profileIds": [
     "code"
   ],

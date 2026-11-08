@@ -47,9 +47,9 @@ function mergeRequest(
   return {
     iid: 88,
     webUrl: "https://gitlab.example.test/group/project/-/merge_requests/88",
-    title: "Draft: [bug][runtime] Preserve live context",
+    title: "[bug][runtime] Preserve live context",
     description: "body",
-    draft: true,
+    draft: false,
     state: "opened",
     sourceProjectId: "7",
     sourceBranch: "feature/fast-path",
@@ -62,7 +62,7 @@ function mergeRequest(
     labels: [
       { restId: 1, name: "type::bug", archived: false },
       { restId: 2, name: "priority::p2", archived: false },
-      { restId: 3, name: "status::doing", archived: false },
+      { restId: 3, name: "status::review", archived: false },
     ],
     squash: true,
     shouldRemoveSourceBranch: true,
@@ -80,8 +80,7 @@ class LiveContextFixture {
     webUrl: "https://gitlab.example.test/group/project",
   };
   readonly labels: GitLabLabel[] = [
-    label(1, "type::bug"), label(2, "priority::p2"),
-    label(3, "status::doing"), label(4, "status::review"),
+    label(1, "type::bug"), label(2, "priority::p2"), label(3, "status::review"),
   ];
   readonly users: GitLabUser[] = [
     user("40", "author", 30), user("42", "developer", 30),
@@ -357,7 +356,7 @@ test("refreshes Issue and discussion evidence on every supplied-MR context read"
   assert.equal(api.calls.filter((call) => call === "getIssue:7:51").length, 2);
 });
 
-test("detects ambiguity in an unapplied lifecycle label after an earlier successful read", async () => {
+test("detects ambiguity in the applied lifecycle label after an earlier successful read", async () => {
   const api = new LiveContextFixture();
   const options = await readOptions(api, { mergeRequestRead: mergeRequest() });
   await readExternalContext(options);

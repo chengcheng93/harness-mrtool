@@ -5,7 +5,6 @@ export interface RequestIdentity {
   readonly contextId: string;
 }
 
-export type RequestIntent = "draft" | "ready";
 export type ImpactNature = "functional" | "non-functional" | "docs-only";
 export type RiskLevel = "low" | "medium" | "high";
 export type VerificationState = "checked" | "pending" | "not-applicable";
@@ -52,7 +51,6 @@ export type WorkItem =
   | { readonly relation: "none"; readonly noIssueReason: string };
 
 export interface Request extends RequestIdentity {
-  readonly intent: RequestIntent;
   readonly profileIds: readonly string[];
   readonly targetBranch: string;
   readonly title: {

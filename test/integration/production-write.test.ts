@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 import test from "node:test";
 
 import type {
-  CreateDraftInput,
+  CreateMergeRequestInput,
   CreateMergeRequestResult,
   ManagedFieldsInput,
   MergeRequestRemote,
@@ -22,7 +22,7 @@ import {
   candidateSelectionDigest,
   TransactionJournal,
   getTransactionAudit,
-  type TransactionAuditV1,
+  type TransactionAudit,
 } from "../../src/app/transaction-journal.ts";
 import {
   buildVerificationReceipt,
@@ -109,7 +109,6 @@ async function fixture(): Promise<Fixture> {
   rawSnapshot.labelCandidates = [
     { id: "gid://gitlab/ProjectLabel/10", name: "type::bug" },
     { id: "gid://gitlab/ProjectLabel/30", name: "priority::p2" },
-    { id: "gid://gitlab/ProjectLabel/40", name: "status::doing" },
     { id: "gid://gitlab/ProjectLabel/50", name: "status::review" },
   ];
   rawSnapshot.mergeRequest = {
@@ -162,14 +161,14 @@ function existingSnapshot(snapshot: ExternalContextSnapshot, iid = 88): External
   });
 }
 
-function remoteValue(snapshot: ExternalContextSnapshot, draft = false): RemoteMergeRequest {
+function remoteValue(snapshot: ExternalContextSnapshot): RemoteMergeRequest {
   const bound = snapshot.mergeRequest.iid === null ? existingSnapshot(snapshot) : snapshot;
   return Object.freeze({
     iid: bound.mergeRequest.iid ?? 88,
     webUrl: "https://gitlab.example.test/luban/luban-studio/-/merge_requests/88",
-    title: draft ? "Draft: [fix][runtime] Test" : "[fix][runtime] Test",
+    title: "[fix][runtime] Test",
     description: "managed description",
-    draft,
+    draft: false,
     state: "opened",
     sourceProjectId: bound.sourceProject.id,
     sourceBranch: "fix/webengine-css",
@@ -185,32 +184,31 @@ function remoteValue(snapshot: ExternalContextSnapshot, draft = false): RemoteMe
   });
 }
 
+/**
+ * A forged "successful" audit with the real transaction shape: an optional
+ * create, the managed-field write, and the final description write (`complete`).
+ */
 function successfulAudit(
   operation: "create" | "update",
   final: RemoteMergeRequest,
   selectionDigest: string,
-): TransactionAuditV1 {
+): TransactionAudit {
   const journal = new TransactionJournal(operation, final.sourceHeadSha, selectionDigest);
   if (operation === "create") {
-    const created = journal.start("normal", "create-draft", null);
+    const created = journal.start("normal", "create", null);
     created.mutation("confirmed", "req-create");
     created.readSucceeded("req-read-create", final);
     created.postcondition("matched");
-    const description = journal.start("normal", "description-write", final, "req-pre-description");
-    description.mutation("confirmed", "req-description");
-    description.readSucceeded("req-read-description", final);
-    description.postcondition("matched");
-  } else {
-    const fields = journal.start("normal", "fields-write", final, "req-pre-fields");
-    fields.mutation("confirmed", "req-fields");
-    fields.readSucceeded("req-read-fields", final);
-    fields.postcondition("matched");
   }
-  const ready = journal.start("normal", "mark-ready", final, "req-pre-ready");
-  ready.mutation("confirmed", "req-ready");
-  ready.readSucceeded("req-read-ready", final);
-  ready.postcondition("matched");
-  journal.setFinalState("ready-proven");
+  const fields = journal.start("normal", "fields-write", final, "req-pre-fields");
+  fields.mutation("confirmed", "req-fields");
+  fields.readSucceeded("req-read-fields", final);
+  fields.postcondition("matched");
+  const description = journal.start("normal", "description-write", final, "req-pre-description");
+  description.mutation("confirmed", "req-description");
+  description.readSucceeded("req-read-description", final);
+  description.postcondition("matched");
+  journal.setFinalState("complete");
   return journal.snapshot();
 }
 
@@ -229,24 +227,21 @@ function result(
     removeSourceBranch: final.removeSourceBranch,
     squash: final.squash,
   };
-  const draft = { ...desired, title: `Draft: ${final.title}` };
+  const provisional = { ...desired, labelIds: [], assigneeUserId: null, reviewerUserIds: [] };
   return {
     iid: final.iid,
     webUrl: final.webUrl,
     writePlan: {
       writePlanVersion: 1,
-      intent: final.draft ? "draft" : "ready",
-      provisional: draft,
-      draft,
+      provisional,
       desired,
-      draftStatusLabelId: "gid://gitlab/ProjectLabel/40",
-      readyStatusLabelId: "gid://gitlab/ProjectLabel/50",
+      statusLabelId: "gid://gitlab/ProjectLabel/50",
       managedLabelIds: final.labelIds,
       preservedLabelIds: [],
     },
     completedWrites: operation === "create"
-      ? ["create-draft", "description-write", "mark-ready"]
-      : ["fields-write", "mark-ready"],
+      ? ["create", "fields-write", "description-write"]
+      : ["fields-write", "description-write"],
     recoveredUnknownOutcome: false,
     final,
     verification: {
@@ -292,7 +287,6 @@ function durableVerificationFixture(base: Fixture): {
       { id: "gid://gitlab/ProjectLabel/10", name: "week::2026-w32-0803-0809" },
       { id: "gid://gitlab/ProjectLabel/20", name: "type::bug" },
       { id: "gid://gitlab/ProjectLabel/30", name: "priority::p2" },
-      { id: "gid://gitlab/ProjectLabel/40", name: "status::doing" },
       { id: "gid://gitlab/ProjectLabel/50", name: "status::review" },
     ],
   });
@@ -436,12 +430,12 @@ class RecordingRemote implements MergeRequestRemote {
     this.current = remoteValue(snapshot);
   }
 
-  async createDraft(_input: CreateDraftInput) {
-    this.operations.push("mutation:create-draft");
+  async create(_input: CreateMergeRequestInput) {
+    this.operations.push("mutation:create");
     return valueReceipt({ iid: 88 }, "req-create");
   }
 
-  async findOpen(_input: CreateDraftInput) {
+  async findOpen(_input: CreateMergeRequestInput) {
     this.operations.push("read:find-open");
     return valueReceipt(this.open, "req-find");
   }
@@ -464,16 +458,6 @@ class RecordingRemote implements MergeRequestRemote {
   async writeDescription(_iid: number, _description: string) {
     this.operations.push("mutation:write-description");
     return mutationReceipt("req-description");
-  }
-
-  async markReady(_iid: number, _title: string) {
-    this.operations.push("mutation:mark-ready");
-    return mutationReceipt("req-ready");
-  }
-
-  async markDraft(_iid: number, _title: string) {
-    this.operations.push("mutation:mark-draft");
-    return mutationReceipt("req-draft");
   }
 
   async read(_iid: number) {
@@ -526,31 +510,32 @@ class StatefulRemote implements MergeRequestRemote {
     return this.current;
   }
 
-  async findOpen(_input: CreateDraftInput) {
+  async findOpen(_input: CreateMergeRequestInput) {
     this.operations.push("read:find-open");
     return valueReceipt(this.current === null ? [] : [this.current], this.requestId("find"));
   }
 
-  async createDraft(input: CreateDraftInput) {
-    this.operations.push("mutation:create-draft");
+  async create(input: CreateMergeRequestInput) {
+    this.operations.push("mutation:create");
     const snapshot = validateExternalContextSnapshot({
       ...structuredClone(this.initialSnapshot),
       metadataRead: { status: "available", evidence: "MR metadata read." },
       mergeRequest: {
         ...structuredClone(this.initialSnapshot.mergeRequest),
         iid: 88,
-        lifecycle: "draft",
+        lifecycle: "ready",
         labelIds: [],
         assigneeUserId: null,
         reviewerUserIds: [],
       },
     });
+    // The tool creates a normal (non-Draft) merge request with no labels and no people.
     this.current = Object.freeze({
       iid: 88,
       webUrl: "https://gitlab.example.test/luban/luban-studio/-/merge_requests/88",
       title: input.title,
       description: input.description,
-      draft: true,
+      draft: false,
       state: "opened" as const,
       sourceProjectId: input.sourceProjectId,
       sourceBranch: input.sourceBranch,
@@ -602,18 +587,6 @@ class StatefulRemote implements MergeRequestRemote {
     return mutationReceipt(this.requestId("description"));
   }
 
-  async markReady(_iid: number, title: string) {
-    this.operations.push("mutation:mark-ready");
-    this.replace({ title, draft: false });
-    return mutationReceipt(this.requestId("ready"));
-  }
-
-  async markDraft(_iid: number, title: string) {
-    this.operations.push("mutation:mark-draft");
-    this.replace({ title, draft: true });
-    return mutationReceipt(this.requestId("draft"));
-  }
-
   async read(_iid: number) {
     this.operations.push("read:mr");
     this.readSequence += 1;
@@ -623,9 +596,9 @@ class StatefulRemote implements MergeRequestRemote {
   }
 }
 
-function createInput(): CreateDraftInput {
+function createInput(): CreateMergeRequestInput {
   return {
-    title: "Draft: [fix][runtime] Test",
+    title: "[fix][runtime] Test",
     description: "provisional",
     sourceProjectId: "project:100",
     sourceBranch: "fix/webengine-css",
@@ -634,7 +607,18 @@ function createInput(): CreateDraftInput {
     sourceHeadSha: "3".repeat(40),
     squash: true,
     removeSourceBranch: true,
-  } satisfies CreateDraftInput;
+  } satisfies CreateMergeRequestInput;
+}
+
+function managedFieldsInput(): ManagedFieldsInput {
+  return {
+    title: "[fix][runtime] Test",
+    targetBranch: "develop",
+    assigneeUserId: null,
+    reviewerUserIds: [],
+    squash: true,
+    removeSourceBranch: true,
+  };
 }
 
 function candidateStore(
@@ -802,7 +786,7 @@ test("prepared request mutation during an await is rejected before candidate acc
     },
     domain: {
       create: async (input) => {
-        await input.remote.createDraft(createInput());
+        await input.remote.create(createInput());
         return result("create", remote.current, base);
       },
       update: async () => { throw new Error("unused"); },
@@ -831,7 +815,7 @@ test("trusted binding drift after preflight is rejected before consume and mutat
     domain: {
       create: async (input) => {
         await input.remote.findOpen(createInput());
-        await input.remote.createDraft(createInput());
+        await input.remote.create(createInput());
         return result("create", remote.current, base);
       },
       update: async () => { throw new Error("unused"); },
@@ -857,7 +841,7 @@ test("an injected write domain cannot return success without gate, exact audit, 
       const adapter = createMergeRequestCommandAdapter(dependencies(base, operations, {
         domain: {
           create: async (input) => {
-            if (scenario !== "no-gate") await input.remote.createDraft(createInput());
+            if (scenario !== "no-gate") await input.remote.create(createInput());
             const successful = result(
               scenario === "operation" ? "update" : "create",
               remote.current,
@@ -892,7 +876,7 @@ test("an injected write domain cannot return success without gate, exact audit, 
 
 test("write success proof binds each mutation method, outcome, order, and completed write", async (t) => {
   const scenarios = [
-    "only-mark-ready",
+    "only-description-write",
     "wrong-order",
     "duplicate-request-id",
     "rejected",
@@ -906,22 +890,26 @@ test("write success proof binds each mutation method, outcome, order, and comple
       const operations: string[] = [];
       const remote = new RecordingRemote(operations, base.snapshot);
       if (scenario === "duplicate-request-id") {
-        remote.createDraft = async () => {
-          operations.push("mutation:create-draft");
-          return valueReceipt({ iid: 88 }, "req-ready");
+        remote.create = async () => {
+          operations.push("mutation:create");
+          return valueReceipt({ iid: 88 }, "req-description");
+        };
+        remote.writeManagedFields = async () => {
+          operations.push("mutation:write-fields");
+          return mutationReceipt("req-description");
         };
         remote.writeDescription = async () => {
           operations.push("mutation:write-description");
-          return mutationReceipt("req-ready");
+          return mutationReceipt("req-description");
         };
       } else if (scenario === "rejected") {
-        remote.createDraft = async () => {
-          operations.push("mutation:create-draft");
+        remote.create = async () => {
+          operations.push("mutation:create");
           throw new RemoteMutationError("rejected", "validation", "req-create");
         };
       } else if (scenario === "unknown") {
-        remote.createDraft = async () => {
-          operations.push("mutation:create-draft");
+        remote.create = async () => {
+          operations.push("mutation:create");
           throw new UnknownRemoteOutcomeError("unknown create", "req-create");
         };
       }
@@ -931,33 +919,33 @@ test("write success proof binds each mutation method, outcome, order, and comple
             if (scenario === "read-only") {
               await input.remote.findOpen(createInput());
               await input.remote.read(88);
-            } else if (scenario === "only-mark-ready") {
-              await input.remote.markReady(88, "[fix][runtime] Test");
-            } else if (scenario === "wrong-order") {
-              await input.remote.markReady(88, "[fix][runtime] Test");
+            } else if (scenario === "only-description-write") {
               await input.remote.writeDescription(88, "final");
-              await input.remote.createDraft(createInput());
+            } else if (scenario === "wrong-order") {
+              await input.remote.writeDescription(88, "final");
+              await input.remote.writeManagedFields(88, managedFieldsInput());
+              await input.remote.create(createInput());
             } else {
               try {
-                await input.remote.createDraft(createInput());
+                await input.remote.create(createInput());
               } catch {
                 // The injected domain is deliberately trying to turn a failed write into success.
               }
+              await input.remote.writeManagedFields(88, managedFieldsInput());
               await input.remote.writeDescription(88, "final");
-              await input.remote.markReady(88, "[fix][runtime] Test");
             }
             const successful = result("create", remote.current, base);
-            if (scenario === "only-mark-ready" || scenario === "duplicate-request-id") {
+            if (scenario === "only-description-write" || scenario === "duplicate-request-id") {
               const transaction = structuredClone(successful.transaction);
               for (const step of transaction.steps) {
                 if (step.mutation !== null) {
-                  (step.mutation as { requestId: string | null }).requestId = "req-ready";
+                  (step.mutation as { requestId: string | null }).requestId = "req-description";
                 }
               }
               return { ...successful, transaction };
             }
             if (scenario === "completed-order") {
-              return { ...successful, completedWrites: ["mark-ready", "create-draft"] };
+              return { ...successful, completedWrites: ["description-write", "fields-write", "create"] };
             }
             return successful;
           },
@@ -977,32 +965,36 @@ test("unknown create recovery requires the remote reads claimed by the audit", a
   const base = await fixture();
   const operations: string[] = [];
   const remote = new RecordingRemote(operations, base.snapshot);
-  remote.createDraft = async () => {
-    operations.push("mutation:create-draft");
+  remote.create = async () => {
+    operations.push("mutation:create");
     throw new UnknownRemoteOutcomeError("unknown create", "req-create");
   };
   const adapter = createMergeRequestCommandAdapter(dependencies(base, operations, {
     domain: {
       create: async (input) => {
         try {
-          await input.remote.createDraft(createInput());
+          await input.remote.create(createInput());
         } catch {
           // Deliberately omit the recovery query and every mutation readback.
         }
+        await input.remote.writeManagedFields(88, managedFieldsInput());
         await input.remote.writeDescription(88, "final");
-        await input.remote.markReady(88, "[fix][runtime] Test");
         const forged = result("create", remote.current, base);
         const journal = new TransactionJournal(
           "create",
           remote.current.sourceHeadSha,
           forged.transaction.candidateSelectionDigest,
         );
-        const created = journal.start("normal", "create-draft", null);
+        const created = journal.start("normal", "create", null);
         created.mutation("unknown", "req-create");
         const recovery = journal.start("recovery", "create-outcome-query", null);
         recovery.readResultSucceeded("req-recovery", [remote.current]);
         recovery.postcondition("matched");
         journal.markRecoveredUnknown();
+        const fields = journal.start("normal", "fields-write", remote.current, "req-pre-fields");
+        fields.mutation("confirmed", "req-fields");
+        fields.readSucceeded("req-read-fields", remote.current);
+        fields.postcondition("matched");
         const description = journal.start(
           "normal",
           "description-write",
@@ -1012,14 +1004,10 @@ test("unknown create recovery requires the remote reads claimed by the audit", a
         description.mutation("confirmed", "req-description");
         description.readSucceeded("req-read-description", remote.current);
         description.postcondition("matched");
-        const ready = journal.start("normal", "mark-ready", remote.current, "req-pre-ready");
-        ready.mutation("confirmed", "req-ready");
-        ready.readSucceeded("req-read-ready", remote.current);
-        ready.postcondition("matched");
-        journal.setFinalState("ready-proven");
+        journal.setFinalState("complete");
         return {
           ...forged,
-          completedWrites: ["create-draft.recovered", "description-write", "mark-ready"],
+          completedWrites: ["create.recovered", "fields-write", "description-write"],
           recoveredUnknownOutcome: true,
           transaction: journal.snapshot(),
         };
@@ -1055,10 +1043,10 @@ test("write success binds every audit read to the exact remote query trace", asy
       const ids = [
         scenario === "wrong-request-id" ? "req-wrong"
           : scenario === "reused-request-id" ? "req-create" : "req-read-create",
+        "req-pre-fields",
+        "req-read-fields",
         "req-pre-description",
         "req-read-description",
-        "req-pre-ready",
-        "req-read-ready",
       ];
       const values = [scenario === "snapshot-mismatch" ? drifted : final, final, final, final, final];
       if (scenario === "wrong-method") {
@@ -1086,7 +1074,7 @@ test("write success binds every audit read to the exact remote query trace", asy
         domain: {
           create: async (input) => {
             await input.remote.findOpen(createInput());
-            await input.remote.createDraft(createInput());
+            await input.remote.create(createInput());
             if (scenario !== "missing") {
               if (scenario === "wrong-method") {
                 await input.remote.findOpen(createInput());
@@ -1098,18 +1086,18 @@ test("write success binds every audit read to the exact remote query trace", asy
                 }
               }
               if (scenario === "wrong-order") {
-                await input.remote.writeDescription(88, "final");
+                await input.remote.writeManagedFields(88, managedFieldsInput());
                 await input.remote.read(88);
               } else {
                 await input.remote.read(88);
-                await input.remote.writeDescription(88, "final");
+                await input.remote.writeManagedFields(88, managedFieldsInput());
               }
               await input.remote.read(88);
               await input.remote.read(88);
             } else {
-              await input.remote.writeDescription(88, "final");
+              await input.remote.writeManagedFields(88, managedFieldsInput());
             }
-            await input.remote.markReady(88, "[fix][runtime] Test");
+            await input.remote.writeDescription(88, "final");
             if (scenario !== "missing") await input.remote.read(88);
             const forged = result("create", final, base);
             if (scenario === "reused-request-id") {
@@ -1154,9 +1142,17 @@ test("the default create domain satisfies the exact remote query proof", async (
   });
 
   assert.equal(execution.output?.data?.command, "create");
+  assert.equal(execution.output?.data?.lifecycle, "ready");
   assert.equal(execution.context?.remoteWrite?.state, "written");
   assert.equal(remote.operations[0], "read:find-open");
-  assert.equal(remote.operations.some((operation) => operation === "mutation:create-draft"), true);
+  assert.deepEqual(remote.operations.filter((operation) => operation.startsWith("mutation:")), [
+    "mutation:create",
+    "mutation:add-labels",
+    "mutation:write-fields",
+    "mutation:write-description",
+  ]);
+  assert.deepEqual(execution.output?.data?.completedWrites, ["create", "labels-add", "fields-write", "description-write"]);
+  assert.equal(remote.current?.draft, false);
   assert.equal(remote.operations.at(-1), "read:mr");
 });
 
@@ -1179,7 +1175,7 @@ async function pristineAdapterResumeFixture() {
   const remote = new StatefulRemote(writeBase.snapshot);
   const plan = buildWritePlan({ request: originalRequest, snapshot: writeBase.snapshot,
     resolvedCandidates: durable.resolved, bundle: base.bundle, labelDiff: bugLabelDiff(writeBase.snapshot) });
-  await remote.createDraft({ ...createInput(), title: plan.provisional.title,
+  await remote.create({ ...createInput(), title: plan.provisional.title,
     sourceProjectId: base.binding.sourceProject.id, targetProjectId: base.binding.targetProject.id,
     sourceHeadSha: base.binding.sourceHeadSha,
     description: renderDescription({ request: originalRequest, snapshot: writeBase.snapshot,
@@ -1202,7 +1198,7 @@ test("explicit resume preserves the adapter query, consumption, receipt, and upd
   assert.equal(execution.output?.data?.command, "update");
   assert.equal(execution.context?.remoteWrite?.state, "written");
   assert.deepEqual(remote.operations.slice(0, 2), ["read:find-open", "read:mr"]);
-  assert.equal(remote.operations.includes("mutation:create-draft"), false);
+  assert.equal(remote.operations.includes("mutation:create"), false);
   assert.equal(remote.operations.at(-1), "read:mr");
   assert.equal(operations.filter((operation) => operation === "candidate:true").length, 1);
   assert.equal(operations.filter((operation) => operation === "receipt-stage").length, 1);
@@ -1244,7 +1240,7 @@ test("resume blocks domain attempts to create or mutate another IID before candi
     const adapter = createMergeRequestCommandAdapter(dependencies(writeBase, operations, {
       candidateStore: durableCandidateStore(writeBase, operations, resolved),
       domain: { create: async (input) => {
-        if (attempt === "create") await input.remote.createDraft(createInput());
+        if (attempt === "create") await input.remote.create(createInput());
         else await input.remote.addLabels(89, ["gid://gitlab/ProjectLabel/20"]);
         throw new Error("an unauthorized resume mutation reached the transport");
       }, update: async () => { throw new Error("unused"); } },
@@ -1303,11 +1299,11 @@ test("the default create domain binds unknown recovery to its second findOpen", 
 
   assert.deepEqual(remote.operations.slice(0, 3), [
     "read:find-open",
-    "mutation:create-draft",
+    "mutation:create",
     "read:find-open",
   ]);
   assert.equal(execution.output?.data?.recoveredUnknownOutcome, true);
-  assert.equal((execution.output?.data?.completedWrites as readonly string[])[0], "create-draft.recovered");
+  assert.equal((execution.output?.data?.completedWrites as readonly string[])[0], "create.recovered");
 });
 
 test("a default-domain read failure preserves the real partial audit", async () => {
@@ -1334,7 +1330,7 @@ test("a default-domain read failure preserves the real partial audit", async () 
 
   assert.equal(caught instanceof ToolError && caught.code === "PARTIAL_REMOTE_STATE", true);
   assert.equal(getTransactionAudit(caught)?.steps[0]?.postRead.outcome, "failed");
-  assert.deepEqual(remote.operations, ["read:find-open", "mutation:create-draft", "read:mr"]);
+  assert.deepEqual(remote.operations, ["read:find-open", "mutation:create", "read:mr"]);
 });
 
 test("create runs every read precondition before live revalidation, consumption, and the first mutation", async () => {
@@ -1343,23 +1339,23 @@ test("create runs every read precondition before live revalidation, consumption,
   const remote = new RecordingRemote(operations, base.snapshot);
   remote.readRequestIds = [
     "req-read-create",
+    "req-pre-fields",
+    "req-read-fields",
     "req-pre-description",
     "req-read-description",
-    "req-pre-ready",
-    "req-read-ready",
   ];
   const adapter = createMergeRequestCommandAdapter(dependencies(base, operations, {
     domain: {
       create: async (input) => {
         await input.remote.findOpen(createInput());
-        await input.remote.createDraft(createInput());
+        await input.remote.create(createInput());
+        await input.remote.read(88);
+        await input.remote.read(88);
+        await input.remote.writeManagedFields(88, managedFieldsInput());
         await input.remote.read(88);
         await input.verificationReceiptWriter.stageAuthenticated({} as never);
         await input.remote.read(88);
         await input.remote.writeDescription(88, "final");
-        await input.remote.read(88);
-        await input.remote.read(88);
-        await input.remote.markReady(88, "[fix][runtime] Test");
         await input.remote.read(88);
         return result("create", remote.current, base);
       },
@@ -1382,14 +1378,14 @@ test("create runs every read precondition before live revalidation, consumption,
     "live-identities",
     "candidate:false",
     "candidate:true",
-    "mutation:create-draft",
+    "mutation:create",
+    "read:mr",
+    "read:mr",
+    "mutation:write-fields",
     "read:mr",
     "receipt-stage",
     "read:mr",
     "mutation:write-description",
-    "read:mr",
-    "read:mr",
-    "mutation:mark-ready",
     "read:mr",
   ]);
   assert.equal(execution.context?.remoteWrite?.state, "written");
@@ -1427,29 +1423,16 @@ test("zero, one, and many open MR outcomes preserve app-owned upsert semantics w
     const remote = new RecordingRemote(operations, base.snapshot);
     remote.open = Array.from({ length: scenario.count }, () => remote.current);
     remote.readRequestIds = scenario.count === 0
-      ? ["req-read-create", "req-pre-description", "req-read-description", "req-pre-ready", "req-read-ready"]
-      : ["req-initial-update", "req-pre-fields", "req-read-fields", "req-pre-ready", "req-read-ready"];
+      ? ["req-read-create", "req-pre-fields", "req-read-fields", "req-pre-description", "req-read-description"]
+      : ["req-initial-update", "req-pre-fields", "req-read-fields", "req-pre-description", "req-read-description"];
     const adapter = createMergeRequestCommandAdapter(dependencies(base, operations, {
       domain: {
         create: async (input) => {
           const found = await input.remote.findOpen(createInput());
           if (found.value.length === 0) {
-            await input.remote.createDraft(createInput());
-            await input.remote.read(88);
-            await input.remote.read(88);
-            await input.remote.writeDescription(88, "final");
+            await input.remote.create(createInput());
             await input.remote.read(88);
           } else if (found.value.length === 1 && input.upsert === true) {
-            await input.remote.read(88);
-            await input.remote.read(88);
-            await input.remote.writeManagedFields(88, {
-              title: "[fix][runtime] Test",
-              targetBranch: "develop",
-              assigneeUserId: null,
-              reviewerUserIds: [],
-              squash: true,
-              removeSourceBranch: true,
-            });
             await input.remote.read(88);
           } else {
             throw new ToolError("INPUT_ERROR", "Open MR selection is ambiguous", {
@@ -1460,7 +1443,10 @@ test("zero, one, and many open MR outcomes preserve app-owned upsert semantics w
             });
           }
           await input.remote.read(88);
-          await input.remote.markReady(88, "[fix][runtime] Test");
+          await input.remote.writeManagedFields(88, managedFieldsInput());
+          await input.remote.read(88);
+          await input.remote.read(88);
+          await input.remote.writeDescription(88, "final");
           await input.remote.read(88);
           return result(
             found.value.length === 0 ? "create" : "update",
@@ -1500,7 +1486,7 @@ test("preparation and live identity failures leave candidates reusable and perfo
       },
       domain: {
         create: async (input) => {
-          await input.remote.createDraft(createInput());
+          await input.remote.create(createInput());
           return result("create", remote.current, base);
         },
         update: async () => { throw new Error("unused"); },
@@ -1553,8 +1539,8 @@ test("update completes its initial remote read before the shared mutation gate",
     "req-initial-update",
     "req-pre-fields",
     "req-read-fields",
-    "req-pre-ready",
-    "req-read-ready",
+    "req-pre-description",
+    "req-read-description",
   ];
   const adapter = createMergeRequestCommandAdapter(dependencies(base, operations, {
     domain: {
@@ -1572,7 +1558,7 @@ test("update completes its initial remote read before the shared mutation gate",
         });
         await input.remote.read(input.initial.iid);
         await input.remote.read(input.initial.iid);
-        await input.remote.markReady(input.initial.iid, input.initial.title);
+        await input.remote.writeDescription(input.initial.iid, "final");
         await input.remote.read(input.initial.iid);
         return { ...result("update", remote.current, base), forcedDescriptionReplacement: false };
       },
@@ -1594,7 +1580,7 @@ test("update completes its initial remote read before the shared mutation gate",
     "mutation:write-fields",
     "read:mr",
     "read:mr",
-    "mutation:mark-ready",
+    "mutation:write-description",
     "read:mr",
   ]);
   assert.equal(execution.output?.data?.command, "update");
@@ -1606,12 +1592,12 @@ test("write failures retain the original attached transaction audit for output m
   const remote = new RecordingRemote(operations, base.snapshot);
   const failure = new ToolError("PARTIAL_REMOTE_STATE", "Remote state is unknown", {
     field: "mergeRequest",
-    expected: "a proven Draft",
+    expected: "a fully read-back merge request matching the verified write plan",
     actual: "unknown mutation outcome",
     safeNextStep: "Run verify.",
   });
   const journal = new TransactionJournal("create", base.snapshot.sourceHeadSha, "0".repeat(64));
-  const step = journal.start("normal", "create-draft", null);
+  const step = journal.start("normal", "create", null);
   step.mutation("unknown", "req-create");
   step.readFailed("req-read");
   journal.setFinalState("unknown");
@@ -1619,7 +1605,7 @@ test("write failures retain the original attached transaction audit for output m
   const adapter = createMergeRequestCommandAdapter(dependencies(base, operations, {
     domain: {
       create: async (input) => {
-        await input.remote.createDraft(createInput());
+        await input.remote.create(createInput());
         throw failure;
       },
       update: async () => { throw new Error("unused"); },

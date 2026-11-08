@@ -10,7 +10,7 @@ installation-path material.
 | `context` | Resolve real project/group label candidates from the fixed pool; default priority is p2. Existing-MR context requires a trusted exact Bundle. |
 | `preview` | Produce a deterministic write plan without consuming candidates or mutating GitLab. |
 | `manual --auth ssh` | Render a local handoff and ordinary branch push plan only after an explicit human request. `--ssh-mr` is rejected with LABEL_ERROR; no unverified MR creation is allowed. |
-| `create` | Create or upsert a merge request through the verified transaction path. |
+| `create` | Create or upsert a merge request through the verified transaction path: an ordinary MR with a provisional description, then labels, managed fields, the final description, and readback. |
 | `create --resume <iid> --resume-from <original-request>` | Finish a verified provisional transaction prefix using original private proof and an equivalent fresh `--input` request. Never creates another MR. |
 | `update <iid>` | Update an existing merge request with readback and journal evidence. |
 | `verify <iid> --level structure` | Verify stored merge-request state and historical Bundle evidence; `ready` and `merge` request additional checks. |
@@ -40,19 +40,20 @@ fallback when HTTP is unavailable during project discovery.
 work but does not bypass command or trust validation. Tokens and update URLs
 are never accepted as command-line options.
 
-## Mandatory labels (working tree; Bundle 1.1.0)
+## Mandatory labels (working tree; Bundle 1.2.0)
 
 The default production services wire API `create`, `create --upsert`, `update`,
 and `verify`; the interactive wizard uses the same automatic label selector.
-This does not claim a published release or live acceptance. The fixed 14-label
+This does not claim a published release or live acceptance. The fixed 13-label
 pool and examples are documented in [label selection policy](../usage/label-selection-policy.md).
 
 The final MR has exactly one type, one priority, and one lifecycle status label.
 The type uses canonical actual committed-diff evidence bound to source HEAD,
 target SHA, and merge-base—not a title, branch name, or caller-provided summary.
-Draft uses `status::doing`; Ready uses `status::review`. Existing extras, including
-week labels, are removed rather than preserved. Required labels must exist in
-the project/ancestor groups; no command creates remote labels automatically.
+Every MR receives `status::review`; projects no longer need a `status::doing`
+label. Existing extras, including week labels, are removed rather than
+preserved. Required labels must exist in the project/ancestor groups; no
+command creates remote labels automatically.
 
 `create`, `update`, and `preview` accept `--confirm-label-type <suffix>` together
 with `--label-diff-digest <sha256>`. Review the actual diff before confirming an
@@ -77,21 +78,28 @@ an explicit priority escalation reason when needed.
   preview the equivalent request, and pass it through `--input`. Dry-run verifies
   the provisional MR without consuming candidates. Recovery requires the original
   private context, exact request/description/Bundle/diff identity, and a unique
-  matching open Draft. The description must remain exactly the original
-  provisional render. Allowed prefixes are empty labels with no assignee/reviewers;
-  the complete planned Draft label set with no assignee/reviewers; or that same
+  matching open MR that GitLab does not mark as work in progress. The description
+  must remain exactly the original provisional render. Allowed prefixes are empty
+  labels with no assignee/reviewers; the complete planned label set (`type::…`,
+  `priority::…`, `status::review`) with no assignee/reviewers; or that same
   complete set with all planned assignee/reviewer selections. Title, target branch,
-  squash, and source-removal flags must match the original plan. Ready requests
-  still require the Draft lifecycle label here, never the final Ready label.
-  Partial/extra labels, mixed fields, edited or final descriptions are rejected.
-  The normal transaction skips already complete labels and managed fields, then
-  writes the remaining steps. It never creates another MR; `verify` only reads
-  stored state and cannot recover the transaction. Retained expired contexts are read-only proof for at most
+  squash, and source-removal flags must match the original plan. Partial/extra
+  labels, mixed fields, edited or final descriptions are rejected. Half-finished
+  MRs left by older tool versions, whose title still carries the old prefix,
+  cannot be resumed; continue them with `update <iid>`. The normal transaction
+  skips already complete labels and managed fields, then writes the remaining
+  steps. It never creates another MR; `verify` only reads stored state and cannot
+  recover the transaction. Retained expired contexts are read-only proof for at most
   24 hours after expiry and at most 16 contexts. Expired or consumed tokens remain
   invalid for normal writes. Original diff-bound type/priority options also apply.
 - Existing-MR `context --mr <iid>`, `update <iid>`, and `verify <iid>` retain trusted
-  historical Bundle/policy evidence. Old signed policies remain readable; they
-  are not rewritten or retroactively treated as Bundle `1.1.0`.
+  historical Bundle/policy evidence. MRs created with Bundle `1.0.0` or `1.1.0`
+  can still be read, updated, and verified; old signed policies remain readable
+  and are not rewritten or retroactively treated as Bundle `1.2.0`. `update <iid>`
+  syncs the three labels, writes the managed fields, writes the final description,
+  and reads back. Run once on a half-finished MR left by an older tool version, it
+  rewrites the title without the old prefix and applies `status::review`; until
+  then such an MR fails `verify` on its labels.
 - `update <iid> --migrate-template` is the explicit migration route; its production
   adapter verifies the previous receipt and exact historical Bundle, consumes a
   migration-bound context, and requires `--confirm-migration <oldHash>:<newHash>`.

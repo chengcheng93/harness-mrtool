@@ -371,7 +371,7 @@ export function createFailureOutput(
     "MANUAL_DESCRIPTION_CHANGE",
     "UNMANAGED_MR",
     "POSTCONDITION_ERROR",
-    "PARTIAL_DRAFT",
+    "PARTIAL_WRITE",
     "PARTIAL_REMOTE_STATE",
     "INTERNAL_ERROR",
   ] as const satisfies readonly FailureCode[];

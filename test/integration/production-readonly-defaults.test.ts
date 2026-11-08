@@ -191,7 +191,6 @@ test("default TTY wizard issues one context through the same readonly planner wi
   };
   const selected: Readonly<Record<string, number>> = {
     "workItem.relation": 1,
-    intent: 1,
     "labels.priority": 2,
     "impact.nature": 1,
     "risk.level": 1,
@@ -626,7 +625,10 @@ function repositoryPort(calls: string[]) {
 
 async function historicalBundle(current: TrustedBundleSelection): Promise<LoadedMrBundle> {
   const bundle = structuredClone(current.bundle);
-  (bundle.manifest as { version: string }).version = "1.1.0-beta.1";
+  // The clone keeps the current policy and request-schema shape (no Draft
+  // lifecycle), which the validator only accepts for the 1.2.0 generation; a
+  // 1.2.0 pre-release is still an older release than the published bundle.
+  (bundle.manifest as { version: string }).version = "1.2.0-beta.1";
   validateTemplateBundle(bundle);
   const bundleManifestHash = sha256Utf8(`${canonicalizeJson(bundle.manifest)}\n`);
   return {
@@ -634,7 +636,7 @@ async function historicalBundle(current: TrustedBundleSelection): Promise<Loaded
     marker: { renderPhase: "final" } as LoadedMrBundle["marker"],
     receipt: {} as LoadedMrBundle["receipt"],
     reference: {
-      releaseTag: "templates-v1.1.0-beta.1",
+      releaseTag: "templates-v1.2.0-beta.1",
       bundleId: bundle.manifest.bundleId,
       bundleVersion: bundle.manifest.version,
       bundleManifestHash,

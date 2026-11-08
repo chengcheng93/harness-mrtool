@@ -1,7 +1,6 @@
 {
   "schemaVersion": 1,
   "contextId": "context:render-code-docs",
-  "intent": "ready",
   "profileIds": ["code", "docs"],
   "targetBranch": "develop",
   "title": {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import type { GitLabHttpRequest, GitLabHttpResponse, GitLabHttpTransport } from "../../src/gitlab/http.ts";
 
-const names = ["type::bug", "priority::p2", "status::doing", "status::review"] as const;
+const names = ["type::bug", "priority::p2", "status::review"] as const;
 const author = { id: 42, username: "author", name: "Author", state: "active", access_level: 40 };
 const reviewer = { id: 43, username: "reviewer", name: "Reviewer", state: "active", access_level: 40 };
 type WireObject = Record<string, unknown>;
@@ -93,7 +93,8 @@ export class RealGitLabelTransport implements GitLabHttpTransport {
     if (request.method === "POST" && path === "/api/v4/projects/7/merge_requests") {
       this.writes.push("create");
       this.mr = { ...body, id: 888, project_id: 7, iid: 88, web_url: `${this.project.webUrl}/-/merge_requests/88`,
-        source_project_id: 7, target_project_id: 7, sha: this.sourceSha, state: "opened", draft: true,
+        source_project_id: 7, target_project_id: 7, sha: this.sourceSha, state: "opened",
+        draft: String(body.title).startsWith("Draft:"),
         author, assignees: [], reviewers: [], labels: [], detailed_merge_status: "mergeable",
         should_remove_source_branch: body.remove_source_branch,
         head_pipeline: { sha: this.sourceSha, status: "success" },

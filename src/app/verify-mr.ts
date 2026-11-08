@@ -378,9 +378,6 @@ export function buildVerificationReceipt(inputs: {
     releaseTag: inputs.expected.releaseTag,
     cliVersion: inputs.expected.cliVersion,
     renderPhase: "final",
-    ...(inputs.expected.request.intent === "ready" && snapshot.mergeRequest.lifecycle === "draft"
-      ? { snapshotExpectation: "ready-transition-pending" as const }
-      : {}),
   });
   if (regenerated !== inputs.expected.description || inputs.current.iid < 1 ||
       inputs.current.state !== "opened" || inputs.current.sourceProjectId !== snapshot.sourceProject.id ||
@@ -420,7 +417,9 @@ export function buildVerificationReceipt(inputs: {
     targetBranch: inputs.expected.request.targetBranch,
     sourceHeadSha: snapshot.sourceHeadSha,
     authorUserId: snapshot.mergeRequest.authorUserId,
-    lifecycle: inputs.expected.request.intent,
+    // The tool only produces normal merge requests; "draft" remains readable
+    // for receipts written before the Draft stage was removed.
+    lifecycle: "ready",
     riskLevel: inputs.expected.request.risk.level,
     expected: {
       title: writePlan.title,
@@ -456,7 +455,7 @@ export async function stageVerificationReceipt(
       field: "verificationReceipt",
       expected: "an authenticated, atomically persisted receipt before the final description write",
       actual: "receipt persistence failed",
-      safeNextStep: "Repair the private local state store and retry the MR operation without deleting the Draft.",
+      safeNextStep: "Repair the private local state store and retry the MR operation without deleting the merge request.",
     }, cause);
   }
   return receipt;
@@ -489,7 +488,7 @@ function assertCurrentMandatoryLabels(current: RemoteMergeRequest, bundle: Loade
   if (Object.hasOwn(categories, "week")) return;
   try {
     const names = resolveUniqueLiveLabelNames(current.snapshot, current.labelIds);
-    assertMandatoryLabelNames(names, current.draft ? "draft" : "ready");
+    assertMandatoryLabelNames(names);
   } catch { throw verificationError("applied labels violate the mandatory fixed-pool policy"); }
 }
 
@@ -552,33 +551,6 @@ function reviewPolicy(bundle: LoadedTemplateBundle): {
   };
 }
 
-export function assertReadyGate(
-  snapshotValue: ExternalContextSnapshot,
-  request: Request,
-  writePlanValue: DesiredWritePlanSnapshot,
-  bundle: LoadedTemplateBundle,
-): void {
-  validateTemplateBundle(bundle);
-  const snapshot = validateExternalContextSnapshot(snapshotValue);
-  const writePlan = validateDesiredWritePlan(writePlanValue);
-  if (request.intent !== "ready") {
-    throw verificationError("Ready gate requires a Ready-intent Request");
-  }
-  resolveUniqueLiveLabelNames(snapshot, writePlan.labelIds);
-  const policy = reviewPolicy(bundle);
-  const minimum = request.risk.level === "high"
-    ? Math.max(policy.ready, policy.highRisk)
-    : policy.ready;
-  const qualified = snapshot.review.qualifiedReviewerUserIds;
-  const qualifiedReviewers = qualified === null
-    ? null
-    : writePlan.reviewerUserIds.filter((id) =>
-        id !== snapshot.mergeRequest.authorUserId && qualified.includes(id)).length;
-  if (qualifiedReviewers === null || qualifiedReviewers < minimum) {
-    throw verificationError("the latest qualified reviewer selection does not satisfy Ready Policy");
-  }
-}
-
 function assertStructure(inputs: VerifyMergeRequestInputs): {
   readonly currentSnapshot: ExternalContextSnapshot;
   readonly expectedSnapshot: ExternalContextSnapshot;
@@ -595,7 +567,6 @@ function assertStructure(inputs: VerifyMergeRequestInputs): {
   assertCurrentMandatoryLabels(inputs.current, inputs.bundle);
   const expectedSnapshot = validateExternalContextSnapshot(inputs.expected.snapshot);
   const writePlan = validateDesiredWritePlan(inputs.expected.writePlan);
-  const expectedLifecycle = inputs.expected.request.intent;
   const currentLifecycle = inputs.current.draft ? "draft" : "ready";
   const regenerated = renderDescription({
     request: inputs.expected.request,
@@ -605,9 +576,6 @@ function assertStructure(inputs: VerifyMergeRequestInputs): {
     releaseTag: inputs.expected.releaseTag,
     cliVersion: inputs.expected.cliVersion,
     renderPhase: "final",
-    ...(inputs.expected.request.intent === "ready" && expectedSnapshot.mergeRequest.lifecycle === "draft"
-      ? { snapshotExpectation: "ready-transition-pending" as const }
-      : {}),
   });
   if (inputs.current.description !== inputs.expected.description ||
       inputs.current.description !== regenerated ||
@@ -621,7 +589,7 @@ function assertStructure(inputs: VerifyMergeRequestInputs): {
       inputs.current.targetBranch !== inputs.expected.request.targetBranch ||
       inputs.current.sourceHeadSha !== expectedSnapshot.sourceHeadSha ||
       inputs.current.title !== writePlan.title ||
-      currentLifecycle !== expectedLifecycle ||
+      currentLifecycle !== "ready" ||
       !sameIds(inputs.current.labelIds, writePlan.labelIds) ||
       inputs.current.assigneeUserId !== writePlan.assigneeUserId ||
       !sameIds(inputs.current.reviewerUserIds, writePlan.reviewerUserIds) ||
@@ -644,18 +612,13 @@ export function verifyMergeRequest(inputs: VerifyMergeRequestInputs): MergeReque
   const { currentSnapshot } = assertStructure(inputs);
   const policy = reviewPolicy(inputs.bundle);
   const qualified = currentSnapshot.review.qualifiedReviewerUserIds;
-  const qualifiedReviewers = qualified === null
-    ? null
-    : inputs.current.reviewerUserIds.filter((id) => qualified.includes(id)).length;
+  // Reviewers are never required to open a merge request. The approval
+  // threshold below only applies to the merge level.
   const minimum = inputs.expected.request.risk.level === "high"
     ? Math.max(policy.ready, policy.highRisk)
     : policy.ready;
-  if (inputs.level !== "structure" && inputs.expected.request.intent !== "ready") {
-    throw verificationError("ready and merge verification require a Ready-intent MR");
-  }
-  if (inputs.level === "ready" &&
-      (qualifiedReviewers === null || qualifiedReviewers < minimum)) {
-    throw verificationError("the current qualified reviewer selection does not satisfy Ready Policy");
+  if (inputs.level !== "structure" && inputs.current.draft) {
+    throw verificationError("ready and merge verification require a merge request that is not a Draft");
   }
   const qualifiedApprovals = qualified === null
     ? null
@@ -756,15 +719,8 @@ function verifyStoredLiveGate(
     ? Math.max(policy.ready, policy.highRisk)
     : policy.ready;
   const qualified = snapshot.review.qualifiedReviewerUserIds;
-  const qualifiedReviewers = qualified === null
-    ? null
-    : current.reviewerUserIds.filter((id) =>
-        id !== receipt.authorUserId && qualified.includes(id)).length;
-  if (level !== "structure" && receipt.lifecycle !== "ready") {
-    throw verificationError("ready and merge verification require a Ready receipt");
-  }
-  if (level === "ready" && (qualifiedReviewers === null || qualifiedReviewers < minimum)) {
-    throw verificationError("the current qualified reviewer selection does not satisfy Ready Policy");
+  if (level !== "structure" && (receipt.lifecycle !== "ready" || current.draft)) {
+    throw verificationError("ready and merge verification require a merge request that is not a Draft");
   }
   const qualifiedApprovals = qualified === null
     ? null

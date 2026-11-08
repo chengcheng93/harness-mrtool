@@ -26,27 +26,21 @@ export interface RemoteTransactionSnapshot {
 }
 
 export type TransactionOperation = "create" | "update";
-export type TransactionFinalState =
-  | "not-started"
-  | "draft-proven"
-  | "ready-proven"
-  | "compensated-draft"
-  | "unknown";
-export type TransactionPhase = "normal" | "recovery" | "compensation";
+/**
+ * `complete` means every planned remote write was confirmed by an independent
+ * readback; `partial` means the merge request exists and its current state was
+ * read back, but the transaction stopped before the final description write;
+ * `unknown` means a remote write may have happened but the state could not be
+ * proven. There is no Draft stage and no compensation.
+ */
+export type TransactionFinalState = "not-started" | "partial" | "complete" | "unknown";
+export type TransactionPhase = "normal" | "recovery";
 export type TransactionStepOperation =
-  | "create-draft"
+  | "create"
   | "labels-add"
   | "labels-remove"
   | "fields-write"
   | "description-write"
-  | "lifecycle-status-ready-add"
-  | "lifecycle-status-ready-remove"
-  | "mark-ready"
-  | "mark-draft"
-  | "compensation-labels-add"
-  | "compensation-labels-remove"
-  | "compensation-fields"
-  | "compensation-description"
   | "create-outcome-query";
 
 export interface TransactionMutationAudit {
@@ -64,8 +58,10 @@ export interface TransactionStepAudit {
   readonly postcondition: "matched" | "mismatched" | "unavailable" | "not-applicable";
 }
 
-export interface TransactionAuditV1 {
-  readonly journalVersion: 1;
+export const TRANSACTION_JOURNAL_VERSION = 2 as const;
+
+export interface TransactionAudit {
+  readonly journalVersion: typeof TRANSACTION_JOURNAL_VERSION;
   readonly operation: TransactionOperation;
   readonly sourceHeadSha: string;
   readonly candidateSelectionDigest: string;
@@ -84,33 +80,19 @@ interface MutableStep {
   postcondition: TransactionStepAudit["postcondition"];
 }
 
-const audits = new WeakMap<object, TransactionAuditV1>();
+const audits = new WeakMap<object, TransactionAudit>();
 const failureReceipts = new WeakMap<object, TransactionFailureReceiptV1>();
 const SHA = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u;
 const SHA256 = /^[a-f0-9]{64}$/u;
 const OPERATIONS = new Set<TransactionOperation>(["create", "update"]);
-const FINAL_STATES = new Set<TransactionFinalState>([
-  "not-started",
-  "draft-proven",
-  "ready-proven",
-  "compensated-draft",
-  "unknown",
-]);
-const PHASES = new Set<TransactionPhase>(["normal", "recovery", "compensation"]);
+const FINAL_STATES = new Set<TransactionFinalState>(["not-started", "partial", "complete", "unknown"]);
+const PHASES = new Set<TransactionPhase>(["normal", "recovery"]);
 const STEP_OPERATIONS = new Set<TransactionStepOperation>([
-  "create-draft",
+  "create",
   "labels-add",
   "labels-remove",
   "fields-write",
   "description-write",
-  "lifecycle-status-ready-add",
-  "lifecycle-status-ready-remove",
-  "mark-ready",
-  "mark-draft",
-  "compensation-labels-add",
-  "compensation-labels-remove",
-  "compensation-fields",
-  "compensation-description",
   "create-outcome-query",
 ]);
 const READ_OUTCOMES = new Set<TransactionReadAudit["outcome"]>([
@@ -150,16 +132,6 @@ const STEP_FIELDS = new Set([
 ]);
 const READ_FIELDS = new Set(["outcome", "requestId", "snapshotDigest"]);
 const MUTATION_FIELDS = new Set(["outcome", "requestId"]);
-const COMPENSATION_ONLY = new Set<TransactionStepOperation>([
-  "compensation-labels-add",
-  "compensation-labels-remove",
-  "compensation-fields",
-  "compensation-description",
-]);
-const COMPENSATION_OPERATIONS = new Set<TransactionStepOperation>([
-  "mark-draft",
-  ...COMPENSATION_ONLY,
-]);
 
 export interface TransactionFailureReceiptV1 {
   readonly receiptVersion: 1;
@@ -175,7 +147,6 @@ export interface TransactionFailureReceiptV1 {
 
 export type TransactionFailureOperation =
   | TransactionStepOperation
-  | "ready-gate"
   | "verification-receipt-stage";
 
 const FAILURE_RECEIPT_FIELDS = new Set([
@@ -194,26 +165,14 @@ const SAFE_RETRY_COMMAND = /^harness-mrtool (?:update [1-9][0-9]* --input - --no
 const SECRET_SHAPE = /(?:glpat-[A-Za-z0-9_-]+|github_pat_[A-Za-z0-9_]+|gh[pousr]_[A-Za-z0-9]+|hmr[ctx]1_[A-Za-z0-9_-]+)/iu;
 const FAILURE_OPERATIONS = new Set<TransactionFailureOperation>([
   ...STEP_OPERATIONS,
-  "ready-gate",
   "verification-receipt-stage",
 ]);
 const NORMAL_OPERATION_ORDER = new Map<TransactionStepOperation, number>([
-  ["create-draft", 0],
-  ["mark-draft", 0],
+  ["create", 0],
   ["labels-add", 1],
   ["labels-remove", 2],
   ["fields-write", 3],
   ["description-write", 4],
-  ["lifecycle-status-ready-add", 5],
-  ["lifecycle-status-ready-remove", 6],
-  ["mark-ready", 7],
-]);
-const COMPENSATION_OPERATION_ORDER = new Map<TransactionStepOperation, number>([
-  ["mark-draft", 0],
-  ["compensation-labels-add", 1],
-  ["compensation-labels-remove", 2],
-  ["compensation-fields", 3],
-  ["compensation-description", 4],
 ]);
 
 export interface TransactionReadAudit {
@@ -284,9 +243,7 @@ function assertPhaseOperation(
   phase: TransactionPhase,
   operation: TransactionStepOperation,
 ): void {
-  if ((phase === "recovery") !== (operation === "create-outcome-query") ||
-      (phase === "normal" && COMPENSATION_ONLY.has(operation)) ||
-      (phase === "compensation" && !COMPENSATION_OPERATIONS.has(operation))) {
+  if ((phase === "recovery") !== (operation === "create-outcome-query")) {
     throw contractError("transaction phase and operation are incompatible");
   }
 }
@@ -305,7 +262,7 @@ function exactFields(
 ): void {
   const fields = Object.keys(value);
   if (fields.length !== expected.size || fields.some((field) => !expected.has(field))) {
-    throw contractError(`${subject} fields do not match V1`);
+    throw contractError(`${subject} fields do not match the journal contract`);
   }
 }
 
@@ -373,7 +330,7 @@ function validateStep(value: unknown, sequence: number): TransactionStepAudit {
   const postRead = validateRead(input.postRead, `step ${String(sequence)} post-read`);
   const postcondition = input.postcondition as TransactionStepAudit["postcondition"];
   const preRead = validateRead(input.preRead, `step ${String(sequence)} pre-read`);
-  if (mutation !== null && operation !== "create-draft" && preRead.outcome !== "succeeded") {
+  if (mutation !== null && operation !== "create" && preRead.outcome !== "succeeded") {
     throw contractError(`step ${String(sequence)} mutation requires a successful pre-read`);
   }
   if (["matched", "mismatched"].includes(postcondition) && postRead.outcome !== "succeeded") {
@@ -405,26 +362,22 @@ function replayTransaction(
   steps: readonly TransactionStepAudit[],
 ): void {
   let normalRank = -1;
-  let compensationRank = -1;
-  let compensationStarted = false;
   let sawCreate = false;
   let pendingUnknownCreate = false;
   let sawRecoveryQuery = false;
   const seenNormalOperations = new Set<TransactionStepOperation>();
-  const seenCompensationOperations = new Set<TransactionStepOperation>();
 
   for (const step of steps) {
     if (step.phase === "normal") {
-      if (compensationStarted) throw contractError("normal steps cannot follow compensation");
-      if (operation === "update" && step.operation === "create-draft") {
-        throw contractError("an update audit cannot create a Draft");
+      if (operation === "update" && step.operation === "create") {
+        throw contractError("an update audit cannot create a merge request");
       }
-      if (operation === "create" && !sawCreate && step.operation !== "create-draft") {
-        throw contractError("a create audit must begin with create-draft");
+      if (operation === "create" && !sawCreate && step.operation !== "create") {
+        throw contractError("a create audit must begin with create");
       }
-      if (step.operation === "create-draft") {
+      if (step.operation === "create") {
         if (operation !== "create" || sawCreate || step.sequence !== 1) {
-          throw contractError("create-draft must be the first and unique create step");
+          throw contractError("create must be the first and unique create step");
         }
         sawCreate = true;
         pendingUnknownCreate = step.mutation?.outcome === "unknown" &&
@@ -441,74 +394,38 @@ function replayTransaction(
       }
       seenNormalOperations.add(step.operation);
       normalRank = rank;
-    } else if (step.phase === "recovery") {
+    } else {
       const previous = steps[step.sequence - 2];
       if (operation !== "create" || !pendingUnknownCreate || sawRecoveryQuery ||
-          previous?.operation !== "create-draft" || previous.mutation?.outcome !== "unknown") {
+          previous?.operation !== "create" || previous.mutation?.outcome !== "unknown") {
         throw contractError("create recovery must immediately follow an unknown create");
       }
       sawRecoveryQuery = true;
       if (step.postRead.outcome === "succeeded" && step.postcondition === "matched") {
         pendingUnknownCreate = false;
       }
-    } else {
-      compensationStarted = true;
-      const rank = COMPENSATION_OPERATION_ORDER.get(step.operation);
-      if (rank === undefined || rank < compensationRank) {
-        throw contractError("compensation operation order is invalid");
-      }
-      if (seenCompensationOperations.has(step.operation)) {
-        throw contractError("compensation operations cannot repeat");
-      }
-      seenCompensationOperations.add(step.operation);
-      compensationRank = rank;
     }
   }
 
-  const matched = steps.filter(isMatchedWrite);
   const last = steps.at(-1);
-  if (steps.some((step) => step.phase === "compensation") &&
-      !steps.some((step) => step.phase === "normal" && step.mutation !== null &&
-        ["confirmed", "unknown"].includes(step.mutation.outcome))) {
-    throw contractError("compensation requires a possible normal remote write");
-  }
-  if (finalState === "not-started" && steps.some((step) =>
-    step.mutation !== null && ["confirmed", "unknown"].includes(step.mutation.outcome))) {
+  const possibleWrite = steps.some((step) =>
+    step.mutation !== null && ["confirmed", "unknown"].includes(step.mutation.outcome));
+  if (finalState === "not-started" && possibleWrite) {
     throw contractError("not-started cannot contain a possible remote write");
   }
-  if (finalState === "unknown" && !steps.some((step) =>
-    step.mutation !== null && ["confirmed", "unknown"].includes(step.mutation.outcome))) {
+  if (finalState === "unknown" && !possibleWrite) {
     throw contractError("unknown final state requires a possible remote write");
   }
-  if (finalState === "draft-proven" && !matched.some((step) =>
-    step.phase === "normal" && step.operation !== "mark-ready")) {
-    throw contractError("final state draft-proven lacks a matched Draft-preserving write");
+  if (finalState === "partial" && !steps.some((step) => step.phase === "normal" && isMatchedWrite(step))) {
+    throw contractError("partial final state requires a matched remote write");
   }
-  if (finalState === "draft-proven" && matched.some((step) => step.operation === "mark-ready")) {
-    throw contractError("final state draft-proven cannot follow a matched Ready transition");
-  }
-  if (finalState === "ready-proven" &&
-      !(last?.phase === "normal" && last.operation === "mark-ready" && isMatchedWrite(last))) {
-    throw contractError("final state ready-proven requires mark-ready as the final matched step");
-  }
-  if (finalState === "compensated-draft") {
-    const fields = steps.find((step) => step.phase === "compensation" &&
-      step.operation === "compensation-fields" && isMatchedWrite(step));
-    if (fields === undefined || !(last?.phase === "compensation" &&
-        last.operation === "compensation-description" && isMatchedWrite(last))) {
-      throw contractError("final state compensated-draft requires complete fields and description proof");
-    }
-  }
-  const completeCompensation = steps.some((step) => step.phase === "compensation" &&
-    step.operation === "compensation-fields" && isMatchedWrite(step)) &&
-    last?.phase === "compensation" && last.operation === "compensation-description" &&
-    isMatchedWrite(last);
-  if (completeCompensation && finalState !== "compensated-draft") {
-    throw contractError("complete compensation proof requires compensated-draft final state");
+  if (finalState === "complete" &&
+      !(last?.phase === "normal" && last.operation === "description-write" && isMatchedWrite(last))) {
+    throw contractError("final state complete requires description-write as the final matched step");
   }
 }
 
-export function validateTransactionAudit(value: unknown): TransactionAuditV1 {
+export function validateTransactionAudit(value: unknown): TransactionAudit {
   let copied: unknown;
   try {
     copied = copyJsonValue(value);
@@ -517,7 +434,7 @@ export function validateTransactionAudit(value: unknown): TransactionAuditV1 {
   }
   const input = record(copied, "audit");
   exactFields(input, AUDIT_FIELDS, "audit");
-  if (input.journalVersion !== 1 ||
+  if (input.journalVersion !== TRANSACTION_JOURNAL_VERSION ||
       !OPERATIONS.has(input.operation as TransactionOperation) ||
       typeof input.sourceHeadSha !== "string" || !SHA.test(input.sourceHeadSha) ||
       typeof input.candidateSelectionDigest !== "string" || !SHA256.test(input.candidateSelectionDigest) ||
@@ -529,29 +446,21 @@ export function validateTransactionAudit(value: unknown): TransactionAuditV1 {
   const steps = input.steps.map((step, index) => validateStep(step, index + 1));
   const finalState = input.finalState as TransactionFinalState;
   replayTransaction(input.operation as TransactionOperation, finalState, steps);
-  const matchedMutation = (operation?: TransactionStepOperation) => steps.some((step) =>
-    (operation === undefined || step.operation === operation) &&
-    step.mutation !== null && ["confirmed", "unknown"].includes(step.mutation.outcome) &&
-    step.postRead.outcome === "succeeded" && step.postcondition === "matched");
   const recoveredUnknownOutcome = steps.some((step, index) =>
     step.mutation?.outcome === "unknown" &&
     ((step.postRead.outcome === "succeeded" && step.postcondition === "matched") ||
-     (step.operation === "create-draft" && steps.slice(index + 1).some((later) =>
+     (step.operation === "create" && steps.slice(index + 1).some((later) =>
        later.phase === "recovery" && later.operation === "create-outcome-query" &&
        later.postRead.outcome === "succeeded" && later.postcondition === "matched"))));
-  if ((finalState === "draft-proven" && !matchedMutation()) ||
-      (finalState === "ready-proven" && !matchedMutation("mark-ready")) ||
-      (finalState === "compensated-draft" && !steps.some((step) =>
-        step.phase === "compensation" && step.mutation !== null &&
-        ["confirmed", "unknown"].includes(step.mutation.outcome) &&
-        step.postRead.outcome === "succeeded" && step.postcondition === "matched"))) {
+  if (finalState === "complete" && !steps.some((step) =>
+    step.operation === "description-write" && isMatchedWrite(step))) {
     throw contractError("final state is not proven by the recorded steps");
   }
   if (input.recoveredUnknownOutcome !== recoveredUnknownOutcome) {
     throw contractError("recovered unknown outcome is not proven exactly by the recorded steps");
   }
   return deepFreeze({
-    journalVersion: 1,
+    journalVersion: TRANSACTION_JOURNAL_VERSION,
     operation: input.operation as TransactionOperation,
     sourceHeadSha: input.sourceHeadSha,
     candidateSelectionDigest: input.candidateSelectionDigest,
@@ -573,11 +482,7 @@ export function remoteWriteFromTransactionAudit(value: unknown): RemoteWrite {
       operations: Object.freeze([]),
     });
   }
-  const state = audit.finalState === "compensated-draft"
-    ? "compensated"
-    : audit.finalState === "draft-proven" || audit.finalState === "ready-proven"
-      ? "written"
-      : "unknown";
+  const state = audit.finalState === "complete" || audit.finalState === "partial" ? "written" : "unknown";
   return Object.freeze({ state, operations: Object.freeze(operations) });
 }
 
@@ -642,7 +547,7 @@ function deepFreeze<T>(value: T): T {
   return value;
 }
 
-function snapshotAudit(value: TransactionAuditV1): TransactionAuditV1 {
+function snapshotAudit(value: TransactionAudit): TransactionAudit {
   return validateTransactionAudit(value);
 }
 
@@ -650,7 +555,6 @@ export class TransactionJournal {
   private readonly steps: MutableStep[] = [];
   private finalState: TransactionFinalState = "not-started";
   private recoveredUnknownOutcome = false;
-  private normalWritesClosed = false;
 
   constructor(
     private readonly operation: TransactionOperation,
@@ -669,12 +573,6 @@ export class TransactionJournal {
     preReadRequestId: unknown = undefined,
   ): TransactionStepRecorder {
     assertPhaseOperation(phase, operation);
-    if (phase !== "compensation" && this.normalWritesClosed && operation !== "create-outcome-query") {
-      throw new TypeError("Normal transaction writes are closed after mark-ready begins");
-    }
-    if (phase === "normal" && operation === "mark-ready") {
-      this.normalWritesClosed = true;
-    }
     const step: MutableStep = {
       sequence: this.steps.length + 1,
       phase,
@@ -700,10 +598,6 @@ export class TransactionJournal {
     if (step.operation === "create-outcome-query") {
       throw new TypeError("The create-outcome-query operation is read-only");
     }
-    const markReadyStep = step.phase === "normal" && step.operation === "mark-ready";
-    if (this.normalWritesClosed && step.phase !== "compensation" && !markReadyStep) {
-      throw new TypeError("Normal transaction writes are closed after mark-ready begins");
-    }
   }
 
   markRecoveredUnknown(): void {
@@ -718,9 +612,9 @@ export class TransactionJournal {
     this.finalState = value;
   }
 
-  snapshot(): TransactionAuditV1 {
+  snapshot(): TransactionAudit {
     return snapshotAudit({
-      journalVersion: 1,
+      journalVersion: TRANSACTION_JOURNAL_VERSION,
       operation: this.operation,
       sourceHeadSha: this.sourceHeadSha,
       candidateSelectionDigest: this.selectionDigest,
@@ -744,7 +638,7 @@ export class TransactionStepRecorder {
     if (this.step.mutation !== null) {
       throw new TypeError("Transaction mutation receipt is already recorded");
     }
-    if (this.step.operation !== "create-draft" && this.step.preRead.outcome !== "succeeded") {
+    if (this.step.operation !== "create" && this.step.preRead.outcome !== "succeeded") {
       throw new TypeError("Transaction mutation requires a successful pre-read receipt");
     }
     this.step.mutation = Object.freeze({ outcome, requestId: safeRequestId(requestId) });
@@ -814,13 +708,13 @@ export class TransactionStepRecorder {
   }
 }
 
-export function attachTransactionAudit(error: unknown, audit: TransactionAuditV1): void {
+export function attachTransactionAudit(error: unknown, audit: TransactionAudit): void {
   if ((typeof error === "object" || typeof error === "function") && error !== null) {
     audits.set(error, snapshotAudit(audit));
   }
 }
 
-export function getTransactionAudit(error: unknown): TransactionAuditV1 | null {
+export function getTransactionAudit(error: unknown): TransactionAudit | null {
   if ((typeof error !== "object" && typeof error !== "function") || error === null) return null;
   return audits.get(error) ?? null;
 }
@@ -835,15 +729,9 @@ export function attachTransactionFailureReceipt(
 }
 
 function failedField(operation: TransactionFailureOperation): string {
-  if (["labels-add", "labels-remove", "lifecycle-status-ready-add", "lifecycle-status-ready-remove",
-    "compensation-labels-add", "compensation-labels-remove"].includes(operation)) {
-    return "mergeRequest.labels";
-  }
-  if (["fields-write", "compensation-fields"].includes(operation)) return "mergeRequest.fields";
-  if (["description-write", "compensation-description"].includes(operation)) {
-    return "mergeRequest.description";
-  }
-  if (["mark-ready", "mark-draft", "ready-gate"].includes(operation)) return "mergeRequest.lifecycle";
+  if (operation === "labels-add" || operation === "labels-remove") return "mergeRequest.labels";
+  if (operation === "fields-write") return "mergeRequest.fields";
+  if (operation === "description-write") return "mergeRequest.description";
   if (operation === "verification-receipt-stage") return "verificationReceipt";
   if (operation === "create-outcome-query") return "mergeRequest.createOutcome";
   return "mergeRequest";
@@ -852,7 +740,7 @@ function failedField(operation: TransactionFailureOperation): string {
 export function attachTransactionFailure(
   error: unknown,
   input: {
-    readonly audit: TransactionAuditV1;
+    readonly audit: TransactionAudit;
     readonly iid: number | null;
     readonly webUrl: string | null;
     readonly completedSteps: readonly string[];

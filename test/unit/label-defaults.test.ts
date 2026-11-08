@@ -3,13 +3,14 @@ import test from "node:test";
 
 import { DEFAULT_LABEL_POOL, defaultLabelNames } from "../../src/app/label-defaults.ts";
 
-test("exposes the fixed 14-label pool without week labels", () => {
+test("exposes the fixed 13-label pool without week or Draft status labels", () => {
   assert.deepEqual(DEFAULT_LABEL_POOL, [
     "type::feature", "type::bug", "type::doc", "type::test", "type::refactor",
     "type::performance", "type::build", "type::ci", "type::chore",
-    "priority::p0", "priority::p1", "priority::p2", "status::doing", "status::review",
+    "priority::p0", "priority::p1", "priority::p2", "status::review",
   ]);
   assert.equal(DEFAULT_LABEL_POOL.some((name) => name.startsWith("week::")), false);
+  assert.deepEqual(DEFAULT_LABEL_POOL.filter((name) => name.startsWith("status::")), ["status::review"]);
 });
 
 test("defaults to p2 and does not select week labels", () => {

@@ -57,7 +57,7 @@ async function setup(t: test.TestContext) {
     createMergeRequest: async (_target: unknown, input: GitLabCreateMergeRequestInput) => {
       state.writes.push("create");
       state.mr = { iid: 88, webUrl: `${project.webUrl}/-/merge_requests/88`, title: input.title, description: input.description,
-        draft: true, state: "opened", sourceProjectId: "7", sourceBranch: "feature/labels", targetProjectId: "7", targetBranch: "develop",
+        draft: input.title.startsWith("Draft:"), state: "opened", sourceProjectId: "7", sourceBranch: "feature/labels", targetProjectId: "7", targetBranch: "develop",
         sha: sourceSha, author: user, assignees: [], reviewers: [], labels: [], squash: true, shouldRemoveSourceBranch: true, pipelineStatus: "passed" };
       if (state.driftAfterCreate) state.drift = true;
       return receipt({ iid: 88 });
@@ -72,7 +72,6 @@ async function setup(t: test.TestContext) {
     updateMergeRequest: async (_target: unknown, _iid: number, input: GitLabUpdateMergeRequestInput) => {
       state.writes.push(input.kind);
       state.mr = input.kind === "description" ? { ...state.mr!, description: input.description }
-        : input.kind === "title" ? { ...state.mr!, title: input.title, draft: input.title.startsWith("Draft:") }
         : { ...state.mr!, title: input.title, draft: input.title.startsWith("Draft:"), targetBranch: input.targetBranch,
           assignees: input.assigneeIds.map((id) => id === 42 ? user : reviewer), reviewers: input.reviewerIds.map((id) => id === 42 ? user : reviewer),
           squash: input.squash, shouldRemoveSourceBranch: input.removeSourceBranch };
@@ -88,7 +87,6 @@ async function setup(t: test.TestContext) {
   const repository = { discover: async () => repo, readChangeSet: async () => ({ ...diff, sourceHeadSha: state.drift ? "c".repeat(40) : sourceSha }),
     planPush: async () => ({ kind: state.sourceMissing ? "missing" as const : "up-to-date" as const, remote: "origin", ref: repo.sourceRemoteRef, sourceHeadSha: sourceSha, remoteSha: state.sourceMissing ? null : sourceSha, command: state.sourceMissing ? `git push --no-force origin ${sourceSha}:${repo.sourceRemoteRef}` : null }) };
   const raw = JSON.parse(await readFile(resolve(root, "test/golden/fixtures/code-docs-request.json"), "utf8"));
-  raw.intent = "draft";
   raw.workItem = { relation: "none", noIssueReason: "A self-contained maintenance change." };
   raw.mergeRequest.labelCandidateTokens = [];
   const contextStore = new CandidateContextStore({ stateDirectory, windowsAclVerifier: allowTestAcl });
@@ -124,7 +122,6 @@ async function setup(t: test.TestContext) {
         wizardConsole: {
           selectOne: async ({ id, choices }) => {
             prompts.push(id);
-            if (id === "intent") return 0;
             if (id === "workItem.relation") return 0;
             if (id === "impact.nature") return 1;
             if (id === "risk.level") return 1;
@@ -171,8 +168,10 @@ test("production main default create writes and reads back exactly three automat
   const f = await setup(t); await f.issue();
   const result = await f.run(["create"]);
   assert.equal(result.code, 0, result.stdout + result.stderr);
-  assert.deepEqual(f.state.mr!.labels.map((label) => label.name).sort(), ["priority::p2", "status::doing", "type::bug"]);
+  assert.deepEqual(f.state.mr!.labels.map((label) => label.name).sort(), ["priority::p2", "status::review", "type::bug"]);
+  assert.equal(f.state.mr!.draft, false);
   assert.ok(f.state.writes.includes("create"));
+  assert.equal(JSON.parse(result.stdout).data.lifecycle, "ready");
 });
 
 test("production main default create rejects missing p2 with zero mutations", async (t) => {
@@ -190,7 +189,7 @@ test("production main default update and verify use the durable receipt and exac
   assert.equal(updated.code, 0, updated.stdout + updated.stderr);
   const verified = await f.run(["verify", "88", "--level", "structure"]);
   assert.equal(verified.code, 0, verified.stdout + verified.stderr);
-  assert.deepEqual(f.state.mr!.labels.map((label) => label.name).sort(), ["priority::p2", "status::doing", "type::bug"]);
+  assert.deepEqual(f.state.mr!.labels.map((label) => label.name).sort(), ["priority::p2", "status::review", "type::bug"]);
 });
 
 test("production main rejects ambiguous source intent and stale confirmation before mutation", async (t) => {

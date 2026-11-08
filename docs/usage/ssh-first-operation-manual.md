@@ -74,9 +74,9 @@ harness-mrtool verify <iid> --auth api --level structure --output json
 更新已有受管 MR 时先使用 `context --mr <iid>` 获取更新上下文，再预览和执行
 `update <iid>`，最后 `verify <iid>`。
 
-API 标签规则见[标签选择策略](label-selection-policy.md)：Bundle `1.1.0` 固定
-14 标签池，最终恰好 type/priority/status 各一个；默认 p2，提升至 p0/p1 必须
-提供理由，Draft/Ready 对应 doing/review。更新移除额外标签和 week 标签；
+API 标签规则见[标签选择策略](label-selection-policy.md)：Bundle `1.2.0` 固定
+13 标签池，最终恰好 type/priority/status 各一个；默认 p2，提升至 p0/p1 必须
+提供理由，每个 MR 的 status 固定为 `status::review`。更新移除额外标签和 week 标签；
 所需标签必须已存在，CLI 不会自动创建远端标签。类型来自绑定 HEAD/target/
 merge-base 的真实 canonical diff；未知类型必须显式确认并绑定 CLI digest，
 不能用标题提示代替。向导自动接入相同规则。
@@ -131,6 +131,7 @@ Git 使用 SSH 时，需已有公钥和源项目推送权限，可用 `ssh -T gi
 | `AUTH_ERROR` | API 模式没有可用 Host-scoped Token | 停止并配置 API 凭据，不自动回退 manual/SSH |
 | API 请求失败 | 当前 API 操作失败或结果未证明 | 按输出安全下一步处理，不自动回退 manual/SSH |
 | `REPOSITORY_ERROR` | Remote、权限或分支不满足 | 检查 remote、分支权限和当前 Git 传输配置 |
+| `PARTIAL_WRITE` | MR 已创建且状态已回读，但事务未完成 | 按输出的 safeNextStep 用 `update <iid>` 或 `create --resume` 继续，不要重新 create |
 | `PARTIAL_REMOTE_STATE` | 远端写入结果无法证明 | 先读取远端/MR 状态，不要立即重试 |
 
 ## 验收清单

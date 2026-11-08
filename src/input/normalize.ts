@@ -165,7 +165,6 @@ function normalizeRequestShape(value: JsonValue): JsonValue {
   }
 
   trimScalar(root, "contextId");
-  trimScalar(root, "intent");
   trimScalar(root, "targetBranch");
   trimStringArray(root, "profileIds");
 

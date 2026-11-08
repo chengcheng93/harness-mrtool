@@ -7,7 +7,6 @@
   "required": [
     "schemaVersion",
     "contextId",
-    "intent",
     "profileIds",
     "targetBranch",
     "title",
@@ -25,7 +24,6 @@
   "properties": {
     "schemaVersion": { "const": 1 },
     "contextId": { "$ref": "#/definitions/opaque" },
-    "intent": { "enum": ["draft", "ready"] },
     "profileIds": { "$ref": "#/definitions/nonEmptyIdArray" },
     "targetBranch": { "$ref": "#/definitions/opaque" },
     "title": { "$ref": "#/definitions/title" },

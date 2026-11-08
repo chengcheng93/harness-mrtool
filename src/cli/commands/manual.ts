@@ -136,10 +136,7 @@ function manualLabels(
   const categories = object(labelsPolicy.categories, "label categories");
   const lifecycle = object(labelsPolicy.lifecycle, "label lifecycle");
   const expectedNames = object(lifecycle.expectedNames, "lifecycle names");
-  const expectedStatus = scalar(
-    request.intent === "draft" ? expectedNames.draft : expectedNames.ready,
-    "expected lifecycle label",
-  );
+  const expectedStatus = scalar(expectedNames.ready, "expected lifecycle label");
   const labels: SnapshotLabel[] = [];
   for (const [categoryId, rawCategory] of Object.entries(categories).sort(([left], [right]) => left.localeCompare(right))) {
     const category = object(rawCategory, `label category ${categoryId}`);
@@ -351,7 +348,7 @@ export function createManualCommandServices(
           "labels",
           "API creation with fixed-pool selection and label readback",
           "SSH push options have no verified label inventory/readback",
-          "Use the API create flow; manual remains a draft handoff and cannot create an unlabeled MR.",
+          "Use the API create flow; manual remains a local handoff and cannot create an unlabeled MR.",
         );
       }
       if (invocation.options.authMode !== "ssh") {
@@ -417,7 +414,6 @@ export function createManualCommandServices(
               targetBranch: request.targetBranch,
               title,
               description,
-              draft: request.intent === "draft",
             })
           : undefined;
         plan = await repositoryRuntime.planPush(repository, {
@@ -460,9 +456,7 @@ export function createManualCommandServices(
           ? "The source branch push was requested through the configured Git remote; confirm the execution result below."
           : "Run pushPlan.command with your SSH agent or Git credential helper if the source branch is not already remote.",
         invocation.command.kind === "manual" && invocation.command.sshMergeRequest
-          ? request.intent === "draft"
-            ? "The SSH push requested a Draft Merge Request with generated title and description; creation is not API-verified. Open GitLab and verify it before adding labels, assignee, and reviewers."
-            : "The SSH push requested a Merge Request with generated title and description; creation is not API-verified. Open GitLab and verify it before adding labels, assignee, and reviewers."
+          ? "The SSH push requested a Merge Request with generated title and description; creation is not API-verified. Open GitLab and verify it before adding labels, assignee, and reviewers."
           : "Open the GitLab project, create the Merge Request manually, paste the title and description, and choose labels, assignee, and reviewers in the UI.",
         "Use the fixed label pool: one type:: label, priority::p2 by default, and the lifecycle status:: label. Never create a guessed label.",
       ];

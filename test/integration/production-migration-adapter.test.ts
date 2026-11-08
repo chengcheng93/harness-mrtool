@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { cp, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import test from "node:test";
@@ -26,7 +26,7 @@ import { normalizeAndValidateRequest } from "../../src/input/normalize.ts";
 import { VerificationReceiptStore } from "../../src/platform/verification-receipt-store.ts";
 import { renderDescription } from "../../src/render/markdown.ts";
 import { parseDiagnosticMarker, validateDesiredWritePlan, validateExternalContextSnapshot } from "../../src/render/marker.ts";
-import { historicalManifest, historicalPolicy } from "../helpers/historical-template-bundle.ts";
+import { writeHistoricalBundleDirectory } from "../helpers/historical-template-bundle.ts";
 import { bugLabelDiff } from "../helpers/label-diff.ts";
 
 const root = resolve(import.meta.dirname, "../..");
@@ -49,7 +49,7 @@ class MigrationRemote implements MergeRequestRemote {
   }
   async read() { return valueReceipt(structuredClone(this.current), this.requestId()); }
   async findOpen(): Promise<never> { throw new Error("Migration must not discover or create an MR"); }
-  async createDraft(): Promise<never> { throw new Error("Migration must not create an MR"); }
+  async create(): Promise<never> { throw new Error("Migration must not create an MR"); }
   async addLabels(_iid: number, ids: readonly string[]) {
     this.writes.push("add-labels"); this.replace({ labelIds: [...new Set([...this.current.labelIds, ...ids])].sort() });
     return mutationReceipt(this.requestId());
@@ -59,17 +59,12 @@ class MigrationRemote implements MergeRequestRemote {
     return mutationReceipt(this.requestId());
   }
   async writeManagedFields(_iid: number, fields: ManagedFieldsInput) {
+    // GitLab derives Draft from the title; the canonical managed title carries no prefix.
     this.writes.push("fields"); this.replace({ ...fields, draft: fields.title.startsWith("Draft: ") });
     return mutationReceipt(this.requestId());
   }
   async writeDescription(_iid: number, description: string) {
     this.writes.push("description"); this.replace({ description }); return mutationReceipt(this.requestId());
-  }
-  async markDraft(_iid: number, title: string) {
-    this.writes.push("draft"); this.replace({ title, draft: true }); return mutationReceipt(this.requestId());
-  }
-  async markReady(_iid: number, title: string) {
-    this.writes.push("ready"); this.replace({ title, draft: false }); return mutationReceipt(this.requestId());
   }
 }
 
@@ -77,17 +72,17 @@ async function fixture(t: test.TestContext, productionIds = false) {
   const stateDirectory = await mkdtemp(resolve(await realpath(tmpdir()), "mrtool-migration-adapter-"));
   t.after(() => rm(stateDirectory, { recursive: true, force: true }));
   const oldPath = resolve(stateDirectory, "old-bundle");
-  await cp(resolve(root, "template-bundle"), oldPath, { recursive: true });
-  await writeFile(resolve(oldPath, "policy.yml"), historicalPolicy);
-  await writeFile(resolve(oldPath, "bundle-manifest.json"), historicalManifest);
+  // Frozen published 1.0.0 bytes: week policy, Draft lifecycle and the request `intent` schema.
+  await writeHistoricalBundleDirectory(oldPath, "1.0.0");
   const previousBundle = await loadTemplateBundle(oldPath);
   const bundle = await loadTemplateBundle(resolve(root, "template-bundle"));
-  const previousReleaseTag = "templates-v1.0.0", releaseTag = "templates-v1.1.0";
+  const previousReleaseTag = "templates-v1.0.0", releaseTag = "templates-v1.2.0";
+  // Production global IDs follow the DEFAULT_LABEL_POOL order used by the production route below.
   const identities: Record<string, string> = {
     "project:100": "7", "user:10": "42", "user:20": "43", "user:30": "44",
     "label:type": "gid://gitlab/ProjectLabel/2", "label:priority": "gid://gitlab/ProjectLabel/11",
-    "label:status": "gid://gitlab/ProjectLabel/14", "label:week": "gid://gitlab/ProjectLabel/15",
-    "label:p2": "gid://gitlab/ProjectLabel/12", "label:doing": "gid://gitlab/ProjectLabel/13",
+    "label:status": "gid://gitlab/ProjectLabel/13", "label:week": "gid://gitlab/ProjectLabel/14",
+    "label:p2": "gid://gitlab/ProjectLabel/12",
   };
   const id = (value: string) => productionIds ? identities[value] ?? value : value;
   const json = async (name: string) => {
@@ -123,7 +118,7 @@ async function fixture(t: test.TestContext, productionIds = false) {
     gitlabOrigin: origin, receiptLoader: receipts, bundleLoader: oldLoader,
   } });
   const snapshot = validateExternalContextSnapshot({ ...oldSnapshot, labelCandidates: [
-    ...oldSnapshot.labelCandidates, { id: id("label:p2"), name: "priority::p2" }, { id: id("label:doing"), name: "status::doing" },
+    ...oldSnapshot.labelCandidates, { id: id("label:p2"), name: "priority::p2" },
   ] });
   const remote = new MigrationRemote({ ...oldCurrent, snapshot });
   const binding: ContextBinding = {
@@ -171,7 +166,9 @@ test("migration consumes migrate tokens, checks old ownership and completes the 
   assert.ok(f.operations.every((operation) => operation === "migrate"));
   assert.ok(f.remote.writes.includes("description"));
   assert.deepEqual(f.remote.current.labelIds, ["label:p2", "label:status", "label:type"]);
-  assert.equal(parseDiagnosticMarker(f.remote.current.description).bundleVersion, "1.1.0");
+  assert.equal(f.remote.current.draft, false);
+  assert.deepEqual(f.remote.writes.filter((write) => !["add-labels", "remove-labels", "fields", "description"].includes(write)), []);
+  assert.equal(parseDiagnosticMarker(f.remote.current.description).bundleVersion, "1.2.0");
   assert.ok(result.output?.data?.mandatoryLabels);
   assert.equal((await verifyStoredMergeRequest({ level: "structure", current: f.remote.current,
     gitlabOrigin: origin, receiptLoader: f.receipts, bundleLoader: f.newLoader })).valid, true);
@@ -245,7 +242,7 @@ test("changing the migration contract at the mutation gate cannot write or consu
 
 // Only transports and an explicit in-process test signing root are substituted.
 // Historical lookup, state persistence, signatures, receipts and ZIP validation stay real.
-test("production route authenticates signed 1.0.0 history before migrating week policy to 1.1.0", async (t) => {
+test("production route authenticates signed 1.0.0 history before migrating week policy to 1.2.0", async (t) => {
   const f = await fixture(t, true);
   const signed = await exactReleaseFixture(f.oldPath);
   const currentRelease = await exactReleaseFixture();
@@ -257,7 +254,7 @@ test("production route authenticates signed 1.0.0 history before migrating week 
   // anchored; only the requested historical 1.0.0 anchor is missing.
   const currentOnly = verifyChannelEnvelope(signedEnvelope(canonicalPayload(channelWithoutOldAnchor), [signed.signingKey]),
     createTrustState(signed.bootstrapKeys), signed.trustConfig.repository, signed.bootstrapKeys);
-  assert.deepEqual(currentOnly.nextTrustState.bundleReceiptAnchors.map((anchor) => anchor.releaseTag), ["templates-v1.1.0"]);
+  assert.deepEqual(currentOnly.nextTrustState.bundleReceiptAnchors.map((anchor) => anchor.releaseTag), ["templates-v1.2.0"]);
   const historyRequests: string[] = [];
   let missingAnchor = true;
   let tamper = false;
@@ -321,9 +318,7 @@ test("production route authenticates signed 1.0.0 history before migrating week 
     },
     updateMergeRequest: async (_target: unknown, iid: number, input: import("../../src/gitlab/types.ts").GitLabUpdateMergeRequestInput) => {
       if (input.kind === "description") await f.remote.writeDescription(iid, input.description);
-      else if (input.kind === "title") {
-        if (input.title.startsWith("Draft:")) await f.remote.markDraft(iid, input.title); else await f.remote.markReady(iid, input.title);
-      } else await f.remote.writeManagedFields(iid, { title: input.title, targetBranch: input.targetBranch,
+      else await f.remote.writeManagedFields(iid, { title: input.title, targetBranch: input.targetBranch,
         assigneeUserId: input.assigneeIds[0] === undefined ? null : String(input.assigneeIds[0]),
         reviewerUserIds: input.reviewerIds.map(String), squash: input.squash, removeSourceBranch: input.removeSourceBranch });
       return receipt(structuredClone(currentMr()));
@@ -362,7 +357,7 @@ test("production route authenticates signed 1.0.0 history before migrating week 
   assert.ok(historyRequests.some((url) => url.endsWith("stable.envelope.json")), `must enter the real historical trust path: ${unanchored.stdout} ${unanchored.stderr}`);
   const currentOnlyState = await new UpdateStateStore({ stateDirectory: f.stateDirectory, windowsAclVerifier: allowTestAcl,
     trustConfigSha256: updateTrustConfigSha256(signed.trustConfig), bootstrapKeys: signed.bootstrapKeys }).load();
-  assert.deepEqual(currentOnlyState?.trustState.bundleReceiptAnchors.map((anchor) => anchor.releaseTag), ["templates-v1.1.0"]);
+  assert.deepEqual(currentOnlyState?.trustState.bundleReceiptAnchors.map((anchor) => anchor.releaseTag), ["templates-v1.2.0"]);
   assert.ok(historyRequests.some((url) => url.endsWith("/templates-v1.0.0/bundle-receipt.envelope.json")),
     "must reach requested historical receipt authentication, not fail channel parsing");
   missingAnchor = false;
@@ -388,8 +383,11 @@ test("production route authenticates signed 1.0.0 history before migrating week 
   const migrated = await run([...args, f.prepared.migration!.confirmation]);
   assert.equal(migrated.code, 0, migrated.stdout + migrated.stderr);
   assert.deepEqual(migrated.json.data.mandatoryLabels.names, ["type::bug", "priority::p2", "status::review"]);
-  assert.equal(parseDiagnosticMarker(f.remote.current.description).bundleVersion, "1.1.0");
-  assert.equal(f.remote.current.labelIds.some((id) => id === "gid://gitlab/ProjectLabel/15"), false);
+  assert.equal(migrated.json.data.lifecycle, "ready");
+  assert.equal(parseDiagnosticMarker(f.remote.current.description).bundleVersion, "1.2.0");
+  // The historical week label (global ID 14 in this fixture) is removed by the fixed-pool migration.
+  assert.equal(f.remote.current.labelIds.some((id) => id === "gid://gitlab/ProjectLabel/14"), false);
+  assert.equal(f.remote.current.draft, false);
   const verified = await run(["verify", "88", "--level", "structure"]);
   assert.equal(verified.code, 0, verified.stdout + verified.stderr);
   const retained = await f.receipts.loadVerified({ gitlabOrigin: origin, targetProjectId: "7", iid: 88,

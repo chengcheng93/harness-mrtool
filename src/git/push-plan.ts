@@ -68,7 +68,6 @@ export interface SshMergeRequestPushOptions {
   readonly targetBranch: string;
   readonly title: string;
   readonly description: string;
-  readonly draft: boolean;
 }
 
 const MAX_PUSH_OPTION_TEXT = 64 * 1024;
@@ -98,23 +97,20 @@ export function buildSshMergeRequestPushOptions(
       "Use the branch returned by context and retry.",
     );
   }
-  const result = [
+  return Object.freeze([
     "merge_request.create",
     `merge_request.target=${pushOptionText(options.targetBranch, "target branch")}`,
     `merge_request.title=${pushOptionText(options.title, "title")}`,
     `merge_request.description=${pushOptionText(options.description, "description")}`,
-  ];
-  if (options.draft) result.push("merge_request.draft");
-  return Object.freeze(result);
+  ]);
 }
 
 function assertAllowedPushOptions(options: readonly string[]): void {
-  const allowed = /^(?:merge_request\.create|merge_request\.draft|merge_request\.(?:target|title|description)=.+)$/u;
+  const allowed = /^(?:merge_request\.create|merge_request\.(?:target|title|description)=.+)$/u;
   const createCount = options.filter((option) => option === "merge_request.create").length;
-  const draftCount = options.filter((option) => option === "merge_request.draft").length;
-  if (options.length < 4 || options.length > 5 || new Set(options).size !== options.length ||
+  if (options.length !== 4 || new Set(options).size !== options.length ||
       options.some((option) => typeof option !== "string" || !allowed.test(option)) ||
-      createCount !== 1 || draftCount > 1 ||
+      createCount !== 1 ||
       options.filter((option) => option.startsWith("merge_request.target=")).length !== 1 ||
       options.filter((option) => option.startsWith("merge_request.title=")).length !== 1 ||
       options.filter((option) => option.startsWith("merge_request.description=")).length !== 1 ||
@@ -123,7 +119,7 @@ function assertAllowedPushOptions(options: readonly string[]): void {
         option.includes("merge_request.auto_merge") || option.includes("merge_request.target_project="))) {
     throw pushError(
       "SSH merge request push options are not an approved tool-generated set",
-      "create, target, title, description, and optional draft only",
+      "create, target, title, and description only",
       "unsupported or incomplete push options",
       "Regenerate the SSH merge request plan and retry.",
     );

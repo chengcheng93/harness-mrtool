@@ -1,6 +1,5 @@
 import { ToolError } from "../contracts/errors.ts";
 import { sha256CanonicalJson, copyJsonValue } from "../contracts/jcs.ts";
-import type { RequestIntent } from "../contracts/request.ts";
 import type { CanonicalLabelChangeSet } from "../git/change-set.ts";
 import { typeLabelFromDiff, type DiffTypeLabel } from "./diff-labels.ts";
 import { DEFAULT_LABEL_POOL } from "./label-defaults.ts";
@@ -20,7 +19,6 @@ export interface MandatoryLabelInput {
   readonly diff: CanonicalLabelChangeSet;
   readonly binding: LabelDiffBinding;
   readonly inventory: readonly { readonly id: string; readonly name: string }[];
-  readonly intent: RequestIntent;
   readonly options?: LabelSelectionOptions;
 }
 export interface MandatoryLabelSelection {
@@ -35,6 +33,8 @@ const TITLE_TYPES: Readonly<Record<DiffTypeLabel, string>> = Object.freeze({
   performance: "perf", build: "build", ci: "ci", chore: "chore",
 });
 const POOL = new Set<string>(DEFAULT_LABEL_POOL);
+/** Every merge request carries the review lifecycle status; there is no Draft stage. */
+export const MANDATORY_STATUS_LABEL = "status::review";
 
 function labelError(reason: string, digest?: string): ToolError<"LABEL_ERROR"> {
   return new ToolError("LABEL_ERROR", `Mandatory MR labels: ${reason}`, {
@@ -49,11 +49,11 @@ export function labelDiffDigest(diff: CanonicalLabelChangeSet): string {
   return sha256CanonicalJson(copyJsonValue(diff));
 }
 
-export function assertMandatoryLabelNames(names: readonly string[], intent: RequestIntent): void {
-  if (!["draft", "ready"].includes(intent) || !Array.isArray(names) || names.length !== 3 ||
+export function assertMandatoryLabelNames(names: readonly string[]): void {
+  if (!Array.isArray(names) || names.length !== 3 ||
       names.some((name) => !POOL.has(name)) ||
       ["type::", "priority::", "status::"].some((prefix) => names.filter((name) => name.startsWith(prefix)).length !== 1) ||
-      !names.includes(intent === "draft" ? "status::doing" : "status::review")) {
+      !names.includes(MANDATORY_STATUS_LABEL)) {
     throw labelError("fixed pool, cardinality or lifecycle mismatch");
   }
 }
@@ -63,10 +63,10 @@ export function selectMandatoryLabels(input: MandatoryLabelInput): MandatoryLabe
   let safe: MandatoryLabelInput;
   try { safe = copyJsonValue(input) as unknown as MandatoryLabelInput; }
   catch { throw labelError("invalid label selection input"); }
-  const { diff, binding, inventory, intent, options = {} } = safe;
+  const { diff, binding, inventory, options = {} } = safe;
   if (diff === undefined || diff === null || binding === undefined || binding === null ||
       !Array.isArray(diff.items) || diff.items.length === 0 || !Array.isArray(inventory) ||
-      !["draft", "ready"].includes(intent) || options === null || typeof options !== "object" || Array.isArray(options) ||
+      options === null || typeof options !== "object" || Array.isArray(options) ||
       ["sourceHeadSha", "targetRefSha", "mergeBaseSha"].some((key) => {
         const field = key as keyof LabelDiffBinding;
         return typeof diff[field] !== "string" || !/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(diff[field]) || diff[field] !== binding[field];
@@ -91,8 +91,8 @@ export function selectMandatoryLabels(input: MandatoryLabelInput): MandatoryLabe
       (typeof options.priorityReason !== "string" || options.priorityReason.trim().length === 0))) {
     throw labelError("priority elevation requires an explicit choice and reason");
   }
-  const names = Object.freeze([typeName, `priority::${priority}`, intent === "draft" ? "status::doing" : "status::review"]);
-  assertMandatoryLabelNames(names, intent);
+  const names = Object.freeze([typeName, `priority::${priority}`, MANDATORY_STATUS_LABEL]);
+  assertMandatoryLabelNames(names);
   if (inventory.some((label) => label === null || typeof label !== "object" ||
       typeof label.id !== "string" || label.id.trim() === "" || typeof label.name !== "string") ||
       new Set(inventory.map((label) => label.id)).size !== inventory.length) throw labelError("invalid label inventory identity");

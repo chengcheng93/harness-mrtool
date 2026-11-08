@@ -4,7 +4,7 @@
 AI/人负责填写变更说明，工具负责输入校验、自动标签、写前复核、写后回读和审计；
 不是 GitLab 服务端合并门禁，也不能限制绕过工具的网页或原始 Git/API 操作。
 
-> **版本状态**：当前 main 已实现强制标签策略（Template Bundle **1.1.0**）。
+> **版本状态**：当前 main 已实现强制标签策略（Template Bundle **1.2.0**）。
 > CLI/Plugin **0.1.7** 是待验收发布候选，不代表已有可安装的新 Release。
 > 既有 [CLI 0.1.5](https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.5)
 > 和 [Plugin 0.1.5](https://github.com/chengcheng93/harness-mrtool/releases/tag/plugin-v0.1.5)
@@ -146,7 +146,7 @@ hmr create --auth api --dry-run --output json
 hmr create --auth api --output json
 ```
 
-向导引导选择 Draft/Ready、Profile、人员、风险和验证状态，并打开编辑器填写长文本。
+向导引导选择 Profile、人员、风险和验证状态，并打开编辑器填写长文本。
 标签由 CLI 自动计算：已知类型直接展示，歧义类型要求核对 diff 并显式确认，
 提升优先级要求理由。不要将尚未执行的测试填写成通过。
 
@@ -173,11 +173,11 @@ hmr context --auth api --output json
 
 ### 5.2 填写 Request
 
-复制 [Draft 输入样例](examples/request.draft.json) 到**业务仓库之外**的私有目录：
+复制 [输入样例](examples/request.json) 到**业务仓库之外**的私有目录：
 
 ```sh
 mkdir -p /absolute/private/mr-input
-cp "$MRTOOL_HOME/examples/request.draft.json" /absolute/private/mr-input/request.json
+cp "$MRTOOL_HOME/examples/request.json" /absolute/private/mr-input/request.json
 ```
 
 样例仅提供结构，**不能不修改就提交**：
@@ -185,13 +185,12 @@ cp "$MRTOOL_HOME/examples/request.draft.json" /absolute/private/mr-input/request
 | 字段 | 如何填写 |
 | --- | --- |
 | `contextId` | 刚取得的 `data.contextId` |
-| `intent` | 先用 `draft`；真正满足审核要求后再改 `ready` |
 | `profileIds` | 根据 `profiles detect/list` 及实际变更填写；样例为 code |
 | `targetBranch` | 工具发现的目标项目默认分支 |
 | `title`、`changes`、`motivation`、`impact`、`risk` 等 | 替换为本次真实内容；标题 type 不是标签确认 |
 | `verification.items` | 填写真实证据；没验证就是 pending，不能保留示例当验收证据 |
 | `profileFields` | 按选中 Profile 补充；例如 docs 有额外必填字段 |
-| `mergeRequest.assigneeCandidateToken`、`review.reviewerCandidateTokens` | 来自本次 context；按策略填写人员 |
+| `mergeRequest.assigneeCandidateToken`、`review.reviewerCandidateTokens` | 来自本次 context；审核人可以为空，之后在 GitLab 中添加，工具不强制最少人数 |
 | `mergeRequest.labelCandidateTokens` | 保持 `[]`，CLI 自动选标签 |
 
 输入文件可放在私有目录，避免把人员信息/说明误提交进仓库；它不影响基于已提交 `HEAD` 的 MR 流程。
@@ -212,7 +211,8 @@ hmr verify 88 --auth api --level structure --output json
 `create --upsert` 可复用同分支已有 MR，但必须验证该 MR 的 receipt 和精确历史模板；
 若历史 Bundle 不同，按错误提示改走 `context --mr` + `update`，不能跳过认证。
 
-如果创建已经产生 Draft，但在原始 provisional 描述定稿前中断，保留原始 Request 文件和私有证明，修复阻断后重新
+如果 `create` 已经创建了 MR，但在写入最终 description 前中断（返回 `PARTIAL_WRITE`），可以直接改用
+`update <iid>` 继续；也可以保留原始 Request 文件和私有证明，修复阻断后重新
 运行普通 `context`（不加 `--mr`），把原来选中的人员映射到新候选票据，其余 Request 内容保持
 一致，先预览，然后显式恢复已有 MR：
 
@@ -222,15 +222,15 @@ hmr create --resume 157 --resume-from /absolute/private/original.json --input /a
 hmr verify 157 --level structure --output json
 ```
 
-恢复要求原始 provisional 描述完全不变，且远端恰好处于以下正常事务前缀之一：
+恢复要求 MR 仍处于 open 状态、原始 provisional 描述完全不变，且远端恰好处于以下正常事务前缀之一：
 
 - 标签为空，assignee/reviewers 为空。
-- 标签恰好为计划的完整 Draft 标签组，assignee/reviewers 仍为空。
-- 同一完整 Draft 标签组，assignee/reviewers 全部与计划一致。
+- 标签恰好为计划的完整三标签组（type、priority、`status::review`），assignee/reviewers 仍为空。
+- 同一完整三标签组，assignee/reviewers 全部与计划一致。
 
-标题、目标分支、squash 和删除源分支选项始终须匹配原计划；Ready 请求在此阶段也只能使用
-Draft 的 doing 标签组，不能提前带有最终 review 标签。部分/额外标签、混合字段、描述编辑、
-已定稿描述均拒绝恢复。核对项目、分支、提交、模板和新旧候选身份后，正常事务跳过已完整
+标题、目标分支、squash 和删除源分支选项始终须匹配原计划。部分/额外标签、混合字段、描述编辑、
+已定稿描述均拒绝恢复；旧版工具留下的半成品 MR 不能恢复，改用 `update <iid>`（见第 7 节）。
+核对项目、分支、提交、模板和新旧候选身份后，正常事务跳过已完整
 写入的标签和 metadata，继续剩余步骤。它不创建第二个 MR，不把过期票据重新变成写权限，
 也不代替普通 `update` 的回执校验；`verify` 只验证存储状态，不恢复事务。
 私有上下文的历史证明保留至过期后 24 小时，最多 16 条；原始文件、私有证明丢失或计划变化时
@@ -243,9 +243,9 @@ Draft 的 doing 标签组，不能提前带有最终 review 标签。部分/额�
 | --- | --- | --- |
 | type | feature / bug / doc / test / refactor / performance / build / ci / chore | 从真实 diff 保守推断，无法确定不能静默归为 chore |
 | priority | p0 / p1 / p2 | 默认 p2；p0/p1 需要理由 |
-| status | doing / review | Draft → doing；Ready → review |
+| status | review | 每个 MR 都写入 `status::review`；项目不再需要 `status::doing` |
 
-实际远端名称带前缀，例如 `type::bug`、`priority::p2`、`status::doing`。
+实际远端名称带前缀，例如 `type::bug`、`priority::p2`、`status::review`。
 目标项目或祖先组必须已有可唯一解析的所需标签；工具**不会创建标签定义**。
 最终 MR **恰好三个标签**：更新时既移除旧 week，也移除池外人工标签关联，
 不是仅增加三个标签，更不是删除远端标签定义。
@@ -280,6 +280,8 @@ hmr verify 88 --auth api --level structure --output json
 ```
 
 未受管的手工 MR、丢失/不可信的 receipt、正文被手工修改等情况默认拒绝，不会自动接管。
+`update` 依次同步标签、写入受管字段、写入最终 description 并回读；对旧版工具创建、标题仍带旧前缀的半成品
+MR 执行一次 `update`，会按 `[type][module] 摘要` 重写标题并打上 `status::review`，使其成为普通 MR。
 `--force-replace-description` 只用于明确决定覆盖受管正文的情况，不能绕过 marker/receipt 认证。
 私有状态目录包含候选、回执、信任状态，不能把删除状态当成“修复”方案。
 
@@ -319,7 +321,8 @@ hmr manual --auth ssh --input /absolute/private/mr-input/request.json --push --o
 | `CONCURRENT_UPDATE` | 代码、引用、人员或标签已经漂移；重新读取 context 和计划，不复用旧授权 |
 | `MANUAL_DESCRIPTION_CHANGE` / `UNMANAGED_MR` | 核对正文所有权和历史 receipt；不要盲目强制覆盖 |
 | `UPDATE_SECURITY_ERROR` | 检查签名历史资产/信任状态；不得跳过校验、伪造回执或用新模板顶替旧模板 |
-| `PARTIAL_REMOTE_STATE` / `PARTIAL_DRAFT` | 部分远端操作可能已发生；按输出的 audit 和 safeNextStep 读取实际状态，不能盲重试创建 |
+| `PARTIAL_WRITE` | MR 已创建且状态已回读，但事务未完成；按输出的 audit 和 safeNextStep 用 `update <iid>` 或 `create --resume` 继续，不能盲重试创建 |
+| `PARTIAL_REMOTE_STATE` | 远端写入结果无法证明；先读取 MR 实际状态，不能盲重试创建 |
 | `Structured input is required` | 当前不是 TTY；提供 `--input` 和完整 JSON，或在真实终端运行向导 |
 
 自动化调用同时检查退出码、`ok`、`code`、`remoteWrite` 和审计结果。

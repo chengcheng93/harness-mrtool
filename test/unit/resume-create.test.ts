@@ -15,14 +15,15 @@ import * as resume from "../../src/app/resume-create.ts";
 import { bugLabelDiff } from "../helpers/label-diff.ts";
 
 const root = resolve(import.meta.dirname, "../..");
+/** An inventory label outside the managed pool; never part of a write plan. */
+const unmanagedLabelId = "gid://gitlab/ProjectLabel/40";
 
-async function fixture(intent: "draft" | "ready" = "draft") {
+async function fixture() {
   const [rawRequest, rawSnapshot, bundle] = await Promise.all([
     readFile(resolve(root, "test/golden/fixtures/code-docs-request.json"), "utf8").then(JSON.parse),
     readFile(resolve(root, "test/golden/fixtures/code-docs-snapshot.json"), "utf8").then(JSON.parse),
     loadTemplateBundle(resolve(root, "template-bundle")),
   ]);
-  rawRequest.intent = intent;
   rawRequest.mergeRequest.labelCandidateTokens = [];
   rawRequest.mergeRequest.assigneeCandidateToken = "original-assignee";
   rawRequest.review.reviewerCandidateTokens = ["original-reviewer"];
@@ -33,7 +34,7 @@ async function fixture(intent: "draft" | "ready" = "draft") {
   rawSnapshot.labelCandidates = [
     { id: "gid://gitlab/ProjectLabel/20", name: "type::bug" },
     { id: "gid://gitlab/ProjectLabel/30", name: "priority::p2" },
-    { id: "gid://gitlab/ProjectLabel/40", name: "status::doing" },
+    { id: unmanagedLabelId, name: "week::2026-w32" },
     { id: "gid://gitlab/ProjectLabel/50", name: "status::review" },
   ];
   rawSnapshot.mergeRequest = { ...rawSnapshot.mergeRequest, iid: null, lifecycle: "new",
@@ -61,13 +62,13 @@ async function fixture(intent: "draft" | "ready" = "draft") {
     bundle, releaseTag, cliVersion: "0.1.7", renderPhase: "provisional" });
   const current: RemoteMergeRequest = { iid: 157,
     webUrl: "https://gitlab.example.test/luban/luban-studio/-/merge_requests/157",
-    title: oldPlan.provisional.title, description, draft: true, state: "opened",
+    title: oldPlan.provisional.title, description, draft: false, state: "opened",
     sourceProjectId: snapshot.sourceProject.id, targetProjectId: snapshot.targetProject.id,
     sourceBranch: binding.sourceBranch, targetBranch: "develop", sourceHeadSha: snapshot.sourceHeadSha,
     labelIds: [], assigneeUserId: null, reviewerUserIds: [], squash: oldPlan.provisional.squash,
     removeSourceBranch: oldPlan.provisional.removeSourceBranch,
     snapshot: validateExternalContextSnapshot({ ...snapshot, mergeRequest: { ...snapshot.mergeRequest,
-      iid: 157, lifecycle: "draft" } }) };
+      iid: 157, lifecycle: "ready" } }) };
   return { iid: 157, originalRequest, originalContext, request, binding, initialSnapshot: snapshot,
     resolvedCandidates, current, bundle, releaseTag, labelDiff };
 }
@@ -78,7 +79,7 @@ function remoteState(current: RemoteMergeRequest, patch: Partial<RemoteMergeRequ
     labelIds: next.labelIds, assigneeUserId: next.assigneeUserId, reviewerUserIds: next.reviewerUserIds } } };
 }
 
-test("authorizes an exact pristine Draft with renewed tickets for the same candidate identities", async () => {
+test("authorizes an exact pristine provisional merge request with renewed tickets for the same candidate identities", async () => {
   const input = await fixture();
   const authorization = resume.validatePristineCreateResume(input);
   assert.equal(authorization.iid, 157);
@@ -89,45 +90,45 @@ test("authorizes an exact pristine Draft with renewed tickets for the same candi
     (error: unknown) => isToolError(error, "INPUT_ERROR"));
 });
 
-for (const intent of ["draft", "ready"] as const) {
-  test(`authorizes only complete pre-description label and metadata prefixes for ${intent}`, async () => {
-    const input = await fixture(intent);
-    const plan = buildWritePlan({ request: input.request, snapshot: input.initialSnapshot,
-      resolvedCandidates: input.resolvedCandidates, bundle: input.bundle, labelDiff: input.labelDiff });
-    for (const metadata of [false, true]) {
-      const current = remoteState(input.current, { labelIds: [...plan.draft.labelIds].reverse(),
-        ...(metadata ? { assigneeUserId: plan.draft.assigneeUserId, reviewerUserIds: plan.draft.reviewerUserIds } : {}) });
-      const authorization = resume.validatePristineCreateResume({ ...input, current });
-      assert.equal(authorization.createInput.description, input.current.description);
-      assert.deepEqual(authorization.writePlan.desired, plan.desired);
-      resume.assertPristineResumeAuthorization(authorization, current);
-      assert.throws(() => resume.assertPristineResumeAuthorization(authorization, input.current),
-        (error: unknown) => isToolError(error, "INPUT_ERROR"));
-    }
-  });
-}
+test("authorizes only complete pre-description label and metadata prefixes", async () => {
+  const input = await fixture();
+  const plan = buildWritePlan({ request: input.request, snapshot: input.initialSnapshot,
+    resolvedCandidates: input.resolvedCandidates, bundle: input.bundle, labelDiff: input.labelDiff });
+  for (const metadata of [false, true]) {
+    const current = remoteState(input.current, { labelIds: [...plan.desired.labelIds].reverse(),
+      ...(metadata ? { assigneeUserId: plan.desired.assigneeUserId, reviewerUserIds: plan.desired.reviewerUserIds } : {}) });
+    const authorization = resume.validatePristineCreateResume({ ...input, current });
+    assert.equal(authorization.createInput.description, input.current.description);
+    assert.equal(authorization.createInput.title, plan.desired.title);
+    assert.deepEqual(authorization.writePlan.desired, plan.desired);
+    resume.assertPristineResumeAuthorization(authorization, current);
+    assert.throws(() => resume.assertPristineResumeAuthorization(authorization, input.current),
+      (error: unknown) => isToolError(error, "INPUT_ERROR"));
+  }
+});
 
-test("rejects partial, extra, final-status, mixed-metadata, and edited-description prefixes", async () => {
-  const input = await fixture("ready");
+test("rejects partial, extra, duplicate, mixed-metadata, Draft, closed, and edited prefixes", async () => {
+  const input = await fixture();
   const plan = buildWritePlan({ request: input.request, snapshot: input.initialSnapshot,
     resolvedCandidates: input.resolvedCandidates, bundle: input.bundle, labelDiff: input.labelDiff });
   for (const patch of [
-    { labelIds: plan.draft.labelIds.slice(0, 2) },
-    { labelIds: [...plan.draft.labelIds, plan.readyStatusLabelId] },
-    { labelIds: plan.desired.labelIds },
-    { labelIds: [...plan.draft.labelIds, plan.draft.labelIds[0]!] },
-    { assigneeUserId: plan.draft.assigneeUserId, reviewerUserIds: plan.draft.reviewerUserIds },
-    { labelIds: plan.draft.labelIds, assigneeUserId: plan.draft.assigneeUserId },
-    { labelIds: plan.draft.labelIds, reviewerUserIds: plan.draft.reviewerUserIds },
-    { labelIds: plan.draft.labelIds, assigneeUserId: "user:20", reviewerUserIds: plan.draft.reviewerUserIds },
-    { labelIds: plan.draft.labelIds, assigneeUserId: plan.draft.assigneeUserId, reviewerUserIds: ["user:10"] },
-    { labelIds: plan.draft.labelIds, description: `${input.current.description}edited` },
-    { labelIds: plan.draft.labelIds, title: plan.desired.title },
-    { labelIds: plan.draft.labelIds, squash: !input.current.squash },
-    { labelIds: plan.draft.labelIds, removeSourceBranch: !input.current.removeSourceBranch },
+    { labelIds: plan.desired.labelIds.slice(0, 2) },
+    { labelIds: [...plan.desired.labelIds, unmanagedLabelId] },
+    { labelIds: [...plan.desired.labelIds, plan.desired.labelIds[0]!] },
+    { assigneeUserId: plan.desired.assigneeUserId, reviewerUserIds: plan.desired.reviewerUserIds },
+    { labelIds: plan.desired.labelIds, assigneeUserId: plan.desired.assigneeUserId },
+    { labelIds: plan.desired.labelIds, reviewerUserIds: plan.desired.reviewerUserIds },
+    { labelIds: plan.desired.labelIds, assigneeUserId: "user:20", reviewerUserIds: plan.desired.reviewerUserIds },
+    { labelIds: plan.desired.labelIds, assigneeUserId: plan.desired.assigneeUserId, reviewerUserIds: ["user:10"] },
+    { labelIds: plan.desired.labelIds, description: `${input.current.description}edited` },
+    { labelIds: plan.desired.labelIds, title: `Draft: ${plan.desired.title}` },
+    { labelIds: plan.desired.labelIds, draft: true },
+    { labelIds: plan.desired.labelIds, state: "closed" as const },
+    { labelIds: plan.desired.labelIds, squash: !input.current.squash },
+    { labelIds: plan.desired.labelIds, removeSourceBranch: !input.current.removeSourceBranch },
   ]) assert.throws(() => resume.validatePristineCreateResume({ ...input, current: remoteState(input.current, patch) }),
     (error: unknown) => isToolError(error, "INPUT_ERROR"));
-  const current = remoteState(input.current, { labelIds: plan.draft.labelIds });
+  const current = remoteState(input.current, { labelIds: plan.desired.labelIds });
   assert.throws(() => resume.validatePristineCreateResume({ ...input, current: { ...current,
     snapshot: input.current.snapshot } }), (error: unknown) => isToolError(error, "INPUT_ERROR"));
 });
@@ -152,7 +153,7 @@ test("derives title type from the committed diff as normal create does", async (
     request: { ...input.request, title: { ...input.request.title, type: "chore" } },
     originalRequest: { ...input.originalRequest, title: { ...input.originalRequest.title, type: "chore" } },
   });
-  assert.equal(authorization.createInput.title.startsWith("Draft: [fix]"), true);
+  assert.equal(authorization.createInput.title.startsWith("[fix]"), true);
 });
 
 test("resume authorization cannot be reused for changed write intent", async () => {
@@ -174,8 +175,8 @@ test("rejects edits and any partial metadata writes before granting or reusing a
   const input = await fixture();
   const authorization = resume.validatePristineCreateResume(input);
   for (const patch of [ { iid: 158 }, { description: `${input.current.description}edited` },
-    { title: "Draft: changed" }, { labelIds: ["gid://gitlab/ProjectLabel/20"] },
-    { assigneeUserId: "user:10" }, { reviewerUserIds: ["user:20"] }, { draft: false },
+    { title: `Draft: ${input.current.title}` }, { labelIds: ["gid://gitlab/ProjectLabel/20"] },
+    { assigneeUserId: "user:10" }, { reviewerUserIds: ["user:20"] }, { draft: true }, { state: "closed" as const },
     { sourceHeadSha: "f".repeat(40) },
     { snapshot: { ...input.current.snapshot, mergeRequest: { ...input.current.snapshot.mergeRequest,
       authorUserId: "user:20" } } },

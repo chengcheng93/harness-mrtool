@@ -100,7 +100,7 @@ function reviewFenceBody(
 function mergeRequestBody(overrides: Readonly<Record<string, unknown>> = {}): Record<string, unknown> {
   return {
     iid: 12, web_url: "https://gitlab.example.test/group/project/-/merge_requests/12",
-    title: "Draft: [fix][app] Fix labels", description: "", draft: true, state: "opened",
+    title: "[fix][app] Fix labels", description: "", draft: false, state: "opened",
     source_project_id: 7, source_branch: "fix/51-labels", target_project_id: 7,
     target_branch: "develop", sha: "b".repeat(40),
     author: { id: 40, username: "author", name: "Author", state: "active" },
@@ -295,7 +295,7 @@ test("reads every project and ancestor-group label page and applies project prec
   });
   fake.enqueue("GET", "/api/v4/groups/11/labels?include_ancestor_groups=false&include_descendant_groups=false&only_group_labels=true&per_page=100&page=1", {
     headers: { "x-next-page": "" },
-    body: [restLabel(21, "type::bug"), restLabel(22, "status::doing")],
+    body: [restLabel(21, "type::bug"), restLabel(22, "status::review")],
   });
   fake.enqueue("GET", "/api/v4/groups/12/labels?include_ancestor_groups=false&include_descendant_groups=false&only_group_labels=true&per_page=100&page=1", {
     headers: { "x-next-page": "" },
@@ -312,7 +312,7 @@ test("reads every project and ancestor-group label page and applies project prec
   fake.enqueue("POST", "/api/graphql", {
     headers: { "x-request-id": "req-graphql-2" },
     body: labelGraphql([
-      { id: "gid://gitlab/GroupLabel/22", title: "status::doing" },
+      { id: "gid://gitlab/GroupLabel/22", title: "status::review" },
       { id: "gid://gitlab/GroupLabel/31", title: "week::2026-w32-0803-0809" },
     ], false, null),
   });
@@ -321,7 +321,7 @@ test("reads every project and ancestor-group label page and applies project prec
   const labels = await api.listLabels("group/project");
   assert.deepEqual(labels.map((label) => [label.name, label.scopeKind, label.globalId]), [
     ["priority::p1", "project", "gid://gitlab/ProjectLabel/3"],
-    ["status::doing", "group", "gid://gitlab/GroupLabel/22"],
+    ["status::review", "group", "gid://gitlab/GroupLabel/22"],
     ["type::bug", "project", "gid://gitlab/ProjectLabel/1"],
     ["week::2026-w32-0803-0809", "group", "gid://gitlab/GroupLabel/31"],
   ]);
@@ -599,22 +599,23 @@ test("capability probe prefers advertised APPEND and caches one immutable sessio
   assert.equal(fake.requests.length, 2);
 });
 
-test("Draft creation probes required label capabilities before any remote write", async (t) => {
+test("merge request creation probes required label capabilities before any remote write", async (t) => {
   for (const modes of [["REPLACE", "APPEND", "REMOVE"], ["REPLACE", "REMOVE"]]) {
     await t.test(modes.join(","), async () => {
       const fake = new FakeGitLab();
       enqueueCapabilities(fake, modes);
       fake.enqueue("POST", "/api/v4/projects/7/merge_requests", { body: {
         iid: 12, project_id: 7, target_project_id: 7, source_project_id: 7,
-        source_branch: "fix/labels", target_branch: "develop", title: "Draft: Fix labels",
-        description: "", draft: true, state: "opened",
+        source_branch: "fix/labels", target_branch: "develop", title: "[fix][app] Fix labels",
+        description: "", draft: false, state: "opened",
       } });
       const created = client(fake).createMergeRequest({ id: "7", fullPath: "group/project" }, {
-        title: "Draft: Fix labels", description: "", sourceProjectId: 7, sourceBranch: "fix/labels",
+        title: "[fix][app] Fix labels", description: "", sourceProjectId: 7, sourceBranch: "fix/labels",
         targetProjectId: 7, targetBranch: "develop", squash: true, removeSourceBranch: true,
       });
       if (modes.includes("APPEND")) {
         assert.equal((await created).value.iid, 12);
+        assert.equal((fake.requests[2]?.body as { readonly title: string }).title, "[fix][app] Fix labels");
         assert.deepEqual(fake.requests.map((request) => [request.method, new URL(request.url).pathname]), [
           ["GET", "/api/v4/version"], ["POST", "/api/graphql"], ["POST", "/api/v4/projects/7/merge_requests"],
         ]);
@@ -636,7 +637,7 @@ test("read-only capability probe failures reject before create or label mutation
         const result = operation === "labels"
           ? api.mutateLabels({ id: "7", fullPath: "group/project" }, 12, ["gid://gitlab/ProjectLabel/3"], "ADD")
           : api.createMergeRequest({ id: "7", fullPath: "group/project" }, {
-            title: "Draft: Fix labels", description: "", sourceProjectId: 7, sourceBranch: "fix/labels",
+            title: "[fix][app] Fix labels", description: "", sourceProjectId: 7, sourceBranch: "fix/labels",
             targetProjectId: 7, targetBranch: "develop", squash: true, removeSourceBranch: true,
           });
         await assert.rejects(result, {
@@ -1084,26 +1085,26 @@ test("reads exact applied label IDs and the live target branch head", async () =
   });
   fake.enqueue("GET", "/api/v4/projects/7/issues/51?with_labels_details=true", { body: {
     iid: 51, milestone: null, assignees: [], due_date: null,
-    labels: [{ id: 3, name: "status::doing", archived: false }],
+    labels: [{ id: 3, name: "status::review", archived: false }],
   } });
   fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12?with_labels_details=true", { body: {
     iid: 12, web_url: "https://gitlab.example.test/group/project/-/merge_requests/12",
-    title: "Draft: [fix][app] Fix labels", description: "", draft: true, state: "opened",
+    title: "[fix][app] Fix labels", description: "", draft: false, state: "opened",
     source_project_id: 7, source_branch: "fix/51-labels", target_project_id: 7,
     target_branch: "develop", sha: "b".repeat(40),
     author: { id: 40, username: "author", name: "Author", state: "active" },
     assignees: [], reviewers: [],
-    labels: [{ id: 3, name: "status::doing", archived: false }],
+    labels: [{ id: 3, name: "status::review", archived: false }],
     squash: true, should_remove_source_branch: true, head_pipeline: null,
   } });
 
   const api = client(fake);
   assert.equal(await api.getBranchHead("group/project", "develop"), "a".repeat(40));
   assert.deepEqual((await api.getIssue("group/project", 51)).labels, [
-    { restId: 3, name: "status::doing", archived: false },
+    { restId: 3, name: "status::review", archived: false },
   ]);
   assert.deepEqual((await api.getMergeRequest("group/project", 12)).labels, [
-    { restId: 3, name: "status::doing", archived: false },
+    { restId: 3, name: "status::review", archived: false },
   ]);
 });
 
@@ -1112,20 +1113,20 @@ test("hydrates string applied labels from a fresh project and ancestor inventory
     await t.test(resource, async () => {
       const fake = new FakeGitLab();
       fake.enqueue("GET", "/api/v4/projects/7", { body: projectBody() });
-      const labels = ["status::doing", "type::bug", "archived::old"];
+      const labels = ["status::review", "type::bug", "archived::old"];
       fake.enqueue("GET", resource === "issue"
         ? "/api/v4/projects/7/issues/51?with_labels_details=true"
         : "/api/v4/projects/7/merge_requests/12?with_labels_details=true", { body: resource === "issue"
           ? { iid: 51, milestone: null, assignees: [], due_date: null, labels }
           : mergeRequestBody({ labels }),
       });
-      enqueueAppliedLabelInventory(fake, [restLabel(3, "status::doing"), restLabel(9, "archived::old", { archived: true })], [restLabel(21, "type::bug")]);
+      enqueueAppliedLabelInventory(fake, [restLabel(3, "status::review"), restLabel(9, "archived::old", { archived: true })], [restLabel(21, "type::bug")]);
 
       const api = client(fake);
       const result = resource === "issue" ? await api.getIssue("7", 51) : await api.getMergeRequest("7", 12);
       assert.deepEqual(result.labels, [
         { restId: 9, name: "archived::old", archived: true },
-        { restId: 3, name: "status::doing", archived: false },
+        { restId: 3, name: "status::review", archived: false },
         { restId: 21, name: "type::bug", archived: false },
       ]);
       assert.equal(fake.requests.filter((request) => new URL(request.url).pathname === "/api/graphql").length, 1);
@@ -1157,15 +1158,15 @@ test("paginated MR string labels share one inventory within the list and keep th
     headers: { "x-next-page": "2", "x-request-id": "req-list-1" }, body: [mergeRequestBody({ labels: ["type::bug"] })],
   });
   fake.enqueue("GET", `${endpoint}2`, {
-    headers: { "x-next-page": "", "x-request-id": "req-list-2" }, body: [mergeRequestBody({ iid: 13, labels: ["status::doing"] })],
+    headers: { "x-next-page": "", "x-request-id": "req-list-2" }, body: [mergeRequestBody({ iid: 13, labels: ["status::review"] })],
   });
-  enqueueAppliedLabelInventory(fake, [restLabel(3, "status::doing")], [restLabel(21, "type::bug")]);
+  enqueueAppliedLabelInventory(fake, [restLabel(3, "status::review")], [restLabel(21, "type::bug")]);
 
   const receipt = await client(fake).listOpenMergeRequestReceipts({ id: "7", fullPath: "group/project" }, "fix/51-labels", "develop");
   assert.equal(receipt.requestId, "req-list-2");
   assert.deepEqual(receipt.value.map((mr) => mr.labels), [
     [{ restId: 21, name: "type::bug", archived: false }],
-    [{ restId: 3, name: "status::doing", archived: false }],
+    [{ restId: 3, name: "status::review", archived: false }],
   ]);
   assert.equal(fake.requests.filter((request) => new URL(request.url).pathname === "/api/graphql").length, 1);
 });
@@ -1173,14 +1174,14 @@ test("paginated MR string labels share one inventory within the list and keep th
 test("string applied labels reject absent or ambiguous real identities and retain the MR receipt", async (t) => {
   for (const [name, projectLabels, groupLabels] of [
     ["absent", [], []],
-    ["same project", [restLabel(3, "status::doing"), restLabel(4, "status::doing")], []],
-    ["project shadows group", [restLabel(3, "status::doing")], [restLabel(21, "status::doing")]],
-    ["archived duplicate", [restLabel(3, "status::doing"), restLabel(4, "status::doing", { archived: true })], []],
+    ["same project", [restLabel(3, "status::review"), restLabel(4, "status::review")], []],
+    ["project shadows group", [restLabel(3, "status::review")], [restLabel(21, "status::review")]],
+    ["archived duplicate", [restLabel(3, "status::review"), restLabel(4, "status::review", { archived: true })], []],
   ] as const) {
     await t.test(name, async () => {
       const fake = new FakeGitLab();
       fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12?with_labels_details=true", {
-        headers: { "x-request-id": "req-unresolved-labels" }, body: mergeRequestBody({ labels: ["status::doing"] }),
+        headers: { "x-request-id": "req-unresolved-labels" }, body: mergeRequestBody({ labels: ["status::review"] }),
       });
       enqueueAppliedLabelInventory(fake, projectLabels, groupLabels);
 
@@ -1193,12 +1194,12 @@ test("string applied labels reject absent or ambiguous real identities and retai
 
 test("string applied label reads reject malformed labels and resource identities before inventory lookup", async (t) => {
   for (const [name, overrides] of [
-    ["duplicate names", { labels: ["status::doing", "status::doing"] }],
-    ["mixed labels", { labels: ["status::doing", { id: 3, name: "status::doing" }] }],
+    ["duplicate names", { labels: ["status::review", "status::review"] }],
+    ["mixed labels", { labels: ["status::review", { id: 3, name: "status::review" }] }],
     ["empty name", { labels: [""] }],
-    ["wrong project", { labels: ["status::doing"], target_project_id: 8 }],
-    ["wrong IID", { labels: ["status::doing"], iid: 13 }],
-    ["wrong pipeline SHA", { labels: ["status::doing"], head_pipeline: { status: "success", sha: "c".repeat(40) } }],
+    ["wrong project", { labels: ["status::review"], target_project_id: 8 }],
+    ["wrong IID", { labels: ["status::review"], iid: 13 }],
+    ["wrong pipeline SHA", { labels: ["status::review"], head_pipeline: { status: "success", sha: "c".repeat(40) } }],
   ] as const) {
     await t.test(name, async () => {
       const fake = new FakeGitLab();
@@ -1217,8 +1218,8 @@ test("string applied label reads reject malformed labels and resource identities
 test("string applied labels use a new live inventory on each MR read", async () => {
   const fake = new FakeGitLab();
   for (const id of [3, 30]) {
-    fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12?with_labels_details=true", { body: mergeRequestBody({ labels: ["status::doing"] }) });
-    enqueueAppliedLabelInventory(fake, [restLabel(id, "status::doing")]);
+    fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12?with_labels_details=true", { body: mergeRequestBody({ labels: ["status::review"] }) });
+    enqueueAppliedLabelInventory(fake, [restLabel(id, "status::review")]);
   }
   const api = client(fake);
   const project = { id: "7", fullPath: "group/project" };
@@ -1233,7 +1234,7 @@ test("string applied label hydration retains inventory HTTP failures and rejects
     await t.test(`inventory HTTP ${String(status)}`, async () => {
       const fake = new FakeGitLab();
       fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12?with_labels_details=true", {
-        headers: { "x-request-id": "req-mr-before-inventory" }, body: mergeRequestBody({ labels: ["status::doing"] }),
+        headers: { "x-request-id": "req-mr-before-inventory" }, body: mergeRequestBody({ labels: ["status::review"] }),
       });
       fake.enqueue("GET", "/api/v4/projects/7", {
         status, headers: { "x-request-id": "req-inventory-failure" }, body: { message: "inventory failed" },
@@ -1247,7 +1248,7 @@ test("string applied label hydration retains inventory HTTP failures and rejects
   await t.test("inventory project mismatch", async () => {
     const fake = new FakeGitLab();
     fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12?with_labels_details=true", {
-      headers: { "x-request-id": "req-mr-before-inventory" }, body: mergeRequestBody({ labels: ["status::doing"] }),
+      headers: { "x-request-id": "req-mr-before-inventory" }, body: mergeRequestBody({ labels: ["status::review"] }),
     });
     fake.enqueue("GET", "/api/v4/projects/7", { body: projectBody(8, "other/project") });
 
@@ -1261,9 +1262,9 @@ test("string applied label hydration retains inventory HTTP failures and rejects
 test("string applied label hydration rejects one REST ID resolving to two applied names", async () => {
   const fake = new FakeGitLab();
   fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12?with_labels_details=true", {
-    headers: { "x-request-id": "req-duplicate-applied-id" }, body: mergeRequestBody({ labels: ["status::doing", "type::bug"] }),
+    headers: { "x-request-id": "req-duplicate-applied-id" }, body: mergeRequestBody({ labels: ["status::review", "type::bug"] }),
   });
-  enqueueAppliedLabelInventory(fake, [restLabel(3, "status::doing")], [restLabel(3, "type::bug")]);
+  enqueueAppliedLabelInventory(fake, [restLabel(3, "status::review")], [restLabel(3, "type::bug")]);
 
   await assert.rejects(client(fake).getMergeRequestReceipt({ id: "7", fullPath: "group/project" }, 12), {
     code: "GITLAB_ERROR", requestId: "req-duplicate-applied-id",
@@ -1289,7 +1290,7 @@ test("merge request source branch removal uses both nullable GitLab flags and re
       fake.enqueue("GET", "/api/v4/projects/7", { body: projectBody() });
       const body: Record<string, unknown> = {
         iid: 12, web_url: "https://gitlab.example.test/group/project/-/merge_requests/12",
-        title: "Draft: [fix][app] Fix labels", description: "", draft: true, state: "opened",
+        title: "[fix][app] Fix labels", description: "", draft: false, state: "opened",
         source_project_id: 7, source_branch: "fix/51-labels", target_project_id: 7,
         target_branch: "develop", sha: "b".repeat(40),
         author: { id: 40, username: "author", name: "Author", state: "active" },
@@ -1317,7 +1318,7 @@ test("Issue and MR labels default omitted archived to false and validate explici
       await t.test(`${resource}: ${name}`, async () => {
         const fake = new FakeGitLab();
         fake.enqueue("GET", "/api/v4/projects/7", { body: projectBody() });
-        const label: Record<string, unknown> = { id: 3, name: "status::doing" };
+        const label: Record<string, unknown> = { id: 3, name: "status::review" };
         if (archived !== undefined) label.archived = archived;
         if (resource === "issue") {
           fake.enqueue("GET", "/api/v4/projects/7/issues/51?with_labels_details=true", { body: {
@@ -1326,7 +1327,7 @@ test("Issue and MR labels default omitted archived to false and validate explici
         } else {
           fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12?with_labels_details=true", { body: {
             iid: 12, web_url: "https://gitlab.example.test/group/project/-/merge_requests/12",
-            title: "Draft: [fix][app] Fix labels", description: "", draft: true, state: "opened",
+            title: "[fix][app] Fix labels", description: "", draft: false, state: "opened",
             source_project_id: 7, source_branch: "fix/51-labels", target_project_id: 7,
             target_branch: "develop", sha: "b".repeat(40),
             author: { id: 40, username: "author", name: "Author", state: "active" },
@@ -1342,7 +1343,7 @@ test("Issue and MR labels default omitted archived to false and validate explici
             code: "GITLAB_ERROR", message: `GitLab ${resource} label.archived validation failed`,
           });
         } else {
-          assert.deepEqual((await result).labels, [{ restId: 3, name: "status::doing", archived: expected }]);
+          assert.deepEqual((await result).labels, [{ restId: 3, name: "status::review", archived: expected }]);
         }
       });
     }
@@ -1386,8 +1387,8 @@ test("rejects an applied label ID repeated with conflicting names", async () => 
   fake.enqueue("GET", "/api/v4/projects/7/issues/51?with_labels_details=true", { body: {
     iid: 51, milestone: null, assignees: [], due_date: null,
     labels: [
-      { id: 3, name: "status::doing", archived: false },
       { id: 3, name: "status::review", archived: false },
+      { id: 3, name: "type::bug", archived: false },
     ],
   } });
 
@@ -1406,8 +1407,7 @@ test("discovers tokenized live candidates while keeping lifecycle labels derived
   fake.enqueue("GET", "/api/v4/projects/7/labels?include_ancestor_groups=false&per_page=100&page=1", {
     headers: { "x-next-page": "" },
     body: [
-      restLabel(1, "type::bug"), restLabel(2, "priority::p1"),
-      restLabel(3, "status::doing"), restLabel(4, "status::review"),
+      restLabel(1, "type::bug"), restLabel(2, "priority::p1"), restLabel(4, "status::review"),
     ],
   });
   fake.enqueue("GET", "/api/v4/groups/11/labels?include_ancestor_groups=false&include_descendant_groups=false&only_group_labels=true&per_page=100&page=1", {
@@ -1416,7 +1416,6 @@ test("discovers tokenized live candidates while keeping lifecycle labels derived
   fake.enqueue("POST", "/api/graphql", { body: labelGraphql([
     { id: "gid://gitlab/ProjectLabel/1", title: "type::bug" },
     { id: "gid://gitlab/ProjectLabel/2", title: "priority::p1" },
-    { id: "gid://gitlab/ProjectLabel/3", title: "status::doing" },
     { id: "gid://gitlab/ProjectLabel/4", title: "status::review" },
     { id: "gid://gitlab/GroupLabel/21", title: "week::2026-w32-0803-0809" },
   ], false, null) });
@@ -1638,7 +1637,7 @@ test("context refuses to issue tokens when target HEAD moves during discovery", 
   const bundle = await loadTemplateBundle(resolve(repositoryRoot, "template-bundle"));
   const active = [
     [1, "week::2026-w32-0803-0809"], [2, "type::bug"], [3, "priority::p1"],
-    [4, "status::doing"], [5, "status::review"],
+    [5, "status::review"],
   ].map(([restId, name]) => ({
     restId: restId as number,
     globalId: `gid://gitlab/ProjectLabel/${String(restId)}`,
@@ -1690,7 +1689,7 @@ test("context pins target reads by project ID and rejects a rebound target path 
   const bundle = await loadTemplateBundle(resolve(repositoryRoot, "template-bundle"));
   const active = [
     [1, "week::2026-w32-0803-0809"], [2, "type::bug"], [3, "priority::p1"],
-    [4, "status::doing"], [5, "status::review"],
+    [5, "status::review"],
   ].map(([restId, name]) => ({
     restId: restId as number,
     globalId: `gid://gitlab/ProjectLabel/${String(restId)}`,

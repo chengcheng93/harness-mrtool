@@ -1,6 +1,5 @@
 schemaVersion: 1
 contextId: " context:fixture-01 "
-intent: " ready "
 profileIds:
   - " code "
   - "docs "

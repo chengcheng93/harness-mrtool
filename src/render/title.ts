@@ -40,8 +40,7 @@ export function renderTitle(
     if (!titleTypes(bundle).includes(request.title.type)) {
       throw renderError("the title type is not declared by the Bundle");
     }
-    const prefix = request.intent === "draft" ? "Draft: " : "";
-    const title = `${prefix}[${request.title.type}][${request.title.module}] ${request.title.titleSummary}`;
+    const title = `[${request.title.type}][${request.title.module}] ${request.title.titleSummary}`;
     if ([...title].length > 100) {
       throw renderError("the rendered title exceeds 100 Unicode scalar values");
     }

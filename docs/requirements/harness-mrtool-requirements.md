@@ -6,10 +6,10 @@
 | 产品名称 | Harness MR Tool |
 | 本地项目名 | `harness-mrtool` |
 | CLI 命令 | `harness-mrtool` |
-| 文档版本 | v0.3.0 |
+| 文档版本 | v0.4.0 |
 | 文档状态 | Reviewing |
 | 创建日期 | 2026-08-13 |
-| 最近更新 | 2026-08-13 |
+| 最近更新 | 2026-11-06 |
 | 维护角色 | 工具维护者 / 研发规范负责人 |
 | 适用范围 | GitLab Merge Request 的创建、更新、预览与完整性验证 |
 | 发布位置 | 公开 GitHub 仓库；owner 与最终仓库 URL 在公开发布前确定 |
@@ -56,7 +56,7 @@
 - 只包含一个格式合法、由渲染器生成的不可见诊断标记；
 - 所有受管标签均来自目标项目或其祖先组当前存在且未归档的标签；
 - 每个必选标签类别均满足数量约束；
-- 标题、目标分支、Draft/Ready 状态、assignee、reviewers 及其他受管字段与写入计划一致；
+- 标题、目标分支、assignee、reviewers 及其他受管字段与写入计划一致；
 - GitLab 回读值与工具计划写入的值一致。
 
 本保证覆盖结构完整性、选择合法性、版本一致性和实际写入结果。它不保证 AI 或用户填写的自然语言在业务上绝对真实。验证、CI 和 Review checkbox 只有在存在对应证据时才能勾选。
@@ -855,10 +855,10 @@ Categorical checkbox 由 selected ID/enum 渲染；未选择只表示该分类�
 | 层级 | 含义 | Checkbox 要求 |
 | --- | --- | --- |
 | `structure` | 模板、字段和标签结构合法 | 允许 CI、Review 等未来状态 pending |
-| `ready` | 内容已准备好开始正式 Review | 必填内容完整；默认允许验证、CI 和 Approval 保持 pending，但每个 pending 都必须有真实状态或具体理由 |
-| `merge` | 当前状态满足工具可观察的合并准备条件 | Policy 要求的 live CI/Review/阻塞项必须通过 |
+| `ready` | structure 成立，且实时 MR 未被 GitLab 标记为草稿；内容已准备好开始正式 Review | 必填内容完整；不强制最少审核人数；默认允许验证、CI 和 Approval 保持 pending，但每个 pending 都必须有真实状态或具体理由 |
+| `merge` | 当前状态满足工具可观察的合并准备条件 | merge 标签、CI 通过、无未解决讨论、合格审批数达到 Policy 阈值 |
 
-创建 Ready MR 不等于宣称 CI 和 Review 已完成。工具不得为了让 checklist 看起来完整而伪造勾选。
+创建 MR 不等于宣称 CI 和 Review 已完成。工具不得为了让 checklist 看起来完整而伪造勾选。
 
 Profile/Policy 可以把个别 evidence-state 声明为 `requiredForReady` 或 `requiredForMerge`；V1 默认 Profile 只要求这些项“明确给出状态与证据/理由”，不把未运行的本地构建或集成测试自动升级为 Ready 阻断项。这样工具保证信息不缺失，但不替团队替代 Review 判断。
 
@@ -887,9 +887,8 @@ linked case 的 canonical relation lines 必须包含 GitLab 可识别的独立�
 MR assignee 与 Issue assignee 是不同字段：
 
 - MR assignee 默认当前 GitLab 用户，用户可显式修改；
-- Draft 可暂不选择 Reviewer；
-- Ready 默认至少选择 1 名 Reviewer；
-- High risk 默认至少选择 2 名 Reviewer；
+- Reviewer 可以为空：create/update 和 `verify --level ready` 都不强制最少人数，审核人可以之后在 GitLab 中添加；
+- Policy 的 `readyMinimumReviewers`（默认 1）与 `highRiskMinimumReviewers`（默认 2）只用于渲染 description 中的信息性 Review checkbox，以及 `verify --level merge` 检查的合格审批数量；
 - Reviewer 字段只表示已请求 Review，不表示已经批准。
 
 Reviewer ID 必须唯一、有效、不能是 MR 作者，并具有目标项目可见性。V1 不声称仅凭用户 ID 能证明其为 module owner；是否属于 owner/maintainer 必须由项目成员角色、CODEOWNERS 或显式 Policy 数据源确定。数据源不可用时相关 checkbox 保持 pending。
@@ -910,7 +909,7 @@ Reviewer ID 必须唯一、有效、不能是 MR 作者，并具有目标项目�
 
 该标记采用 `<!-- harness-mrtool:v1 <base64url(JCS metadata)> -->`。Request 与 ExternalContextSnapshot 先按 RFC 8785 JSON Canonicalization Scheme 序列化，再分别计算 SHA-256。Rendered description digest 的 preimage 是“移除整个最终 diagnostic comment 后、统一为 LF、保留一个结尾 LF 的 UTF-8 description”；digest 不覆盖自身 comment，避免自引用。
 
-metadata 还必须记录 Template Release tag、Bundle manifest hash、`renderPhase=preview|provisional|final` 和 normalized state map。`preview` 与创建 Draft 时的 provisional description 可以携带非 final phase，但 `create`/`update` 只有在 GitLab 回读到唯一的 `final` marker 后才可返回成功。
+metadata 还必须记录 Template Release tag、Bundle manifest hash、`renderPhase=preview|provisional|final` 和 normalized state map。`preview` 与创建 MR 时的 provisional description 可以携带非 final phase，但 `create`/`update` 只有在 GitLab 回读到唯一的 `final` marker 后才可返回成功。
 
 该标记用于检测模板漂移和人工修改，不包含 Token、内部 API 地址或用户敏感信息。标记只能由渲染器生成，不能作为安全策略的唯一可信输入。
 
@@ -982,7 +981,7 @@ GitLab REST numeric ID、GraphQL global ID 和 Project/Group scope 是 CLI 内�
 
 ### 10.2 类别 Policy
 
-`policy.yml` 对用户可选的 `week`、`type`、`priority` 只声明类别、正则和数量约束，不枚举候选标签值；候选值始终来自 GitLab。唯一例外是工具派生的 lifecycle `status`：Policy 必须声明 Draft/Ready/merge 所需的 exact name，才能确定性迁移。V1 默认类别为：
+`policy.yml` 对用户可选的 `week`、`type`、`priority` 只声明类别、正则和数量约束，不枚举候选标签值；候选值始终来自 GitLab。唯一例外是工具派生的 lifecycle `status`：Policy 必须声明 `ready`/`merge` 所需的 exact name，才能确定性迁移。V1 默认类别为：
 
 ```yaml
 labels:
@@ -1006,14 +1005,13 @@ labels:
   lifecycle:
     statusCategory: status
     expectedNames:
-      draft: "status::doing"
       ready: "status::review"
       merge: "status::review"
 ```
 
 实际可选值始终是“Policy 匹配规则”与“目标 GitLab 当前有效标签”的交集。必选类别在目标项目没有候选项时，CLI 停止并指出缺失类别，不得自动创建标签。
 
-`week`、`type` 和 `priority` 由用户或调用方从实时 token 候选中选择。`status` 是 lifecycle-derived 受管类别，不接受 Request 自报：Draft 使用 Policy 的 `draft` 名称，请求 Ready 时在最终转换阶段改为 `ready` 名称，`merge` 验证要求 `merge` 名称。项目 Policy 可以版本化修改这些 exact names；匹配的实时标签不存在时失败，不能退回任意 `status::` 值。合并后把 Issue/MR 状态改为 `done` 不属于 V1 的自动行为。
+`week`、`type` 和 `priority` 由用户或调用方从实时 token 候选中选择。`status` 是 lifecycle-derived 受管类别，不接受 Request 自报：每个 MR 在创建和更新时都写入 Policy 的 `ready` 名称（默认 `status::review`），`merge` 验证要求 `merge` 名称；项目不再需要 `doing` 状态标签。项目 Policy 可以版本化修改这些 exact names；匹配的实时标签不存在时失败，不能退回任意 `status::` 值。合并后把 Issue/MR 状态改为 `done` 不属于 V1 的自动行为。
 
 Lifecycle exact name 使用与普通标签相同的 project-over-group 解析规则。相同优先级出现多个同名对象、名称缺失、已归档或不匹配 `status` category 时返回 `LABEL_ERROR`；CLI 不凭颜色/描述猜测。exact name 只是 Policy 的派生目标，不是用户可选标签清单的静态副本。
 
@@ -1071,7 +1069,6 @@ Profile 可以提出建议，例如 `fix -> type::bug` 或 `docs -> type::doc`�
 {
   "schemaVersion": 1,
   "contextId": "context:example-7f6d",
-  "intent": "ready",
   "profileIds": ["code", "docs"],
   "targetBranch": "develop",
   "title": {
@@ -1205,7 +1202,7 @@ Profile 可以提出建议，例如 `fix -> type::bug` 或 `docs -> type::doc`�
 }
 ```
 
-示例是一个完整的 `code+docs` Request 形态。三个 opaque `labelCandidateTokens` 分别代表 `week`、`type`、`priority` 的实时 CLI 候选；`status` 由 intent 和 Policy 自动派生。人员 token 同样只能来自同一个 `contextId` 的实时候选，调用方不能构造。运行时的稳定 ID、枚举和必填规则以当前 Template Bundle Schema 为准。
+示例是一个完整的 `code+docs` Request 形态。三个 opaque `labelCandidateTokens` 分别代表 `week`、`type`、`priority` 的实时 CLI 候选；`status` 由 Policy 自动派生，固定为 ready 名称，Request 不能自报。人员 token 同样只能来自同一个 `contextId` 的实时候选，调用方不能构造。运行时的稳定 ID、枚举和必填规则以当前 Template Bundle Schema 为准。
 
 ### 11.3 标题与正文摘要分离
 
@@ -1213,7 +1210,7 @@ Profile 可以提出建议，例如 `fix -> type::bug` 或 `docs -> type::doc`�
 
 - 只用于 MR title；
 - 必须是 trim 后非空的单行文本；
-- 不得包含 Markdown、换行、`Draft:` 或 `[type][module]` 前缀；
+- 不得包含 Markdown、换行、`[type][module]` 前缀或旧版 `Draft:` 状态前缀（工具不再生成任何状态前缀，输入中出现即拒绝）；
 - 单行 Markdown 判定对 emphasis delimiter run 使用 CommonMark 的 Unicode whitespace/punctuation left/right-flanking、underscore intraword 和 rule-of-three 规则；HTML comment/tag/autolink、entity、反斜线转义、code span、link/image 和 block marker 也必须拒绝，但不能误拒绝没有形成 Markdown 的普通业务标点；
 - 由渲染器拼接完整 title。
 
@@ -1221,7 +1218,7 @@ Profile 可以提出建议，例如 `fix -> type::bug` 或 `docs -> type::doc`�
 
 - `type` 是 Bundle registry 中的稳定 enum，V1 默认包含 `feat`、`fix`、`docs`、`test`、`refactor`、`perf`、`build`、`ci`、`chore`；项目 Profile 可以收窄但不能由 AI新增；
 - `module` 必须是 trim 后非空的单行 slug，字符集为 ASCII 小写字母、数字和单个连字符，长度 1-32，不得以连字符开头/结尾；
-- `titleSummary` 长度 1-72 个 Unicode scalar value；完整 Ready title 上限 100，Draft 前缀计入上限；
+- `titleSummary` 长度 1-72 个 Unicode scalar value；完整 title 上限 100；
 - selected `type` 必须与 Policy 的 type label compatibility table 一致，例如 `fix` 只能搭配存在于实时候选中的 `type::bug` 映射；不存在映射候选时要求用户重新选择，不自动创建标签；
 - Profile 可以给 type/module 建议，但最终值始终经过 Schema 和跨字段校验。
 
@@ -1232,10 +1229,9 @@ Profile 可以提出建议，例如 `fix -> type::bug` 或 `docs -> type::doc`�
 - 不得默认复制到 title；
 - 不得由 titleSummary 自动推断。
 
-标题格式：
+标题格式只有一种，没有任何状态前缀：
 
 ```text
-Draft: [type][module] <titleSummary>
 [type][module] <titleSummary>
 ```
 
@@ -1286,27 +1282,26 @@ CLI 从当前 Git 仓库确定：
 1. 完成更新 preflight；
 2. 校验仓库、输入、Template Bundle、Profile 与标签候选；
 3. 生成本地 preview 和完整写入计划；此时 live-derived checkbox 为当前可观察状态，marker phase 为 `preview`；
-4. 以 Draft 和 `provisional` marker 创建 MR，防止半成品直接进入正式 Review；
-5. 使用 token 重新解析后的 ID 型操作设置 `week`、`type`、`priority` 与 Draft lifecycle status；
-6. 设置 assignee、reviewers、target branch、squash、remove-source-branch 和其他受管字段；
+4. 直接创建普通 MR（`create`）：标题为 `[type][module] <titleSummary>`，没有任何前缀；description 为带 `provisional` marker 的临时正文；不带标签，也不带人员；
+5. 使用 token 重新解析后的 ID 型操作同步恰好三个标签（`labels-add` / `labels-remove`）：`type::…`、`priority::…` 与 Policy 的 ready lifecycle 名称 `status::review`；
+6. 写入 title、assignee、reviewers、squash、remove-source-branch 等受管字段（`fields-write`）；
 7. 从 GitLab 回读完整 MR，形成 immutable ExternalContextSnapshot；
-8. 用该快照重新派生 live checkbox 与 Issue/人员展示值，并用已验证 WritePlan 的最终 label 集合渲染 `final` description 后写回；请求 Ready 时，description 显示计划中的 Ready lifecycle label，但 GitLab MR 和实际 lifecycle status 此刻仍保持 Draft；marker 分别记录 actual snapshot digest 与 desired plan digest，不把计划值伪装成已落地值；
+8. 用该快照重新派生 live checkbox 与 Issue/人员展示值，并用已验证 WritePlan 的最终 label 集合渲染 `final` description 后写回（`description-write`）；这是正常流程最后一次远端写操作；marker 分别记录 actual snapshot digest 与 desired plan digest，不把计划值伪装成已落地值；
 9. 再次回读并执行 `structure` 级后置条件，确认 marker、digest 和全部受管字段；
-10. 请求 Ready 时，先执行 `ready` 条件；随后把 lifecycle status 改为 Ready 对应标签，并立即回读确认；
-11. 只有第 10 步成功后才执行最后一个正常写操作：把 MR 从 Draft 切换为 Ready；此后不得再写 description、标签或人员；
-12. 最后只读回读 title、description、labels、人员、状态和 HEAD SHA；只在本次 intent 的全部后置条件成立时返回退出码 `0`。
+10. 最后只读回读 title、description、labels、人员和 HEAD SHA；只在全部后置条件成立时返回退出码 `0`。
 
-第 10 步在切 Ready 前失败时，必须把 lifecycle status 补偿回 Draft 标签并回读，MR 保持 Draft；description 已显示 Ready plan 时还应 best-effort 恢复 Draft-consistent description，恢复失败按 partial state 报告。第 11 步 API 明确返回失败时执行相同补偿。第 11 步发生 timeout/connection reset 等结果未知时，先只读查询实际状态：若仍 Draft，则补偿 draft status/description；若已 Ready，则检查全部最终字段，完整一致时可以报告成功但必须记录 recovered-unknown-outcome；不一致时尝试补偿回 Draft + draft status/description 并验证。补偿也失败或 GitLab 持续不可达时返回 `PARTIAL_REMOTE_STATE`，列出最后已知状态和 MR URL，不得声称“保留 Draft”或成功。
+正常流程没有草稿/就绪切换，也没有补偿写操作；最终 description 写入之后不得再写 description、标签、人员或 title。任何远端写步骤发生 timeout/connection reset 等结果未知时，先只读查询实际状态（`create` 自身的未知结果通过 `create-outcome-query` 恢复查询确认），再决定继续、报告 `PARTIAL_WRITE` 还是报告 `PARTIAL_REMOTE_STATE`；不得声称成功。
 
-写 description 自身可能改变 MR 的 `updated_at`，因此并发检测不能把 `updated_at` 单字段当锁。V1 记录每步 pre-read/post-read、source HEAD SHA 和 GitLab request ID，按 10.4 的 best-effort 合同检测漂移；这些记录用于审计，不构成 GitLab 服务端 CAS。创建事务的每个远程写步骤都必须可从 JSON 结果审计。
+写 description 自身可能改变 MR 的 `updated_at`，因此并发检测不能把 `updated_at` 单字段当锁。V1 记录每步 pre-read/post-read、source HEAD SHA 和 GitLab request ID，按 10.4 的 best-effort 合同检测漂移；这些记录用于审计，不构成 GitLab 服务端 CAS。创建事务的每个远程写步骤都必须可从 JSON 结果审计：事务审计为 `journalVersion: 2`，操作包括 `create`、`labels-add`、`labels-remove`、`fields-write`、`description-write`，恢复查询为 `create-outcome-query`；phase 为 `normal` 或 `recovery`，最终状态为 `not-started`、`partial`、`complete` 或 `unknown`。
 
 任何中途失败：
 
 - 返回非零；
 - 不报告创建成功；
-- 在能够确认/补偿的失败路径中保留 Draft，不自动删除；远端结果未知时按上述 `PARTIAL_REMOTE_STATE` 报告；
-- 返回 MR URL、完成步骤、失败字段和安全重试命令；
-- 使用 `PARTIAL_DRAFT` 明确表示部分完成。
+- 已创建的 MR 保留，不自动删除；
+- 返回 MR URL、完成步骤、失败字段和安全下一步命令；
+- MR 存在且其状态已回读、但事务未完成时返回 `PARTIAL_WRITE`（退出码 `6`），用 `update <iid>` 或 `create --resume <iid> --resume-from <原始 Request>` 继续；
+- 远端状态无法证明（MR 不可读取或结果未知）时返回 `PARTIAL_REMOTE_STATE`，列出最后已知状态和 MR URL。
 
 ### 12.4 Description 所有权
 
@@ -1331,13 +1326,12 @@ CLI 从当前 Git 仓库确定：
 - title；
 - 八段 heading、顺序、固定英文 label 和 checkbox token；
 - description digest 与唯一诊断标记；
-- Draft/Ready 状态；
 - labels、assignee 和 reviewers；
 - Issue 快照；
 - squash 和 remove-source-branch 选项；
 - 当前验证层级适用的 GitLab live state。
 
-`verify --level structure` 对 description 的 canonical 合同使用 marker 指定的原始 Bundle；`ready` 与 `merge` 在此基础上读取当前 live state。三种 verify 默认均为只读，不会为了让 checkbox 变新而修改 MR。
+`verify --level structure` 对 description 的 canonical 合同使用 marker 指定的原始 Bundle；`ready` 在此基础上要求实时 MR 未被 GitLab 标记为草稿，`merge` 进一步要求 merge 标签、CI 通过、无未解决讨论和足够的合格审批。三种 verify 默认均为只读，不会为了让 checkbox 变新而修改 MR。
 
 ### 12.6 创建后修改
 
@@ -1419,7 +1413,7 @@ JSON 输出必须包含稳定的：
 - applied profile IDs；
 - label IDs 与名称；
 - validation details；
-- partial Draft 状态；
+- partial write 状态与事务审计；
 - source branch push plan/result；
 - `activationRequired` / `hostRefreshMayBeRequired`。
 
@@ -1582,8 +1576,8 @@ V1 决策：
 | `MANUAL_DESCRIPTION_CHANGE` | 当前 description 已被人工修改，默认拒绝覆盖 |
 | `UNMANAGED_MR` | MR 没有可验证的 harness-mrtool marker；V1 不接管 |
 | `POSTCONDITION_ERROR` | GitLab 回读结果与写入计划不一致 |
-| `PARTIAL_DRAFT` | Draft 已创建，但后续步骤失败 |
-| `PARTIAL_REMOTE_STATE` | Ready 转换或补偿时结果未知，无法证明远端处于完整 Draft/Ready 状态 |
+| `PARTIAL_WRITE` | MR 已创建且状态已回读，但事务未完成；用 `update <iid>` 或 `create --resume` 继续 |
+| `PARTIAL_REMOTE_STATE` | 远端写入结果未知，无法证明 MR 处于可读取的完整状态 |
 
 错误信息必须指出字段、期望值、实际值、是否发生远程写入和安全下一步。
 
@@ -1596,7 +1590,7 @@ V1 决策：
 | `3` | Git 仓库识别、GitLab 认证或权限错误 |
 | `4` | GitLab 网络/API 错误，且尚未发生远程写入 |
 | `5` | updater、签名、release set 或已知撤销错误 |
-| `6` | 已发生远程写入后的 partial Draft、并发变化或 postcondition 失败 |
+| `6` | 已发生远程写入后的 partial write、并发变化或 postcondition 失败 |
 | `7` | 本地 I/O、锁、缓存或未分类内部错误 |
 
 同一错误同时满足多个类别时，发生远程写入后的失败优先返回 `6`，更新安全错误优先于尚未写入的业务输入错误。所有命令和平台必须保持该映射。
@@ -1681,7 +1675,7 @@ JSON 输出至少区分：
 14. 固定模板文案为英文，用户 UTF-8 内容可正确保留；
 15. checkbox 只能由 typed state 渲染，不能由用户传 Markdown token；
 16. Risk Level、多文档选项和影响范围互斥规则全部生效；
-17. Ready MR 允许真实的 CI/Review pending，不伪造已完成状态；
+17. 新建 MR 允许真实的 CI/Review pending，不伪造已完成状态；
 18. `verify --level structure|ready|merge` 正确应用不同生命周期规则；
 19. 等价 YAML 文件和 JSON stdin 产生字节级一致的 title 与 description；
 20. 非交互缺字段时不产生 prompt；
@@ -1692,9 +1686,9 @@ JSON 输出至少区分：
 25. AI 传入标签名称、原始 GitLab ID、未知/过期/跨项目 token 或冲突 token 时被拒绝；
 26. 必选标签类别缺少候选时失败，且不创建新标签；
 27. 标签或人员在选择后被删除、重命名或权限变化时失败；
-28. MR 始终先以 Draft 创建，全部适用校验通过后才切 Ready；
+28. MR 直接以普通 MR 创建，标题为 `[type][module] <titleSummary>`，不使用任何前缀，也没有状态切换步骤；
 29. GitLab 回读的 title、description、labels 或人员字段不一致时返回非零；
-30. API 中途失败时按可证明状态明确报告 `PARTIAL_DRAFT` 或 `PARTIAL_REMOTE_STATE` 和 MR URL；
+30. API 中途失败时按可证明状态明确报告 `PARTIAL_WRITE` 或 `PARTIAL_REMOTE_STATE` 和 MR URL；
 31. 更新已有 MR 时保留 Policy 范围外的人工标签；
 32. description 被人工修改时默认拒绝覆盖；
 33. `verify` 能发现章节、checkbox、标签和诊断标记漂移；
@@ -1704,8 +1698,8 @@ JSON 输出至少区分：
 37. 在 GitLab 测试项目完成端到端测试，确认未创建任何意外标签；
 38. Authenticode 缺失不阻止 V1 功能验收，但发布说明准确披露 unsigned 状态。
 39. 已有 MR 默认继续使用其 marker 固定的原始 Bundle；只有显式 hash-confirmed migration 才更新模板版本；
-40. 创建流程在 GitLab 写入受管字段后按回读快照二次渲染，切 Ready 是最后一个正常写操作，最终只接受唯一 `final` marker；
-41. status label 按 Draft/Ready lifecycle 自动派生，Request 不能自报；
+40. 创建流程在 GitLab 写入受管字段后按回读快照二次渲染，最终 description 写入是最后一个正常写操作，最终只接受唯一 `final` marker；
+41. status label 由 Policy 自动派生，每个 MR 都是 `status::review`，Request 不能自报；
 42. 普通 manifest 检查在 2 秒网络预算内结束；发现新版后的业务前更新阶段使用独立的 5 分钟上限和明确进度；Windows 业务后持久化不计入该预算并准确报告 pending；所有字符串错误码遵循稳定 process exit-code 映射；
 43. `context --mr` 与 `schema show --from-mr` 能精确返回旧 Bundle 合同，显式迁移能列出全部可映射和待补字段；
 44. auto Profile 对任何 known+unknown 混合 diff 返回 ambiguous，而不是静默忽略未知文件。
@@ -1723,7 +1717,7 @@ JSON 输出至少区分：
 - Profile 发布冲突；
 - checkbox `checked`、`pending`、`not-applicable`；
 - checkbox 互斥和 N/A reason；
-- Draft、Ready、merge 生命周期；
+- `structure`、`ready`、`merge` 验证层级；
 - title/body Summary 独立性；
 - Unicode、代码块、表格和结构注入。
 
@@ -1749,8 +1743,8 @@ JSON 输出至少区分：
 - source branch 缺失、fast-forward push、diverged、protected branch 和 push 后 SHA 不一致；
 - GitLab 回读不一致；
 - opaque label/user candidate token 的过期、跨 Host/Project/类型复用；
-- Draft 到 Ready 的 status label 迁移；
-- Ready 最后写操作 timeout、未知结果查询和补偿失败；
+- 旧版工具留下的带前缀半成品 MR 经一次 `update` 转为普通 MR 并获得 `status::review`；
+- 最终 description 写入 timeout、未知结果查询，以及 `PARTIAL_WRITE` 与 `PARTIAL_REMOTE_STATE` 的区分；
 - 人工标签保留；
 - description 人工修改；
 - markerless/unmanaged MR；
@@ -1782,7 +1776,7 @@ JSON 输出至少区分：
 - 缺失信息逐项询问；
 - 只回传 CLI 发放的 label/user candidate token；
 - JSON stdin；
-- CLI success/error/partial Draft 透传；
+- CLI success/error/partial write 透传；
 - Skill staging 不修改 active path；
 - 显式 activation 后当前 invocation 仍使用入口 protocol；
 - 同会话后续发现或新会话发现两种 host 行为均能保持协议兼容。
@@ -1821,7 +1815,7 @@ V1 最终交付包含：
 
 - 建立测试标签集合；
 - 验证人工、YAML 和 Codex 三条路径；
-- 覆盖 Profile 组合、标签竞态、Partial Draft 和回读不一致；
+- 覆盖 Profile 组合、标签竞态、Partial write 和回读不一致；
 - 不改变生产项目合并规则。
 
 ### 阶段三：公开 GitHub 预发布
@@ -1875,6 +1869,7 @@ V1 最终交付包含：
 
 | 版本 | 日期 | 状态 | 说明 |
 | --- | --- | --- | --- |
+| v0.4.0 | 2026-11-06 | Reviewing | 移除 Draft 生命周期与 Request `intent`：create 直接创建 `[type][module] 摘要` 的普通 MR，再同步恰好三个标签、写入受管字段和最终 description，没有 Ready 切换和补偿；每个 MR 固定 `status::review`，Bundle `1.2.0` 固定池 13 个标签；取消审核人最少人数强制；`PARTIAL_DRAFT` 改名 `PARTIAL_WRITE`，事务审计 `journalVersion: 2` |
 | v0.3.0 | 2026-08-13 | Reviewing | 收口候选 token、标签生命周期、完整 Request、旧 Bundle 迁移、Draft 二次渲染、单 release-set 激活、stdin 自更新交接、Skill 显式激活、网络预算和稳定退出码合同 |
 | v0.2.0 | 2026-08-13 | Reviewing | 固化单二进制 CLI、公开 GitHub 唯一事实源、每次启动自动更新、离线 last-known-good、英文八段模板、四类 Profile、三种输入、checkbox 生命周期和 Skill 边界 |
 | v0.1.0 | 2026-08-13 | Superseded | 根据 MR 格式漂移、标签遗漏和工具发布讨论形成首版需求 |

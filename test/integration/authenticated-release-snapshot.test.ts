@@ -22,7 +22,7 @@ test('signed release archives become deterministic, restart-verifiable cache sna
  const copy=structuredClone(snapshot); // No weak-set brands survive this boundary.
  const authenticated=await authenticateReleaseSnapshot(copy,{platform,trustConfig:f.signed.trustConfig});
  assert.equal(authenticated.verified.manifest.components.cli.version,'0.1.6');
- assert.equal(authenticated.bundle.manifest.version,'1.1.0');
+ assert.equal(authenticated.bundle.manifest.version,'1.2.0');
  assert.equal(authenticated.executableName,'harness-mrtool');
  assert.deepEqual(Buffer.from(authenticated.executableBytes),f.native);
 });

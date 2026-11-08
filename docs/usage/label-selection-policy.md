@@ -2,7 +2,7 @@
 
 ## 状态与适用范围
 
-本工作树的 Template Bundle 为 `1.1.0`。默认 production 入口已接入 API
+本工作树的 Template Bundle 为 `1.2.0`。默认 production 入口已接入 API
 `create`、`create --upsert`、`update`、`verify` 和自动标签交互向导。
 CLI 与 Skill 默认使用 API 自动 MR 流程；缺少 Token 或 API 失败时停止，
 不会自动回退到 manual/SSH。`--auth auto` 仅兼容选择 API。
@@ -10,13 +10,13 @@ CLI 与 Skill 默认使用 API 自动 MR 流程；缺少 Token 或 API 失败时
 策略由 mrtool 代码执行，不依赖 Skill 文案；它无法限制绕过工具的原始 Git/API
 调用或 GitLab 网页操作，也不是服务端合并门禁。
 
-## 固定 14 标签池
+## 固定 13 标签池
 
 | 类别 | 允许值 | 每个 MR 数量 |
 | --- | --- | --- |
 | type | `type::feature`、`type::bug`、`type::doc`、`type::test`、`type::refactor`、`type::performance`、`type::build`、`type::ci`、`type::chore` | 恰好 1 |
 | priority | `priority::p0`、`priority::p1`、`priority::p2` | 恰好 1 |
-| status | `status::doing`、`status::review` | 恰好 1 |
+| status | `status::review` | 恰好 1 |
 
 最终标签集合恰好为三个，不是“至少三个”。`week::` 排期标签已移除；更新时
 移除额外标签（包括旧 week 标签和池外人工标签），而不是保留它们。
@@ -51,7 +51,7 @@ harness-mrtool preview --auth api --input request.json --input-format json --con
 - 未显式指定优先级时使用 `priority::p2`，不是根据标题猜测紧急程度。
 - 提升为 `p0` 或 `p1` 必须明确选择并提供非空理由：
   `--priority p1 --priority-reason "<reason>"`。
-- Draft 使用 `status::doing`；Ready 使用 `status::review`，不能任意组合。
+- 每个 MR 都使用 `status::review`；项目不再需要 `status::doing` 标签。
 - 自动交互向导使用同一选择器，展示自动标签和 digest；歧义时要求类型与
   digest 确认，提优先级时收集理由。非交互调用缺证据时失败，不擅自代答。
 
@@ -65,12 +65,13 @@ API 写入前校验 diff 和实时库存，事务写入后回读完整标签集�
 使用的 Bundle 与 create context 不同，当前路径要求 `context --mr <iid>` 后
 执行 `update <iid>`，或显式迁移；不得静默回退到当前 Bundle。
 已有可信签名的历史 policy 仍可按其原 Bundle 读取和验证，不能原地改写成新策略。
-新 `1.1.0` 写入的三标签约束也不能被历史 policy 宽松规则绕过。
+新 `1.2.0` 写入的三标签约束也不能被历史 policy 宽松规则绕过。
 `--migrate-template` 是显式迁移入口：先用
 `context --mr <iid> --migrate-template` 获取迁移绑定的上下文，再在 update 中提供
 `--confirm-migration <oldHash>:<newHash>`；TTY 向导展示哈希并收集确认。
 production adapter 验证原 receipt、精确历史 Bundle 和迁移绑定后执行事务。
-已有受控的 1.0.0 → 1.1.0 集成测试，但不代表已发布或完成真实 GitLab 验收。
+用 Bundle 1.0.0 或 1.1.0 创建的 MR 仍可读取、更新和验证；旧版工具留下、从未更新过的半成品 MR
+在执行一次 `update` 之前会在 `verify` 的标签检查中失败。受控迁移集成测试不代表已发布或完成真实 GitLab 验收。
 
 ## SSH 边界
 

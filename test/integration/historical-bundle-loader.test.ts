@@ -24,7 +24,11 @@ import {
   signedEnvelope,
 } from "../helpers/signing.ts";
 
-import { historicalManifest, historicalPolicy } from "../helpers/historical-template-bundle.ts";
+import {
+  historicalManifest,
+  historicalPolicy,
+  historicalRequestSchemaBytes,
+} from "../helpers/historical-template-bundle.ts";
 
 const repositoryRoot = resolve(import.meta.dirname, "../..");
 const bundleDirectory = resolve(repositoryRoot, "template-bundle");
@@ -53,10 +57,14 @@ async function exactReleaseFixture(historical = false): Promise<{
   const manifestBytes = new TextEncoder().encode(manifestText);
   const bundleManifestHash = sha256Utf8(manifestText);
   const files = new Map<string, Uint8Array>([["bundle-manifest.json", manifestBytes]]);
+  // The frozen 1.0.0 manifest pins the pre-1.2.0 policy and request schema
+  // bytes (the schema still carried `intent`), so both come from frozen fixtures.
   for (const file of manifest.files as JsonObject[]) {
     files.set(String(file.path), historical && file.path === "policy.yml"
       ? new TextEncoder().encode(historicalPolicy)
-      : await readFile(resolve(bundleDirectory, String(file.path))));
+      : historical && file.path === "schema.json"
+        ? new Uint8Array(await historicalRequestSchemaBytes())
+        : await readFile(resolve(bundleDirectory, String(file.path))));
   }
   const receiptPayload: JsonObject = {
     receiptVersion: 1,

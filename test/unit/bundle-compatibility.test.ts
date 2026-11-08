@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { cp, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import test from "node:test";
+import { SemVer } from "semver";
 
 import { loadTemplateBundle, type LoadedTemplateBundle } from "../../src/bundle/load.ts";
 import { validateTemplateBundle } from "../../src/bundle/validate.ts";
@@ -14,24 +15,49 @@ import { validateDesiredWritePlan, validateExternalContextSnapshot } from "../..
 import { assertTransactionStructure, buildVerificationReceipt, verifyMergeRequest, verifyStoredMergeRequest } from "../../src/app/verify-mr.ts";
 import type { RemoteMergeRequest } from "../../src/app/create-mr.ts";
 
-import { historicalPolicy, historicalManifest } from "../helpers/historical-template-bundle.ts";
+import {
+  historicalManifest,
+  historicalPolicy,
+  historicalRequestSchemaBytes,
+  loadHistoricalTemplateBundle,
+  writeHistoricalBundleDirectory,
+} from "../helpers/historical-template-bundle.ts";
 
 const root = resolve(import.meta.dirname, "../..");
 
-async function historicalFixture(t: test.TestContext): Promise<string> {
+async function historicalFixture(t: test.TestContext, generation: "1.0.0" | "1.1.0" = "1.0.0"): Promise<string> {
   const path = await mkdtemp(resolve(await realpath(tmpdir()), "bundle-compatibility-"));
   t.after(() => rm(path, { recursive: true, force: true }));
-  await cp(resolve(root, "template-bundle"), path, { recursive: true });
-  await writeFile(resolve(path, "policy.yml"), historicalPolicy);
-  await writeFile(resolve(path, "bundle-manifest.json"), historicalManifest);
+  await writeHistoricalBundleDirectory(path, generation);
   return path;
 }
 
-function semanticFixture(bundle: LoadedTemplateBundle, version: string, week: boolean): LoadedTemplateBundle {
+function directMergeRequestGeneration(version: string): boolean {
+  return new SemVer(version, { loose: false }).compare("1.2.0-0") >= 0;
+}
+
+/**
+ * Relabels a loaded bundle as another generation. Each generation has an exact
+ * contract: before 1.1 the week category exists; before 1.2 the request schema
+ * still carries `intent` and the policy still names the Draft lifecycle.
+ */
+async function semanticFixture(
+  bundle: LoadedTemplateBundle,
+  version: string,
+  week: boolean,
+  draftLifecycle = !directMergeRequestGeneration(version),
+): Promise<LoadedTemplateBundle> {
   const value = JSON.parse(JSON.stringify(bundle));
   value.manifest.version = version;
   delete value.policy.labels.categories.week;
   if (week) value.policy.labels.categories.week = { match: "^week::", required: true, max: 1 };
+  const expectedNames = { ready: "status::review", merge: "status::review" };
+  const review = { readyMinimumReviewers: 1, highRiskMinimumReviewers: 2 };
+  value.policy.labels.lifecycle.expectedNames = draftLifecycle ? { draft: "status::doing", ...expectedNames } : expectedNames;
+  value.policy.review = draftLifecycle ? { draftMinimumReviewers: 0, ...review } : review;
+  value.schema = directMergeRequestGeneration(version)
+    ? JSON.parse(await readFile(resolve(root, "template-bundle/schema.json"), "utf8"))
+    : JSON.parse((await historicalRequestSchemaBytes()).toString("utf8"));
   return value;
 }
 
@@ -44,24 +70,67 @@ test("published 1.0.0 bundle loads without rewriting its hash or historical week
   assert.doesNotThrow(() => validateTemplateBundle(bundle));
 });
 
-test("the no-week policy is published as bundle 1.1.0 with unchanged wire schemas", async () => {
+test("the direct merge request policy is published as bundle 1.2.0 without a Draft lifecycle or request intent", async () => {
   const bundle = await loadTemplateBundle(resolve(root, "template-bundle"));
-  assert.equal(bundle.manifest.version, "1.1.0");
+  assert.equal(bundle.manifest.version, "1.2.0");
   assert.equal(bundle.manifest.inputSchema, 1);
   assert.equal(bundle.manifest.policySchema, 1);
   assert.deepEqual(Object.keys((bundle.policy.labels as any).categories).sort(), ["priority", "status", "type"]);
+  assert.deepEqual((bundle.policy.labels as any).lifecycle.expectedNames, { ready: "status::review", merge: "status::review" });
+  assert.deepEqual(bundle.policy.review, { readyMinimumReviewers: 1, highRiskMinimumReviewers: 2 });
+  assert.equal(Object.hasOwn((bundle.schema as any).properties, "intent"), false);
+  assert.equal((bundle.schema as any).required.includes("intent"), false);
+});
+
+test("the frozen 1.1.0 generation still loads with its Draft lifecycle policy and intent schema", async () => {
+  const bundle = await loadHistoricalTemplateBundle("1.1.0");
+  assert.equal(bundle.manifest.version, "1.1.0");
+  assert.deepEqual(Object.keys((bundle.policy.labels as any).categories).sort(), ["priority", "status", "type"]);
+  assert.deepEqual((bundle.policy.labels as any).lifecycle.expectedNames,
+    { draft: "status::doing", ready: "status::review", merge: "status::review" });
+  assert.deepEqual(bundle.policy.review, { draftMinimumReviewers: 0, readyMinimumReviewers: 1, highRiskMinimumReviewers: 2 });
+  assert.equal((bundle.schema as any).required.includes("intent"), true);
+  assert.doesNotThrow(() => validateTemplateBundle(bundle));
 });
 
 test("versioned label policy contracts accept old build metadata and new prereleases but reject cross-policy relabeling", async () => {
   const bundle = await loadTemplateBundle(resolve(root, "template-bundle"));
   for (const version of ["1.0.0", "1.0.0+bundle.7", "1.0.1"]) {
-    assert.doesNotThrow(() => validateTemplateBundle(semanticFixture(bundle, version, true)), version);
-    assert.throws(() => validateTemplateBundle(semanticFixture(bundle, version, false)), /label categories/, version);
+    const withWeek = await semanticFixture(bundle, version, true);
+    const withoutWeek = await semanticFixture(bundle, version, false);
+    assert.doesNotThrow(() => validateTemplateBundle(withWeek), version);
+    assert.throws(() => validateTemplateBundle(withoutWeek), /label categories/, version);
   }
-  for (const version of ["1.1.0", "1.1.0-rc.1", "1.1.0+bundle.7", "1.2.0"]) {
-    assert.doesNotThrow(() => validateTemplateBundle(semanticFixture(bundle, version, false)), version);
-    assert.throws(() => validateTemplateBundle(semanticFixture(bundle, version, true)), /label categories/, version);
+  for (const version of ["1.1.0", "1.1.0-rc.1", "1.1.0+bundle.7", "1.2.0", "1.2.0-rc.1", "1.2.0+bundle.3", "1.3.0"]) {
+    const withoutWeek = await semanticFixture(bundle, version, false);
+    const withWeek = await semanticFixture(bundle, version, true);
+    assert.doesNotThrow(() => validateTemplateBundle(withoutWeek), version);
+    assert.throws(() => validateTemplateBundle(withWeek), /label categories/, version);
   }
+});
+
+test("the Draft lifecycle contract is exact per generation and cannot be relabeled across 1.2.0", async () => {
+  const bundle = await loadTemplateBundle(resolve(root, "template-bundle"));
+  // A 1.1 generation must still name the Draft lifecycle label and reviewer minimum.
+  for (const version of ["1.1.0", "1.1.0+bundle.7"]) {
+    const relabeled = await semanticFixture(bundle, version, false, false);
+    assert.throws(() => validateTemplateBundle(relabeled), /lifecycle names/, version);
+  }
+  // A 1.2 generation must not: merge requests are created directly.
+  for (const version of ["1.2.0", "1.2.0-rc.1", "1.3.0"]) {
+    const relabeled = await semanticFixture(bundle, version, false, true);
+    assert.throws(() => validateTemplateBundle(relabeled), /lifecycle names/, version);
+    const staleReview = await semanticFixture(bundle, version, false);
+    (staleReview.policy.review as any).draftMinimumReviewers = 0;
+    assert.throws(() => validateTemplateBundle(staleReview), /review policy/, version);
+    const staleSchema = await semanticFixture(bundle, version, false) as any;
+    staleSchema.schema = JSON.parse((await historicalRequestSchemaBytes()).toString("utf8"));
+    assert.throws(() => validateTemplateBundle(staleSchema), /request schema/, version);
+  }
+  // The frozen intent schema is still the exact contract before 1.2.0.
+  const legacySchemaOnNew = await semanticFixture(bundle, "1.1.0", false) as any;
+  legacySchemaOnNew.schema = JSON.parse(await readFile(resolve(root, "template-bundle/schema.json"), "utf8"));
+  assert.throws(() => validateTemplateBundle(legacySchemaOnNew), /request schema/);
 });
 
 test("historical payload tampering still fails hash verification before policy validation", async (t) => {
@@ -80,7 +149,7 @@ test("neither policy generation accepts weakened category rules or unknown categ
       (categories: any) => { categories.extra = { match: "^extra::", required: true, max: 1 }; },
       (categories: any) => { delete categories.status; },
     ]) {
-      const value = semanticFixture(bundle, version, week);
+      const value = await semanticFixture(bundle, version, week);
       mutate((value.policy.labels as any).categories);
       assert.throws(() => validateTemplateBundle(value), (error) => isToolError(error, "TEMPLATE_ERROR"));
     }
@@ -124,7 +193,7 @@ test("historical live and receipt verification retain week labels without applyi
   await assert.rejects(verifyStoredMergeRequest({ ...inputs,
     receiptLoader: { loadVerified: async () => ({ trusted: false as const, receipt: null }) },
   }), /verification failed/i);
-  const wrongVersion = semanticFixture(bundle, "1.0.1", true);
+  const wrongVersion = await semanticFixture(bundle, "1.0.1", true);
   await assert.rejects(verifyStoredMergeRequest({ ...inputs,
     bundleLoader: { loadVerifiedExact: async () => ({ trusted: true as const, bundle: wrongVersion }) },
   }), /verification failed/i);
@@ -191,7 +260,7 @@ test("historical read-only context retains week and dynamic category candidates 
 test("new policy context filters selectable labels but retains historical applied identities for verification", async () => {
   const bundle = await loadTemplateBundle(resolve(root, "template-bundle"));
   const result = await contextFixture(bundle);
-  assert.equal(result.binding.bundle.version, "1.1.0");
+  assert.equal(result.binding.bundle.version, "1.2.0");
   assert.deepEqual([...result.requiredLabelCategories].sort(), ["priority", "type"]);
   const labels = result.candidates.filter((candidate) => candidate.kind === "label");
   assert.deepEqual(labels.map(({ name }) => name).sort(), ["priority::p2", "type::bug"]);

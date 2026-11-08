@@ -51,7 +51,7 @@ SSH/scp/git remotes infer HTTP first and try same-host HTTPS when HTTP is unavai
 
 The default production entry wires API create/update/upsert/verify and the
 automatic-label wizard. These are working-tree capabilities, not proof of a
-published release or live GitLab acceptance. Bundle `1.1.0` uses a fixed 14-label
+published release or live GitLab acceptance. Bundle `1.2.0` uses a fixed 13-label
 pool and exactly three final labels: one type, one priority, one lifecycle status.
 
 - Let the CLI classify the canonical actual committed diff and compute its digest.
@@ -61,7 +61,8 @@ pool and exactly three final labels: one type, one priority, one lifecycle statu
   `--label-diff-digest <sha256>`; never invent a digest, silently choose `chore`, or
   reuse confirmation after the diff changes. Known conflicting types are rejected.
 - Default priority is p2. Only an explicit p0/p1 escalation with a nonblank
-  `--priority-reason` may override it. Draft uses doing; Ready uses review.
+  `--priority-reason` may override it. Every merge request gets the review
+  lifecycle status label.
 - Required labels must already exist in project/ancestor-group inventory. Never
   create remote labels. Updates remove extras, including week labels, leaving
   exactly three; do not promise to preserve out-of-pool manual labels.
@@ -105,26 +106,28 @@ confirmation. The adapter verifies the previous receipt and exact historical
 Bundle. Controlled migration tests are not proof of live acceptance or publication.
 
 Report the single CLI JSON document without rewriting its `ok`, `code`, partial
-Draft state, transaction audit, `activationRequired`, or
+write state, transaction audit, `activationRequired`, or
 `hostRefreshMayBeRequired` fields. A failed or partial transaction is not success.
 
 ## Resume a provisional transaction prefix
 
-If a partial create already produced a Draft, preserve its
-IID, original Request file, private context proof, and transaction audit. Stop on
-the API blocker and resolve it before continuing. Never blindly retry ordinary
-create or patch the MR with raw API calls. Explicit resume requires the exact
-original provisional description and one complete transaction prefix:
+If a partial create already produced a merge request (`PARTIAL_WRITE`), preserve
+its IID, original Request file, private context proof, and transaction audit.
+Stop on the API blocker and resolve it before continuing. Never blindly retry
+ordinary create or patch the MR with raw API calls. Either continue with
+`update <iid>`, or resume explicitly. Explicit resume requires an open MR, the
+exact original provisional description, and one complete transaction prefix:
 
 - No labels and no assignee/reviewers.
-- The full planned Draft label set and no assignee/reviewers.
-- That same full Draft label set and all planned assignee/reviewer selections.
+- The full planned label set and no assignee/reviewers.
+- That same full planned label set and all planned assignee/reviewer selections.
 
 Title, target branch, squash, and source-removal flags must match the original
-plan throughout. Ready requests still use the Draft lifecycle label at this
-stage. Partial/extra labels, mixed fields, edited descriptions, and final
-descriptions are unsupported. Resume skips already complete labels and managed
-fields; `verify` reads stored state and does not recover the transaction.
+plan throughout. Partial/extra labels, mixed fields, edited descriptions, and
+final descriptions are unsupported, and half-finished MRs left by older tool
+versions with a prefixed title cannot be resumed; continue those with
+`update <iid>`. Resume skips already complete labels and managed fields;
+`verify` reads stored state and does not recover the transaction.
 
 After resolving the blocker, obtain a fresh ordinary create context using the
 API context command above without `--mr`. Build a separate fresh Request with

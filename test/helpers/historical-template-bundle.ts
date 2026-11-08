@@ -1,7 +1,47 @@
-import { cp, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { loadTemplateBundle, type LoadedTemplateBundle } from "../../src/bundle/load.ts";
+
+const fixtureRoot = resolve(import.meta.dirname, "../fixtures/template-bundle");
+
+/**
+ * Frozen request schema bytes shared by the published 1.0.0 and 1.1.0 bundles.
+ * Bundle 1.2.0 removed the `intent` field, so the live schema no longer
+ * matches the hashes pinned in those signed manifests.
+ */
+export async function historicalRequestSchemaBytes(): Promise<Buffer> {
+  return readFile(resolve(fixtureRoot, "schema-before-1.2.0.json"));
+}
+
+/** Frozen published 1.1.0 policy and manifest bytes (Draft lifecycle still present). */
+export async function historicalBundle110(): Promise<{ readonly policy: string; readonly manifest: string }> {
+  return {
+    policy: await readFile(resolve(fixtureRoot, "policy-1.1.0.yml"), "utf8"),
+    manifest: await readFile(resolve(fixtureRoot, "bundle-manifest-1.1.0.json"), "utf8"),
+  };
+}
+
+/**
+ * Materializes a historical bundle generation into a temporary directory by
+ * copying today's shared payloads and overwriting the generation-specific
+ * schema, policy and manifest bytes. The caller removes the directory.
+ */
+export async function writeHistoricalBundleDirectory(
+  path: string,
+  generation: "1.0.0" | "1.1.0",
+): Promise<void> {
+  await cp(resolve(import.meta.dirname, "../../template-bundle"), path, { recursive: true });
+  await writeFile(resolve(path, "schema.json"), await historicalRequestSchemaBytes());
+  if (generation === "1.0.0") {
+    await writeFile(resolve(path, "policy.yml"), historicalPolicy);
+    await writeFile(resolve(path, "bundle-manifest.json"), historicalManifest);
+  } else {
+    const bundle = await historicalBundle110();
+    await writeFile(resolve(path, "policy.yml"), bundle.policy);
+    await writeFile(resolve(path, "bundle-manifest.json"), bundle.manifest);
+  }
+}
 
 // Frozen published 1.0.0 bytes, not a reconstruction using today's policy/defaults.
 export const historicalPolicy = "policySchema: 1\nlabels:\n  categories:\n    week:\n      match: \"^week::\"\n      required: true\n      max: 1\n    type:\n      match: \"^type::\"\n      required: true\n      max: 1\n    priority:\n      match: \"^priority::\"\n      required: true\n      max: 1\n    status:\n      match: \"^status::\"\n      required: true\n      max: 1\n  lifecycle:\n    statusCategory: status\n    expectedNames:\n      draft: \"status::doing\"\n      ready: \"status::review\"\n      merge: \"status::review\"\ntitle:\n  typeRegistry: \"registries/fields.json#titleTypes\"\n  typeLabelCompatibility:\n    feat: \"^type::feature$\"\n    fix: \"^type::bug$\"\n    docs: \"^type::doc$\"\n    test: \"^type::test$\"\n    refactor: \"^type::refactor$\"\n    perf: \"^type::performance$\"\n    build: \"^type::build$\"\n    ci: \"^type::ci$\"\n    chore: \"^type::chore$\"\nreview:\n  draftMinimumReviewers: 0\n  readyMinimumReviewers: 1\n  highRiskMinimumReviewers: 2\n";
@@ -9,12 +49,12 @@ export const historicalManifest = "{\"bundleId\":\"harness-mr-default\",\"files\
 
 // Loads frozen historical metadata and policy through the real hash-verifying
 // loader. This is a byte fixture, not an authenticated historical-loader seam.
-export async function loadHistoricalTemplateBundle(): Promise<LoadedTemplateBundle> {
+export async function loadHistoricalTemplateBundle(
+  generation: "1.0.0" | "1.1.0" = "1.0.0",
+): Promise<LoadedTemplateBundle> {
   const path = await mkdtemp(resolve(await realpath(tmpdir()), "historical-template-"));
   try {
-    await cp(resolve(import.meta.dirname, "../../template-bundle"), path, { recursive: true });
-    await writeFile(resolve(path, "policy.yml"), historicalPolicy);
-    await writeFile(resolve(path, "bundle-manifest.json"), historicalManifest);
+    await writeHistoricalBundleDirectory(path, generation);
     return await loadTemplateBundle(path);
   } finally {
     await rm(path, { recursive: true, force: true });

@@ -5,7 +5,7 @@ import {
   isRemoteMutationError,
   isRemoteReadError,
 } from "../../src/app/remote-outcome.ts";
-import type { CreateDraftInput, ManagedFieldsInput } from "../../src/app/create-mr.ts";
+import type { CreateMergeRequestInput, ManagedFieldsInput } from "../../src/app/create-mr.ts";
 import { GitLabClient } from "../../src/gitlab/client.ts";
 import type {
   GitLabHttpRequest,
@@ -37,9 +37,9 @@ function client(transport: GitLabHttpTransport, token = TOKEN): GitLabClient {
   });
 }
 
-function createInput(): CreateDraftInput {
+function createInput(): CreateMergeRequestInput {
   return {
-    title: "Draft: [fix][app] Preserve CSS output",
+    title: "[fix][app] Preserve CSS output",
     description: "Provisional description",
     sourceProjectId: SOURCE_ID,
     sourceBranch: SOURCE_BRANCH,
@@ -53,7 +53,7 @@ function createInput(): CreateDraftInput {
 
 function managedInput(): ManagedFieldsInput {
   return {
-    title: "Draft: [fix][app] Preserve CSS output",
+    title: "[fix][app] Preserve CSS output",
     targetBranch: TARGET_BRANCH,
     assigneeUserId: "41",
     reviewerUserIds: ["42", "43"],
@@ -75,9 +75,9 @@ function mergeRequestBody(
     iid,
     project_id: Number(TARGET.id),
     web_url: `https://gitlab.example.test/group/project/-/merge_requests/${String(iid)}`,
-    title: "Draft: [fix][app] Preserve CSS output",
+    title: "[fix][app] Preserve CSS output",
     description: "Provisional description",
-    draft: true,
+    draft: false,
     state: "opened",
     source_project_id: Number(SOURCE_ID),
     source_branch: SOURCE_BRANCH,
@@ -87,7 +87,7 @@ function mergeRequestBody(
     author: userBody(40, "author"),
     assignees: [userBody(41)],
     reviewers: [userBody(42), userBody(43)],
-    labels: [{ id: 3, name: "status::doing", archived: false }],
+    labels: [{ id: 3, name: "status::review", archived: false }],
     squash: true,
     should_remove_source_branch: false,
     head_pipeline: { status: "success", sha: SOURCE_SHA },
@@ -103,9 +103,9 @@ function mutationBody(iid = 12): Record<string, unknown> {
     source_project_id: Number(SOURCE_ID),
     source_branch: SOURCE_BRANCH,
     target_branch: TARGET_BRANCH,
-    title: "Draft: [fix][app] Preserve CSS output",
+    title: "[fix][app] Preserve CSS output",
     description: "Provisional description",
-    draft: true,
+    draft: false,
     state: "opened",
   };
 }
@@ -181,7 +181,7 @@ function enqueueCapabilities(fake: FakeGitLab, modes: readonly string[] = ["APPE
   });
 }
 
-test("creates a Draft with an exact label-free REST body and returns only the acknowledged IID", async () => {
+test("creates a merge request with an exact label-free REST body and returns only the acknowledged IID", async () => {
   const fake = new FakeGitLab();
   enqueueCapabilities(fake);
   fake.enqueue("POST", "/api/v4/projects/7/merge_requests", {
@@ -189,7 +189,7 @@ test("creates a Draft with an exact label-free REST body and returns only the ac
     body: mutationBody(),
   });
 
-  const receipt = await remote(fake).createDraft(createInput());
+  const receipt = await remote(fake).create(createInput());
 
   assert.deepEqual(receipt, { requestId: "req-create", value: { iid: 12 } });
   assert.deepEqual(fake.requests.map((request) => [request.method, requestPath(request)]), [
@@ -200,7 +200,7 @@ test("creates a Draft with an exact label-free REST body and returns only the ac
   assert.deepEqual(fake.requests[2]?.body, {
     source_branch: SOURCE_BRANCH,
     target_branch: TARGET_BRANCH,
-    title: "Draft: [fix][app] Preserve CSS output",
+    title: "[fix][app] Preserve CSS output",
     description: "Provisional description",
     source_project_id: Number(SOURCE_ID),
     target_project_id: Number(TARGET.id),
@@ -208,6 +208,17 @@ test("creates a Draft with an exact label-free REST body and returns only the ac
     remove_source_branch: true,
   });
   assert.equal(Object.hasOwn(fake.requests[2]?.body as object, "labels"), false);
+});
+
+test("create rejects an input bound to another target project before any request", async () => {
+  const fake = new FakeGitLab();
+
+  await assert.rejects(remote(fake).create({ ...createInput(), targetProjectId: "8" }), (error: unknown) => {
+    assert.equal(isRemoteMutationError(error, "rejected"), true);
+    assert.equal(isRemoteMutationError(error) ? error.reason : null, "validation");
+    return true;
+  });
+  assert.equal(fake.requests.length, 0);
 });
 
 test("findOpen applies all required filters, consumes every page, and hard-binds every snapshot", async () => {
@@ -362,7 +373,7 @@ test("capability failures reject create and label writes before any mutation req
         },
       };
       const adapter = remote(transport);
-      const mutation = action === "create" ? adapter.createDraft(createInput())
+      const mutation = action === "create" ? adapter.create(createInput())
         : action === "labels-add" ? adapter.addLabels(12, ["gid://gitlab/ProjectLabel/3"])
         : adapter.removeLabels(12, ["gid://gitlab/ProjectLabel/3"]);
 
@@ -388,7 +399,7 @@ test("capability failures reject create and label writes before any mutation req
 
 test("writes managed fields as numeric IDs and keeps every PUT body on its operation whitelist", async () => {
   const fake = new FakeGitLab();
-  for (const requestId of ["req-fields", "req-description", "req-ready", "req-draft"]) {
+  for (const requestId of ["req-fields", "req-description"]) {
     fake.enqueue("PUT", "/api/v4/projects/7/merge_requests/12", {
       headers: { "x-request-id": requestId },
       body: mutationBody(),
@@ -398,12 +409,12 @@ test("writes managed fields as numeric IDs and keeps every PUT body on its opera
 
   assert.deepEqual(await adapter.writeManagedFields(12, managedInput()), { requestId: "req-fields" });
   assert.deepEqual(await adapter.writeDescription(12, "Final description"), { requestId: "req-description" });
-  assert.deepEqual(await adapter.markReady(12, "[fix][app] Preserve CSS output"), { requestId: "req-ready" });
-  assert.deepEqual(await adapter.markDraft(12, "Draft: [fix][app] Preserve CSS output"), { requestId: "req-draft" });
 
+  // Without a Draft stage there is no title-only PUT: managed fields and the
+  // description are the only update bodies the remote ever sends.
   assert.deepEqual(fake.requests.map((request) => request.body), [
     {
-      title: "Draft: [fix][app] Preserve CSS output",
+      title: "[fix][app] Preserve CSS output",
       target_branch: TARGET_BRANCH,
       assignee_ids: [41],
       reviewer_ids: [42, 43],
@@ -411,8 +422,6 @@ test("writes managed fields as numeric IDs and keeps every PUT body on its opera
       remove_source_branch: false,
     },
     { description: "Final description" },
-    { title: "[fix][app] Preserve CSS output" },
-    { title: "Draft: [fix][app] Preserve CSS output" },
   ]);
   for (const request of fake.requests) {
     const body = request.body as Record<string, unknown>;
@@ -443,7 +452,7 @@ test("rejects malformed mutation acknowledgements as unknown instead of using th
     body: { ...mutationBody(), project_id: 8 },
   });
 
-  await assert.rejects(remote(fake).createDraft(createInput()), (error: unknown) => {
+  await assert.rejects(remote(fake).create(createInput()), (error: unknown) => {
     assert.equal(isRemoteMutationError(error, "unknown"), true);
     assert.equal(isRemoteMutationError(error) ? error.reason : null, "server");
     assert.equal(isRemoteMutationError(error) ? error.requestId : null, "req-wrong-project");

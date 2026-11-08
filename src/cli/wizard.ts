@@ -53,7 +53,7 @@ interface CatalogEntry {
 export interface WizardCatalog {
   // Optional only for source compatibility with custom catalog ports. Collection
   // fails closed when absent; a legacy token catalog is never a fallback.
-  readonly automaticLabels?: Omit<MandatoryLabelInput, "intent" | "options">;
+  readonly automaticLabels?: Omit<MandatoryLabelInput, "options">;
   readonly contextId: string;
   readonly issueIid: number | null;
   readonly targetBranch: string;
@@ -609,13 +609,12 @@ interface CollectedRequest {
 async function collectAutomaticLabels(
   invocation: CliInvocation,
   catalog: WizardCatalog,
-  intent: "draft" | "ready",
   console: WizardConsole,
 ) {
   const evidence = catalog.automaticLabels;
   if (evidence === undefined) throw wizardError("canonical automatic-label evidence is unavailable");
   let options = labelOptionsForProductionInvocation(invocation);
-  const select = () => selectMandatoryLabels({ ...evidence, intent, options });
+  const select = () => selectMandatoryLabels({ ...evidence, options });
   let selection;
   try {
     selection = select();
@@ -673,8 +672,7 @@ async function collectRequest(
   const updateConfirmations = await confirmInteractiveUpdate(invocation, catalog, console);
   const profiles = await explicitOrSelectedProfiles(invocation, catalog, console);
   const profileIds = profiles.map((profile) => profile.id);
-  const intent = await chooseOne(console, "intent", "Select merge request intent", ["draft", "ready"] as const, String);
-  const automaticLabels = await collectAutomaticLabels(invocation, catalog, intent, console);
+  const automaticLabels = await collectAutomaticLabels(invocation, catalog, console);
   const titleType = automaticLabels.selection.titleType;
   const module = invocation.options.module ?? await console.text({ id: "title.module", prompt: "Enter title module" });
   const titleSummary = invocation.options.titleSummary ?? await console.text({
@@ -763,7 +761,6 @@ async function collectRequest(
   const request = {
     schemaVersion: 1,
     contextId: catalog.contextId,
-    intent,
     profileIds,
     targetBranch: catalog.targetBranch,
     title: { type: titleType, module, titleSummary },
