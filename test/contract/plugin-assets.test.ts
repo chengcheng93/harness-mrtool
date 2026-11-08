@@ -16,7 +16,7 @@ test("Codex plugin packaging emits a bounded, self-contained archive", async (t)
     const result = await packagePlugin({
       inputDirectory: join(repositoryRoot, "plugins", "harness-mrtool"),
       outputDirectory: output,
-      version: "0.1.7",
+      version: "0.1.8",
     });
     const archive = await readFile(result.archivePath);
     const entries = unzipSync(archive);
@@ -25,6 +25,16 @@ test("Codex plugin packaging emits a bounded, self-contained archive", async (t)
     assert.ok(names.includes("skills/harness-mr/SKILL.md"));
     assert.ok(names.includes("skills/harness-mr/scripts/bootstrap.ps1"));
     assert.ok(names.includes("README.md"));
+    assert.ok(names.includes("scripts/setup-gitlab.ps1"));
+    assert.ok(names.includes("hooks/hooks.json"));
+    assert.ok(names.includes("hooks/session-start.ps1"));
+    assert.ok(names.includes("hooks/session-start.sh"));
+    assert.equal(Buffer.compare(Buffer.from(entries["scripts/setup-gitlab.ps1"]!), await readFile(join(repositoryRoot, "scripts/setup-gitlab.ps1"))), 0);
+    const hooks = JSON.parse(Buffer.from(entries["hooks/hooks.json"]!).toString("utf8"));
+    assert.deepEqual(Object.keys(hooks.hooks), ["SessionStart"]);
+    assert.equal(hooks.hooks.SessionStart[0].matcher, "startup|resume|clear");
+    assert.match(hooks.hooks.SessionStart[0].hooks[0].command, /session-start\.sh/u);
+    assert.match(hooks.hooks.SessionStart[0].hooks[0].commandWindows, /session-start\.ps1/u);
     assert.equal(names.some((name) => name.includes("node_modules") || name.startsWith(".git/")), false);
     assert.equal(
       Buffer.compare(
@@ -35,7 +45,7 @@ test("Codex plugin packaging emits a bounded, self-contained archive", async (t)
     );
     const manifest = JSON.parse(Buffer.from(entries[".codex-plugin/plugin.json"]!).toString("utf8")) as Record<string, unknown>;
     assert.equal(manifest.name, "harness-mrtool");
-    assert.equal(manifest.version, "0.1.7");
+    assert.equal(manifest.version, "0.1.8");
     const sums = await readFile(result.sumsPath, "utf8");
     assert.match(sums, /^[a-f0-9]{64}  harness-mrtool-codex-plugin\.zip\n$/u);
     const readme = Buffer.from(entries["README.md"]!).toString("utf8").replace(/\s+/gu, " ");
@@ -49,12 +59,21 @@ test("Codex plugin packaging emits a bounded, self-contained archive", async (t)
       assert.match(readme, /codex plugin add harness-mrtool@harness-mrtool/u);
       assert.doesNotMatch(readme, /--ref release-candidate-0\.1\.0/u);
     });
-    await t.test("packaged README makes API MR creation the default without automatic SSH fallback", () => {
+    await t.test("packaged README defaults to direct API MR creation with preview only on request", () => {
       assert.match(readme, /The default CLI and Skill flow uses the GitLab API/u);
-      assert.match(readme, /context --auth api -> structured Request -> preview -> user confirmation -> create\/update -> verify/u);
+      assert.match(readme, /context --auth api -> structured Request -> create\/update -> verify -> MR URL/u);
+      assert.match(readme, /[Pp]review[^.]*only when explicitly requested/u);
+      assert.doesNotMatch(readme, /structured Request -> preview -> user confirmation/u);
       assert.match(readme, /Missing credentials or API failures stop the flow; never automatically fall back to SSH or manual handoff/u);
       assert.match(readme, /`--auth auto` remains a compatibility alias for API selection without SSH fallback/u);
       assert.doesNotMatch(readme, /default Skill path is SSH-first|optional API invocation|A GitLab token is optional/u);
+    });
+    await t.test("packaged README describes early initialization and hook trust", () => {
+      assert.match(readme, /setup-gitlab\.ps1/u);
+      assert.match(readme, /auth check --output json/u);
+      assert.match(readme, /SessionStart/u);
+      assert.match(readme, /review and trust/u);
+      assert.match(readme, /no PostInstall/u);
     });
     await t.test("packaged README limits manual handoff to an explicit human request and refuses SSH MR creation", () => {
       assert.match(readme, /Use `manual --auth ssh` only after an explicit human request for manual handoff/u);

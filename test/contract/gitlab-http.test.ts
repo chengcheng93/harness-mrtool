@@ -5,7 +5,8 @@ import test from "node:test";
 
 import { isToolError } from "../../src/contracts/errors.ts";
 import { GitLabClient } from "../../src/gitlab/client.ts";
-import { GitLabHttpClient, normalizeGitLabOrigin } from "../../src/gitlab/http.ts";
+import { GitLabHttpClient, isGitLabRequestError, normalizeGitLabOrigin } from "../../src/gitlab/http.ts";
+import { createHostScopedGitLabCredentialProvider, GitLabCredentialError, isGitLabCredentialError } from "../../src/platform/gitlab-credential.ts";
 import { FakeGitLab } from "../helpers/fake-gitlab.ts";
 
 for (const origin of ["http://gitlab.example.test:8080", "https://gitlab.example.test"]) {
@@ -114,3 +115,92 @@ test("HTTP transport refuses redirects without sending the credential to another
   assert.deepEqual(receivedTokens, [token]);
   assert.equal(redirectedRequests, 0);
 });
+
+test("HTTP credential preflight preserves trusted local errors and never contacts GitLab", async () => {
+  const credential = createHostScopedGitLabCredentialProvider({ environment: {} });
+  let calls = 0;
+  const api = new GitLabHttpClient({
+    origin: "https://gitlab.example.test",
+    tokenProvider: () => credential.tokenForHost("gitlab.example.test"),
+    transport: { request: async () => { calls += 1; throw new Error("must not contact GitLab"); } },
+  });
+  await assert.rejects(api.requestJson("GET", "/api/v4/user"), (error: unknown) => {
+    assert.ok(isGitLabCredentialError(error));
+    assert.equal(error.reason, "host-missing");
+    assert.equal(error.details.field, "gitlab.credential");
+    assert.doesNotMatch(error.message, /rejected|permission|remote/u);
+    return true;
+  });
+  assert.equal(calls, 0);
+
+  const original = new GitLabCredentialError("token-missing");
+  const throwing = new GitLabHttpClient({
+    origin: "https://gitlab.example.test", tokenProvider: async () => { throw original; },
+  });
+  await assert.rejects(throwing.requestJson("GET", "/api/v4/user"), (error: unknown) => error === original);
+});
+
+test("untrusted credential provider failures and malformed tokens are local, sanitized failures", async () => {
+  for (const [tokenProvider, reason] of [
+    [async () => { throw new Error("provider-secret-canary"); }, "source-unavailable"],
+    [async () => " provider-secret-canary ", "token-invalid"],
+  ] as const) {
+    let calls = 0;
+    const api = new GitLabHttpClient({
+      origin: "https://gitlab.example.test", tokenProvider,
+      transport: { request: async () => { calls += 1; throw new Error("must not contact GitLab"); } },
+    });
+    await assert.rejects(api.requestJson("GET", "/api/v4/user"), (error: unknown) => {
+      assert.ok(isGitLabCredentialError(error));
+      assert.equal(error.reason, reason);
+      assert.doesNotMatch(inspect(error, { depth: 10 }), /provider-secret-canary/u);
+      assert.equal(error.cause, undefined);
+      return true;
+    });
+    assert.equal(calls, 0);
+  }
+});
+
+for (const status of [401, 403]) {
+  test(`remote HTTP ${status} keeps its status and actionable authentication diagnostic`, async () => {
+    const token = "http-auth-secret-canary";
+    let calls = 0;
+    const api = new GitLabHttpClient({
+      origin: "https://gitlab.example.test", tokenProvider: async () => token,
+      transport: { request: async () => {
+        calls += 1;
+        return { status, headers: { "x-request-id": "req-auth" }, body: new TextEncoder().encode(token) };
+      } },
+    });
+    await assert.rejects(api.requestJson("GET", "/api/v4/user"), (error: unknown) => {
+      assert.ok(isGitLabRequestError(error));
+      assert.equal(error.code, "AUTH_ERROR");
+      assert.equal(error.kind, "auth");
+      assert.equal(error.status, status);
+      assert.equal(error.details.actual, `HTTP ${status}; request-id req-auth`);
+      assert.match(error.message, new RegExp(`HTTP ${status}`, "u"));
+      assert.match(error.details.safeNextStep, status === 401 ? /expired or revoked/u : /scope.*permission/u);
+      assert.doesNotMatch(inspect(error, { depth: 10 }), /http-auth-secret-canary/u);
+      return true;
+    });
+    assert.equal(calls, 1);
+  });
+}
+
+for (const name of ["Error", "AbortError"]) {
+  test(`transport ${name} remains a network failure without suggesting credential rejection`, async () => {
+    const api = new GitLabHttpClient({
+      origin: "https://gitlab.example.test", tokenProvider: async () => "network-secret-canary",
+      transport: { request: async () => { const error = new Error("network-secret-canary"); error.name = name; throw error; } },
+    });
+    await assert.rejects(api.requestJson("GET", "/api/v4/user"), (error: unknown) => {
+      assert.ok(isGitLabRequestError(error));
+      assert.equal(error.code, "GITLAB_ERROR");
+      assert.equal(error.kind, name === "AbortError" ? "timeout" : "network");
+      assert.equal(error.status, null);
+      assert.doesNotMatch(error.message, /credential|permission|rejected/u);
+      assert.doesNotMatch(inspect(error, { depth: 10 }), /network-secret-canary/u);
+      return true;
+    });
+  });
+}

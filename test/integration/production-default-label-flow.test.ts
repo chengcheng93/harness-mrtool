@@ -113,7 +113,7 @@ async function setup(t: test.TestContext) {
     });
     return { code, stdout, stderr };
   }
-  async function runInteractive(args: string[], driftAfterApproval = false) {
+  async function runInteractive(args: string[], driftDuringCollection = false) {
     let stdout = "", stderr = "";
     const prompts: string[] = [];
     const code = await runProductionMain([...args, "--output", "json"], {
@@ -144,10 +144,14 @@ async function setup(t: test.TestContext) {
             if (id === "title.titleSummary") return raw.title.titleSummary;
             throw new Error(`Unexpected text ${id}`);
           },
-          confirm: async ({ id, defaultValue }) => { prompts.push(id); return id === "labels.escalate" ? false : id === "labels.accept" ? true : defaultValue; },
+          confirm: async ({ id, defaultValue }) => {
+            prompts.push(id);
+            assert.equal(id.startsWith("labels."), false, "routine automatic label confirmation is disabled");
+            return defaultValue;
+          },
         },
         wizardEditor: { edit: async () => {
-          if (driftAfterApproval && state.mr !== null) state.mr = { ...state.mr, description: `Changed after approval.\n${state.mr.description}` };
+          if (driftDuringCollection && state.mr !== null) state.mr = { ...state.mr, description: `Changed during collection.\n${state.mr.description}` };
           return Buffer.from(JSON.stringify({ changes: raw.changes, motivation: raw.motivation,
             noIssueReason: "A self-contained maintenance change.", impact: { details: raw.impact.details },
             verification: { items: raw.verification.items.map(({ id: _id, ...item }: Record<string, unknown>) => item), acceptanceEvidence: raw.verification.acceptanceEvidence, knownGaps: raw.verification.knownGaps },
@@ -281,26 +285,33 @@ test("explicit force replacement permits body edits but still authenticates mark
   assert.equal(f.state.mr!.description.startsWith("Manual note."), false);
 });
 
-test("actual TTY create and update display automatic labels without managed-token selection", async (t) => {
+test("actual TTY create and update complete without routine approval and return the stored MR URL", async (t) => {
   const f = await setup(t);
   const created = await f.runInteractive(["create"]);
   assert.equal(created.code, 0, created.stdout + created.stderr);
-  assert.ok(created.prompts.includes("labels.accept"));
-  assert.equal(created.prompts.includes("labels.type"), false);
+  assert.equal(created.prompts.some((id) => id.startsWith("labels.") || id.startsWith("confirmation.")), false);
+  assert.deepEqual(f.state.mr!.labels.map((label) => label.name).sort(), ["priority::p2", "status::review", "type::bug"]);
+  assert.equal(JSON.parse(created.stdout).data.webUrl, f.state.mr!.webUrl);
   const updated = await f.runInteractive(["update", "88"]);
   assert.equal(updated.code, 0, updated.stdout + updated.stderr);
-  assert.ok(updated.prompts.includes("confirmation.update-marker"));
-  assert.equal(updated.prompts.includes("labels.type"), false);
+  assert.equal(updated.prompts.some((id) => id.startsWith("labels.") || id.startsWith("confirmation.")), false);
+  assert.equal(JSON.parse(updated.stdout).data.webUrl, f.state.mr!.webUrl);
+  const verified = await f.run(["verify", "88", "--level", "structure"]);
+  assert.equal(verified.code, 0, verified.stdout + verified.stderr);
 });
 
-test("TTY update refuses description drift after the displayed approval", async (t) => {
-  const f = await setup(t); await f.issue();
-  const created = await f.run(["create"]); assert.equal(created.code, 0, created.stdout);
-  const before = f.state.writes.length;
-  const result = await f.runInteractive(["update", "88", "--force-replace-description"], true);
-  assert.notEqual(result.code, 0); assert.equal(f.state.writes.length, before);
-  assert.match(result.stdout, /CONCURRENT_UPDATE/);
-});
+for (const flags of [[], ["--force-replace-description"]]) {
+  test("TTY update still refuses description drift during collection " + flags.join(" "), async (t) => {
+    const f = await setup(t); await f.issue();
+    const created = await f.run(["create"]); assert.equal(created.code, 0, created.stdout);
+    const before = f.state.writes.length;
+    const result = await f.runInteractive(["update", "88", ...flags], true);
+    assert.notEqual(result.code, 0); assert.equal(f.state.writes.length, before);
+    const output = JSON.parse(result.stdout);
+    assert.equal(output.code, flags.length === 0 ? "UNMANAGED_MR" : "CONCURRENT_UPDATE");
+    assert.equal(output.remoteWrite.state, "not-attempted");
+  });
+}
 
 test("API create refuses offline mode before any live mutation", async (t) => {
   const f = await setup(t); await f.issue();

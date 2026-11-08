@@ -22,6 +22,7 @@ import {
   mergeCliCommandHandlers,
   type ProductionCommandServices,
 } from "./cli/commands/production.ts";
+import { createAuthCheckCommandHandlers, type AuthCheckOptions } from "./cli/commands/auth.ts";
 import { createManualCommandServices } from "./cli/commands/manual.ts";
 import type { ProfileDetectionRepositoryRuntime } from "./cli/commands/repository.ts";
 import {
@@ -111,6 +112,7 @@ interface TextOutput {
 
 export interface ProductionMainDependencies {
   readonly cwd?: string;
+  readonly authCheck?: Omit<AuthCheckOptions, "cwd">;
   readonly loadCurrentBundle?: () => Promise<TrustedBundleSelection>;
   readonly profileRepository?: ProfileDetectionRepositoryRuntime;
   readonly readOnly?: ProductionRuntimeDependencies["readOnly"];
@@ -295,6 +297,7 @@ async function publicCommandHandlers(
   commandKind: ReturnType<typeof parseCliInvocation>["command"]["kind"],
 ): Promise<CliCommandHandlers> {
   const cwd = dependencies.cwd ?? process.cwd();
+  if (commandKind === "auth.check") return createAuthCheckCommandHandlers({ cwd, ...dependencies.authCheck });
   const currentBundle = dependencies.loadCurrentBundle === undefined
     ? commandUsesActiveBundle(commandKind)
       ? await defaultBundleSelection(dependencies.updateChannelDefaults)
@@ -439,6 +442,39 @@ function textCommandOutput(command: string, value: unknown): string {
   return `Command: ${command}\nStatus: completed\n`;
 }
 
+async function textAuthCheckOutput(execution: CliCommandExecution): Promise<string> {
+  // Use the exact JSON output guard before rendering any server-provided metadata.
+  const chunks: string[] = [];
+  await new CliJsonOutput({ ...execution.context, cliVersion }, {
+    write(chunk, callback) { chunks.push(chunk); callback(); return true; },
+  }).success(execution.output);
+  const envelope = JSON.parse(chunks.join("")) as { data: Record<string, unknown> | null };
+  const data = envelope.data;
+  if (data === null || data.command !== "auth.check" || data.authenticated !== true ||
+      typeof data.origin !== "string" || data.writePermission !== "not-tested") {
+    throw new TypeError("Authorization output is invalid");
+  }
+  const user = data.user as Record<string, unknown> | null;
+  const scope = data.apiScope as Record<string, unknown> | null;
+  const project = data.project as Record<string, unknown> | null;
+  if (user === null || typeof user !== "object" || typeof user.username !== "string" ||
+      typeof user.id !== "number" || !Number.isSafeInteger(user.id) || user.id < 1 ||
+      scope === null || typeof scope !== "object" || scope.status !== "verified" ||
+      project === null || typeof project !== "object" ||
+      (project.status !== "verified" && project.status !== "not-checked")) {
+    throw new TypeError("Authorization output is invalid");
+  }
+  return [
+    "Command: auth.check", "Status: completed",
+    `GitLab: ${data.origin}`,
+    `User: ${user.username} (${user.id})`,
+    "API scope: verified (api)",
+    project.status === "verified" ? "Project permission: verified (Developer or higher)"
+      : "Project permission: not-checked (run auth check inside the target repository)",
+    "Write permission: not-tested (no remote write was attempted)", "",
+  ].join("\n");
+}
+
 async function textFailure(error: unknown, stderr: TextOutput): Promise<number> {
   const chunks: string[] = [];
   const result = await new CliJsonOutput(
@@ -452,11 +488,17 @@ async function textFailure(error: unknown, stderr: TextOutput): Promise<number> 
     },
   ).failure(error);
   try {
-    const failure = JSON.parse(chunks.join("")) as { readonly code?: unknown; readonly message?: unknown };
+    const failure = JSON.parse(chunks.join("")) as {
+      readonly code?: unknown; readonly message?: unknown;
+      readonly error?: { readonly safeNextStep?: unknown };
+    };
     if (typeof failure.code !== "string" || typeof failure.message !== "string") {
       throw new TypeError("Failure output is invalid");
     }
     stderr.write(`${failure.code}: ${failure.message}\n`);
+    if (typeof failure.error?.safeNextStep === "string") {
+      stderr.write(`Safe next step: ${failure.error.safeNextStep}\n`);
+    }
   } catch {
     stderr.write("INTERNAL_ERROR: Command execution failed.\n");
   }
@@ -476,7 +518,9 @@ async function executeCliText(
       | undefined;
     if (handler === undefined) throw new TypeError("Command handler is unavailable");
     const execution = await handler(invocation);
-    stdout.write(textCommandOutput(invocation.command.kind, execution.output?.data));
+    stdout.write(invocation.command.kind === "auth.check"
+      ? await textAuthCheckOutput(execution)
+      : textCommandOutput(invocation.command.kind, execution.output?.data));
     return 0;
   } catch (error) {
     return textFailure(error, stderr);
@@ -550,7 +594,9 @@ export async function runProductionMain(
       ? createProductionUpdatePreflight()
       : undefined
   );
-  if (updatePreflight !== undefined) {
+  // Authorization diagnostics must remain usable when installation/update recovery is unavailable.
+  const authorizationOnly = sanitizedArguments[0] === "auth" && sanitizedArguments[1] === "check";
+  if (updatePreflight !== undefined && !authorizationOnly) {
     try {
       const parsed = parseCliInvocation(sanitizedArguments);
       await runPublicInvocationPreflight(updatePreflight, parsed);
@@ -567,7 +613,7 @@ export async function runProductionMain(
 
   try {
     const parsed = parseCliInvocation(sanitizedArguments);
-    await recoverInstallationBeforePublicInvocation(dependencies, parsed.command.kind);
+    if (parsed.command.kind !== "auth.check") await recoverInstallationBeforePublicInvocation(dependencies, parsed.command.kind);
   } catch (error) {
     if (requestsJsonOutput(sanitizedArguments)) {
       return (await new CliJsonOutput(

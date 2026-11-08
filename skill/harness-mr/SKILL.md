@@ -1,6 +1,6 @@
 ---
 name: harness-mr
-description: Use when preparing, creating, updating, or verifying GitLab merge requests through harness-mrtool's structured CLI contract.
+description: Use when installing or initializing harness-mrtool GitLab authorization, or preparing, creating, updating, or verifying GitLab merge requests through its structured CLI contract.
 ---
 
 # Harness MR
@@ -9,6 +9,30 @@ This Skill is a thin natural-language adapter. The CLI is the authority for
 schemas, profiles, label selection, candidate identity, rendering, Git operations,
 and GitLab writes. Do not duplicate its classifier or invent labels, user IDs,
 review states, issue data, or template text.
+
+## Initialize GitLab access after installation
+
+After installing the CLI/plugin, or connecting a new GitLab host, run the read-only
+initialization check immediately; do not postpone it until MR submission:
+
+```text
+harness-mrtool auth check --host <http-or-https-origin> --output json
+```
+
+Reuse existing host-bound credentials. On Windows, the plugin's
+`scripts/setup-gitlab.ps1` guides configuration with hidden token input, verifies
+it before saving, and loads the current user's saved environment for the check.
+If configuration is missing, guide this setup immediately; never request a token
+in chat, put it in argv, or store it in repository files. A GitLab PAT needs
+`api` scope. A browser login or successful Git SSH authentication does not
+establish API authorization.
+
+Plugin SessionStart checks run only after the user trusts its hooks. If hooks are
+unavailable or untrusted, perform the same initialization explicitly. Report
+initialization as incomplete until the check succeeds. An instance-only check
+has not established access to a particular project: when binding a repository,
+run `harness-mrtool auth check --output json` there to verify project permissions.
+These checks do not require a work branch and never submit an MR.
 
 ## Start with local evidence
 
@@ -69,26 +93,37 @@ pool and exactly three final labels: one type, one priority, one lifecycle statu
 - Use CLI-issued context/candidate identities for other request selections. Do
   not manufacture label candidate tokens or use them to override automatic labels.
 
-Stream the structured Request through stdin for preview; never place request
-contents, candidate tokens, credentials, or long text in arguments:
+A user request to submit, create, or update an MR authorizes the normal API write.
+Run automatic checks and proceed directly to create/update; do not add a preview
+or repeat human confirmation for an already authorized submission. Ask only for
+required information that cannot be established or an explicit confirmation
+required by a genuine blocker, such as unknown/ambiguous diff classification.
 
-```text
-harness-mrtool preview --auth api --client codex-skill --client-version <skill-semver> --skill-protocol <protocol> --input - --input-format json --output json
-```
-
-Show the preview and obtain required confirmation before writing. Preserve the
-exact normalized Request and any diff-bound confirmation for create/update.
-Use exactly one of create for a new MR or update for an existing MR:
+Stream the structured Request through stdin; never place request contents,
+candidate tokens, credentials, or long text in arguments. Preserve the exact
+normalized Request and any diff-bound confirmation. Use exactly one of create
+for a new MR or update for an existing MR:
 
 ```text
 harness-mrtool create --auth api --client codex-skill --client-version <skill-semver> --skill-protocol <protocol> --input - --input-format json --output json
 harness-mrtool update <iid> --auth api --client codex-skill --client-version <skill-semver> --skill-protocol <protocol> --input - --input-format json --output json
 ```
 
-Verify the resulting stored MR state before reporting completion:
+After create/update succeeds, verify the resulting stored MR state automatically
+before reporting completion, then return the verified MR link. Keep routine
+checks internal; explain a real blocker or partial failure instead of presenting
+it as a completed submission:
 
 ```text
 harness-mrtool verify <iid> --auth api --level structure --client codex-skill --client-version <skill-semver> --skill-protocol <protocol> --output json
+```
+
+Run the read-only preview only when the user explicitly requests it; it is not a
+prerequisite for ordinary API create/update. If the user asks to review a preview
+before submission, show it and wait for their decision:
+
+```text
+harness-mrtool preview --auth api --client codex-skill --client-version <skill-semver> --skill-protocol <protocol> --input - --input-format json --output json
 ```
 
 `preview` and API create/update `--dry-run` make zero remote writes and do not
@@ -105,9 +140,14 @@ Read the displayed hashes before confirming; do not invent or reuse stale
 confirmation. The adapter verifies the previous receipt and exact historical
 Bundle. Controlled migration tests are not proof of live acceptance or publication.
 
-Report the single CLI JSON document without rewriting its `ok`, `code`, partial
-write state, transaction audit, `activationRequired`, or
-`hostRefreshMayBeRequired` fields. A failed or partial transaction is not success.
+On verified success, return a concise Markdown MR link, with at most one short
+summary sentence. Keep CLI calls on `--output json`; show raw JSON only when the
+user explicitly requests it.
+
+On failure or partial write, faithfully report the CLI's `ok`, `code`, actual
+remote state, transaction audit, and applicable `activationRequired` or
+`hostRefreshMayBeRequired` fields. Do not rewrite these values or present a
+failed or partial transaction as success.
 
 ## Resume a provisional transaction prefix
 
@@ -133,16 +173,17 @@ After resolving the blocker, obtain a fresh ordinary create context using the
 API context command above without `--mr`. Build a separate fresh Request with
 the same committed diff, request meaning, and selected candidate identities.
 Carry forward the existing authorization for this unchanged submission and the
-same diff-bound confirmation flags for preview and resume. Historical private
-proof is read-only: at most 16 expired contexts remain for up to 24 hours after
-expiry; retention never revives expired or consumed candidate tickets.
+same diff-bound confirmation flags for resume and any explicitly requested
+preview. Historical private proof is read-only: at most 16 expired contexts
+remain for up to 24 hours after expiry; retention never revives expired or
+consumed candidate tickets.
 
-Preview the fresh Request and validate explicit resume with `--dry-run`. Only
-after both succeed, repeat the resume command with `--dry-run` removed, then run
-structure verification before reporting completion:
+Validate explicit resume with `--dry-run`. After it succeeds, repeat the resume
+command with `--dry-run` removed, then run structure verification and return the
+MR link. Preview remains optional on explicit request; do not ask again for an
+unchanged, already authorized submission:
 
 ```text
-harness-mrtool preview --auth api --client codex-skill --client-version <skill-semver> --skill-protocol <protocol> --input <fresh-request.json> --output json
 harness-mrtool create --resume <iid> --resume-from <original-request.json> --auth api --client codex-skill --client-version <skill-semver> --skill-protocol <protocol> --input <fresh-request.json> --dry-run --output json
 harness-mrtool verify <iid> --auth api --level structure --client codex-skill --client-version <skill-semver> --skill-protocol <protocol> --output json
 ```
@@ -166,9 +207,12 @@ outside it.
 
 ## Updates
 
-If the CLI is absent, use the bundled bootstrap script with an explicit
-versioned public HTTPS release and its published SHA-256. The script must not
-receive or print credentials. A newer Skill is staged in the CLI-owned,
+If the CLI is absent, use the verified CLI installer: `scripts/install.ps1` in
+the source distribution or `scripts/install-cli.ps1` in the plugin. The bundled
+Skill bootstrap manages Skill files only; it does not install the CLI or configure
+GitLab access. Complete the authorization initialization above after installing
+the CLI. Release bootstrap downloads require an explicit versioned public HTTPS
+release and its published SHA-256; bootstrap arguments must not contain credentials. A newer Skill is staged in the CLI-owned,
 non-scanned directory; activation requires the user's explicit
 `skill activate --version <semver> --path <user-owned-skill-root>`.
 

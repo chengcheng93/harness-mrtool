@@ -1,7 +1,10 @@
 # Authentication and trust
 
 The default CLI and Skill submission path uses GitLab API authentication with
-`--auth api`: context, preview, MR creation or update, and verified readback.
+`--auth api`: context, MR creation or update, verified readback, and the MR URL.
+An explicit submission request authorizes the normal write; validation stays in
+the background without another confirmation. Preview and dry-run are optional
+and run only when the user requests them.
 `--auth auto` remains a compatibility selection of API without SSH fallback.
 Missing credentials or API failures stop the flow; they do not automatically
 switch it to manual handoff.
@@ -18,6 +21,36 @@ remote URLs or chat; see the README for hidden-input examples.
 The adapter rejects local paths and unsupported endpoint forms before reading a
 credential. Credentials are treated as secrets even when a remote response
 tries to reflect them; successful projections run the session exposure guard.
+
+## Installation and authorization initialization
+
+Run `harness-mrtool auth check --host <http-or-https-origin> --output json`
+immediately after installation, before declaring the tool ready. This is a
+read-only check of the authenticated user and the token's `api` scope. An
+instance-only result does not establish project access. Run
+`harness-mrtool auth check --output json` inside a bound repository to check
+project access and minimum Developer permissions, independently of its current
+branch, diff, and Template Bundle.
+
+On Windows, `scripts/setup-gitlab.ps1` reuses matching Process/User credentials
+or guides hidden-input configuration. It validates before persisting the
+credential to the current Windows user's environment. No token is accepted in
+arguments or written to a repository file. Other running programs keep their
+previous environment; restart them or use the setup launcher to load saved
+credentials into its child process. No API preflight creates a branch or MR.
+
+The CLI installer runs authorization initialization after publishing its verified
+binary. A failed check leaves the binary installed and reports initialization
+incomplete. The plugin includes a SessionStart check; Codex requires the user to
+review and trust plugin hooks before running them. If hooks are unavailable or
+untrusted, run initialization explicitly. See the
+[GitLab initialization guide](../usage/gitlab-initialization.md).
+
+Local credential errors keep `field: gitlab.credential` and a fixed reason such
+as `host-missing`, `host-mismatch`, or `token-missing`; no network request has
+been made. A real remote HTTP 401 or 403 retains its status. Network errors and
+timeouts are separate GitLab failures. Raw token-provider exceptions and tokens
+must never appear in diagnostics.
 
 Manual handoff is available only after an explicit human request and requires
 `manual --auth ssh`; it does not read or require a GitLab API token. Its source

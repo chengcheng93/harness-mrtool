@@ -374,13 +374,9 @@ async function confirmInteractiveUpdate(
   if (command.migrateTemplate && command.confirmation !== null && command.confirmation !== evidence.migrationDigest) {
     throw confirmationMismatch();
   }
-  await assertExactConfirmation(
-    console,
-    "confirmation.update-marker",
-    `Update MR !${command.iid}. Current description SHA-256: ${evidence.descriptionDigest}. ` +
-      `Type the exact managed marker digest to update. Confirmation digest: ${evidence.updateMarkerDigest}`,
-    evidence.updateMarkerDigest,
-  );
+  // Bind ordinary updates to the verified catalog automatically. The production
+  // write gate rechecks these digests before mutation; no digest transcription is
+  // needed unless the user explicitly requests replacement or migration below.
   if (command.forceReplaceDescription) {
     await assertExactConfirmation(
       console,
@@ -639,22 +635,8 @@ async function collectAutomaticLabels(
       throw error;
     }
   }
-  if (invocation.options.priority === null && await console.confirm({
-    id: "labels.escalate",
-    prompt: `Automatic labels: ${selection.names.join(", ")}. Diff digest: ${selection.diffDigest}. Escalate priority above p2?`,
-    defaultValue: false,
-  })) {
-    const priority = await chooseOne(console, "labels.priority", "Select explicit priority escalation",
-      ["p1", "p0"] as const, String);
-    const priorityReason = (await console.text({ id: "labels.priority-reason", prompt: "Explain why this priority escalation is required" })).trim();
-    options = { ...options, priority, priorityReason };
-    selection = select();
-  }
-  if (!await console.confirm({
-    id: "labels.accept",
-    prompt: `Automatic labels: ${selection.names.join(", ")}. Diff digest: ${selection.diffDigest}. Continue?`,
-    defaultValue: true,
-  })) throw wizardError("automatic labels were not accepted");
+  // Known changes use the default p2 automatically. Priority escalation remains
+  // an explicit CLI choice with a required reason, not a routine wizard prompt.
   return { selection, options };
 }
 

@@ -9,7 +9,7 @@ readonly MAX_EXPANDED_BYTES=$((512 * 1024 * 1024))
 readonly MARKER_NAME=".harness-mrtool-install.json"
 
 die() { printf '%s\n' "harness-mrtool install failed: $1" >&2; exit 1; }
-usage() { printf 'usage: %s --tag cli-vX.Y.Z --sha256 HEX [--destination DIR] | %s --update [--destination DIR] | %s --repair [--destination DIR]\n' "$0" "$0" "$0" >&2; exit 2; }
+usage() { printf 'usage: %s --tag cli-vX.Y.Z --sha256 HEX [--destination DIR] [--gitlab-host ORIGIN] | %s --update [--destination DIR] | %s --repair [--destination DIR]\n' "$0" "$0" "$0" >&2; exit 2; }
 
 platform_name=$(uname -s 2>/dev/null || true)
 platform_arch=$(uname -m 2>/dev/null || true)
@@ -29,12 +29,13 @@ case "$platform_name:$platform_arch" in
   *) die "unsupported platform; use the Windows installer on Windows or Darwin ARM64" ;;
 esac
 
-tag= sha256_expected= destination="$default_destination" mode=install
+tag= sha256_expected= destination="$default_destination" mode=install gitlab_host=
 while (($#)); do
   case "$1" in
     --tag) (($# >= 2)) || usage; tag=$2; shift 2 ;;
     --sha256) (($# >= 2)) || usage; sha256_expected=$2; shift 2 ;;
     --destination) (($# >= 2)) || usage; destination=$2; shift 2 ;;
+    --gitlab-host) (($# >= 2)) || usage; gitlab_host=$2; shift 2 ;;
     --update) [[ "$mode" == install ]] || usage; mode=update; shift ;;
     --repair) [[ "$mode" == install ]] || usage; mode=repair; shift ;;
     *) usage ;;
@@ -166,3 +167,11 @@ printf '{"archiveSha256":"%s","executableSha256":"%s","repository":"%s","schemaV
 chmod 600 "$tmpdir/tree/$MARKER_NAME"
 mv -n "$tmpdir/tree" "$destination" || die "destination publication failed"
 [[ ! -e "$tmpdir/tree" ]] || die "destination publication raced"
+
+# Binary publication has completed. Authorization failure leaves the verified CLI installed.
+auth_check_args=(auth check --output json)
+if [[ -n "$gitlab_host" ]]; then auth_check_args+=(--host "$gitlab_host"); fi
+if ! "$destination/$executable_name" "${auth_check_args[@]}"; then
+  printf '%s\n' 'CLI is installed, but GitLab initialization is incomplete. Configure a host-bound GitLab api-scope token securely in the current environment and run harness-mrtool auth check --output json. Browser login and Git SSH authentication do not configure API access. On Windows, use setup-gitlab.ps1 for the hidden token prompt. Do not put a token in arguments or files.' >&2
+  exit 3
+fi

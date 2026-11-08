@@ -12,7 +12,7 @@
 
 ## 1. 架构目标
 
-本架构把 MR 生成从 AI 临场组织文本改为确定性编译过程：调用者提交结构化 Request，CLI 固定完成解析、Schema 校验、模板渲染和 Git 事务校验。CLI 与 Skill 默认使用 `--auth api`，通过 `context -> preview -> create/update -> verify` 完成实时上下文、候选解析、MR 写入和最终回读；`--auth auto` 只兼容选择 API，不回退 SSH。缺少 Token 或 API 失败时停止，不自动生成手工交接材料。仅在人类明确要求手工交接时才运行 `manual --auth ssh`；Git 本身仍可使用 SSH 发布源分支。API 路径返回成功意味着远端实际状态已满足该事务固定的 Bundle 及强制写入合同。工具不代表 GitLab 合并门禁，也无法限制原始 Git/API 或网页操作。
+本架构把 MR 生成从 AI 临场组织文本改为确定性编译过程：调用者提交结构化 Request，CLI 固定完成解析、Schema 校验、模板渲染和 Git 事务校验。CLI 与 Skill 默认使用 `--auth api`，通过 `context -> create/update -> verify -> 返回 MR 链接` 完成实时上下文、候选解析、MR 写入和最终回读；`--auth auto` 只兼容选择 API，不回退 SSH。缺少 Token 或 API 失败时停止，不自动生成手工交接材料。仅在人类明确要求手工交接时才运行 `manual --auth ssh`；Git 本身仍可使用 SSH 发布源分支。API 路径返回成功意味着远端实际状态已满足该事务固定的 Bundle 及强制写入合同。工具不代表 GitLab 合并门禁，也无法限制原始 Git/API 或网页操作。
 
 V1 的优先级依次为：
 
@@ -97,8 +97,11 @@ domain         -X-> concrete HTTP, fs, process, console or CLI parsing
 默认 Skill 流程使用 API，缺少凭据或 API 失败时停止：
 
 ```text
-schema show -> profiles list -> context --auth api -> Request -> preview -> create/update -> verify
+schema show -> profiles list -> context --auth api -> Request -> create/update -> verify -> MR URL
 ```
+
+用户要求提交或更新即授权普通 API 写入：校验在后台执行，不再要求预览或再次确认。
+`preview`/`--dry-run` 仅在用户主动要求时运行；缺少必要信息、类型歧义或失败时才中断。
 
 仅在人类明确要求手工交接时启用以下例外，不自动回退到该路径：
 

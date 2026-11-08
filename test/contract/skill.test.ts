@@ -84,10 +84,10 @@ function assertApiDefaultInstructions(instructions: string): void {
     "harness-mrtool profiles list",
     "harness-mrtool context --auth api",
     "Build the Request only after API context succeeds",
-    "harness-mrtool preview --auth api",
     "harness-mrtool create --auth api",
     "harness-mrtool update <iid> --auth api",
     "harness-mrtool verify <iid> --auth api",
+    "harness-mrtool preview --auth api",
     "harness-mrtool manual --auth ssh",
   ];
   let previousIndex = -1;
@@ -96,6 +96,16 @@ function assertApiDefaultInstructions(instructions: string): void {
     assert.ok(index > previousIndex, `${step} must follow the preceding workflow step`);
     previousIndex = index;
   }
+  assert.match(normalized, /user request.*authorizes.*API write/u);
+  assert.match(normalized, /automatic checks.*directly to create\/update/u);
+  assert.match(normalized, /do not.*preview.*repeat human confirmation.*authorized submission/u);
+  assert.match(normalized, /preview only when.*user explicitly requests/u);
+  assert.match(normalized, /return.*verified MR link/u);
+  assert.match(normalized, /verified success.*concise Markdown MR link/u);
+  assert.match(normalized, /raw JSON only when the user explicitly requests/u);
+  assert.match(normalized, /failure or partial write.*faithfully report.*ok.*code/u);
+  assert.doesNotMatch(normalized, /Report only the CLI JSON result|Report the single CLI JSON document/u);
+  assert.doesNotMatch(normalized, /Show the preview and obtain required confirmation before writing/u);
   assert.match(normalized, /API credentials are missing or API requests fail, stop and explain/u);
   assert.match(normalized, /Never automatically fall back to manual/u);
   assert.match(normalized, /Manual mode is disabled by default/u);
@@ -119,6 +129,20 @@ function assertApiDefaultInstructions(instructions: string): void {
     .split(/\s+/u)
     .slice(1);
   assert.deepEqual(parseCliInvocation(verifyArguments).command, { kind: "verify", iid: 12, level: "structure" });
+  for (const kind of ["create", "update", "preview"] as const) {
+    const example = instructions.split("\n").find((line) => line.startsWith(`harness-mrtool ${kind} `));
+    assert.ok(example, `Skill must provide an executable ${kind} example`);
+    const invocation = parseCliInvocation(example
+      .replaceAll("<iid>", "12")
+      .replaceAll("<skill-semver>", "1.1.0")
+      .replaceAll("<protocol>", "1")
+      .split(/\s+/u).slice(1));
+    assert.equal(invocation.command.kind, kind);
+    assert.equal(invocation.options.authMode, "api");
+    assert.equal(invocation.options.input, "-", "Requests must be streamed through stdin");
+    assert.equal(invocation.options.output, "json");
+    assert.equal(invocation.options.dryRun, false, "Default write examples must perform the authorized submission");
+  }
 }
 
 test("generated Skill instructions default to the complete API workflow and require human opt-in for SSH manual mode", () => {
@@ -154,10 +178,8 @@ for (const path of ["../../skill/harness-mr/SKILL.md", "../../plugins/harness-mr
       .replaceAll("<fresh-request.json>", "fresh-request.json")
       .split(/\s+/u).slice(1));
     const invocations = args.map((arguments_) => parseCliInvocation(arguments_));
-    assert.equal(invocations.length, 3, "Resume sequence must preview, dry-run, then verify");
-    const [preview, resume, verify] = invocations;
-    assert.deepEqual(preview!.command, { kind: "preview" });
-    assert.equal(preview!.options.input, "fresh-request.json");
+    assert.equal(invocations.length, 2, "Resume validation must dry-run then verify without mandatory preview");
+    const [resume, verify] = invocations;
     assert.deepEqual(resume!.command, { kind: "create", upsert: false,
       resumeIid: 157, resumeFrom: "original-request.json" });
     assert.equal(resume!.options.input, "fresh-request.json");
@@ -167,7 +189,7 @@ for (const path of ["../../skill/harness-mr/SKILL.md", "../../plugins/harness-mr
       assert.equal(invocation.options.authMode, "api");
       assert.equal(invocation.options.output, "json");
     }
-    const write = parseCliInvocation(args[1]!.filter((argument) => argument !== "--dry-run"));
+    const write = parseCliInvocation(args[0]!.filter((argument) => argument !== "--dry-run"));
     assert.deepEqual(write.command, resume!.command);
     assert.equal(write.options.input, resume!.options.input);
     assert.equal(write.options.dryRun, false);

@@ -2,11 +2,11 @@
 
 ## 目标
 
-CLI/Plugin `0.1.7` 当前为待验收发布候选，不代表已有新 Release。
+CLI/Plugin `0.1.8` 当前为待验收发布候选，不代表已有新 Release。
 历史 `0.1.5` 的 SSH-first 行为不作为当前候选的默认流程。
 本文件保留原路径，便于已有链接继续访问。
 
-- 默认 API：`context -> preview -> create/update -> verify`，用于自动标签、负责人、审核人、MR 写入和回读验证。
+- 默认 API：`context -> create/update -> verify -> 返回 MR 链接`，用于自动标签、负责人、审核人、MR 写入和回读验证。
 - 手工交接仅在人类明确要求时启用，命令必须显式使用 `manual --auth ssh`。
 - SSH MR 创建禁用：`manual --ssh-mr` 返回 `LABEL_ERROR`，在 push 规划或执行前停止。
 
@@ -63,16 +63,15 @@ harness-mrtool schema show --output json
 harness-mrtool profiles list --output json
 harness-mrtool doctor --auth api --output json
 harness-mrtool context --auth api --output json
-harness-mrtool preview --auth api --input /absolute/private/request.json --input-format json --output json
-harness-mrtool create --auth api --input /absolute/private/request.json --input-format json --dry-run --output json
 harness-mrtool create --auth api --input /absolute/private/request.json --input-format json --output json
 harness-mrtool verify <iid> --auth api --level structure --output json
 ```
 
 用实际 MR IID 替换 `<iid>`。Skill 调用还会为命令附带当前
 `--client codex-skill --client-version <skill-semver> --skill-protocol <protocol>`。
-更新已有受管 MR 时先使用 `context --mr <iid>` 获取更新上下文，再预览和执行
-`update <iid>`，最后 `verify <iid>`。
+用户要求提交或更新即授权本次普通操作；校验后台完成，不再要求预览或重复确认。
+更新已有受管 MR 时先使用 `context --mr <iid>` 获取更新上下文，再直接执行
+`update <iid>`，最后 `verify <iid>`，成功返回 MR 链接。
 
 API 标签规则见[标签选择策略](label-selection-policy.md)：Bundle `1.2.0` 固定
 13 标签池，最终恰好 type/priority/status 各一个；默认 p2，提升至 p0/p1 必须
@@ -81,7 +80,8 @@ API 标签规则见[标签选择策略](label-selection-policy.md)：Bundle `1.2
 merge-base 的真实 canonical diff；未知类型必须显式确认并绑定 CLI digest，
 不能用标题提示代替。向导自动接入相同规则。
 
-`preview` 和 API create/update `--dry-run` 无远端写入且不消费候选 context，
+只有用户主动要求时才使用可选的 `preview` 或 API create/update `--dry-run`；
+它们无远端写入且不消费候选 context，
 但仍可进行实时读取。`create --upsert` 认证已有 MR 的 receipt；Bundle 不同
 时使用 `context --mr <iid>` 后 `update <iid>` 或显式迁移，不静默回退当前
 Bundle。可信旧签名 policy 仍可读取，显式迁移需专用 context 和准确的
@@ -144,7 +144,7 @@ Git 使用 SSH 时，需已有公钥和源项目推送权限，可用 `ssh -T gi
 - [ ] `--ssh-mr`（含 `--push`）返回 `LABEL_ERROR`，未规划或执行 push。
 - [ ] 全局 `push.pushOption` 不会注入或覆盖工具生成的选项。
 - [ ] 标签、负责人和审核人不会被 SSH 模式猜测或自动创建。
-- [ ] 默认 API 模式可执行完整 `context -> preview -> create/update -> verify`。
+- [ ] 默认 API 模式可执行完整 `context -> create/update -> verify -> 返回 MR 链接`。
 - [ ] 普通 manual handoff 或分支 push 不会报告为已验证 MR。
 - [ ] `--dry-run` 无远端写入且不消费 context；最终标签恰好三个且无 week/额外标签。
 

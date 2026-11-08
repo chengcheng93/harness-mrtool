@@ -131,6 +131,34 @@ function validateSkillFiles(entries) {
   }
 }
 
+
+function validateInitializationFiles(entries, manifest) {
+  for (const name of ["scripts/setup-gitlab.ps1", "hooks/hooks.json", "hooks/session-start.ps1", "hooks/session-start.sh"]) {
+    if (entries[name] === undefined) fail("plugin initialization asset is missing");
+  }
+  if (manifest.hooks !== undefined && manifest.hooks !== "./hooks/hooks.json") {
+    fail("plugin initialization hook path must use the bundled hooks file");
+  }
+  let configuration;
+  try { configuration = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(entries["hooks/hooks.json"])); }
+  catch { fail("plugin initialization hooks are invalid JSON"); }
+  if (configuration === null || typeof configuration !== "object" ||
+      configuration.hooks === null || typeof configuration.hooks !== "object" ||
+      Object.keys(configuration.hooks).join("|") !== "SessionStart" ||
+      !Array.isArray(configuration.hooks.SessionStart) || configuration.hooks.SessionStart.length !== 1) {
+    fail("plugin initialization must use the supported SessionStart event");
+  }
+  const group = configuration.hooks.SessionStart[0];
+  const command = group?.hooks?.[0];
+  if (group?.matcher !== "startup|resume|clear" || !Array.isArray(group.hooks) || group.hooks.length !== 1 ||
+      command?.type !== "command" || typeof command.command !== "string" ||
+      !command.command.includes("$" + "{PLUGIN_ROOT}/hooks/session-start.sh") ||
+      typeof command.commandWindows !== "string" || !command.commandWindows.includes("$" + "{PLUGIN_ROOT}/hooks/session-start.ps1") ||
+      command.timeout !== 40) {
+    fail("plugin initialization hook contract is invalid");
+  }
+}
+
 function assertOutputAbsent(path) {
   return lstat(path).then(() => fail(`output already exists: ${path}`)).catch((error) => {
     if (error?.message?.startsWith("Codex plugin packaging failed:")) throw error;
@@ -147,7 +175,8 @@ export async function packagePlugin({ inputDirectory, outputDirectory, version }
   for (const file of files) entries[file.path] = await readStableFile(file.source, file.path);
   const manifestPath = ".codex-plugin/plugin.json";
   if (entries[manifestPath] === undefined) fail("plugin manifest is missing");
-  parsePluginManifest(entries[manifestPath], parsedVersion);
+  const manifest = parsePluginManifest(entries[manifestPath], parsedVersion);
+  validateInitializationFiles(entries, manifest);
   validateSkillFiles(entries);
   const archive = zipSync(entries, {
     level: 0,

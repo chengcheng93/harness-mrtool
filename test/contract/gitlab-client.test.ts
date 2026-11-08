@@ -150,7 +150,7 @@ test("redacts transport failures and never exposes the token", async () => {
 
   const error = await api.listLabels("group/project").catch((caught: unknown) => caught);
   assert.equal(error instanceof Error, true);
-  assert.equal((error as Error).message, "GitLab request failed");
+  assert.equal((error as Error).message, "The GitLab API could not be reached");
   assert.doesNotMatch(JSON.stringify(error), /canary-secret-token|transport fixture/u);
   assert.doesNotMatch(inspect(error, { depth: 10 }), /canary-secret-token|transport fixture/u);
 });

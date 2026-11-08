@@ -5,7 +5,7 @@ AI/人负责填写变更说明，工具负责输入校验、自动标签、写�
 不是 GitLab 服务端合并门禁，也不能限制绕过工具的网页或原始 Git/API 操作。
 
 > **版本状态**：当前 main 已实现强制标签策略（Template Bundle **1.2.0**）。
-> CLI/Plugin **0.1.7** 是待验收发布候选，不代表已有可安装的新 Release。
+> CLI/Plugin **0.1.8** 是待验收发布候选，不代表已有可安装的新 Release。
 > 既有 [CLI 0.1.5](https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.5)
 > 和 [Plugin 0.1.5](https://github.com/chengcheng93/harness-mrtool/releases/tag/plugin-v0.1.5)
 > 不包含本次强制标签改造。新版尚未发布，完成发布后才更新正式下载链接。
@@ -15,11 +15,14 @@ AI/人负责填写变更说明，工具负责输入校验、自动标签、写�
 
 | 需求 | 路径 | 是否需要 GitLab API Token | 保证范围 |
 | --- | --- | --- | --- |
-| 默认：工具自动选择标签、创建/更新 MR、回读确认 | `context` → `preview` → `create/update` → `verify`（默认 `--auth api`） | 是 | 经过强制标签和事务验证的 MR 操作 |
+| 默认：工具自动选择标签、创建/更新 MR、回读确认 | `context` → `create/update` → `verify` → 返回 MR 链接（默认 `--auth api`） | 是 | 经过强制标签和事务验证的 MR 操作 |
 | 看将要写入什么，不提交 | `preview` 或 API `create/update --dry-run` | API 路径需要 | 零远端写入，不消费候选上下文；仍可能读网络 |
 | 仅在人类明确要求手工交接时：生成标题/正文，自己在 GitLab 创建 MR | `manual --auth ssh` | 否 | 本地交接材料；可显式推送普通分支，**不保证网页创建的 MR 标签** |
 
-CLI 与 Skill 默认通过 API 完成自动 MR 流程。未传 `--auth` 时使用 `api`；
+CLI 与 Skill 默认通过 API 完成自动 MR 流程。用户要求提交或更新 MR 即为本次操作授权：
+后台校验后直接 `create/update`、`verify`，成功返回 MR 链接，不再展示预览或重复确认。
+只有用户主动要求预览时才运行 `preview` 或 `--dry-run`；缺少必要信息、类型歧义或执行失败时才中断。
+未传 `--auth` 时使用 `api`；
 `--auth auto` 仅保留为 API 选择的兼容写法，不会回退 SSH。缺少 Token 或 API
 请求失败时停止并报告问题，不自动切换到 manual/SSH 交接；只有人类明确要求
 手工交接时才使用 `manual --auth ssh`。`manual --ssh-mr` 已被禁用，
@@ -97,6 +100,12 @@ Git remote 可以继续使用 SSH 推送分支；Git 传输方式与创建 MR �
 GitLab API 支持 HTTP 和 HTTPS。显式 `http://` / `https://` remote 保留原协议；
 SSH/scp/git remote 推断 API 地址时优先 HTTP，HTTP 不可用时兼容尝试同主机 HTTPS。
 
+### 安装后立即初始化 GitLab
+
+先执行只读 `hmr auth check --output json`，验证 host、Token 和 API 权限，不能仅凭插件安装成功宣称工具可用。
+Windows 安装器会立即运行安全配置向导；已有 CLI 可用 `scripts/setup-gitlab.ps1`。缺授权时明确报告初始化未完成。
+详见[安装后 GitLab 初始化](docs/usage/gitlab-initialization.md)，包括隐藏 Token 输入、非交互处理、旧 Codex 进程重启及 SessionStart hook 的信任边界。
+
 ### API Token（自动 MR 功能必须配置）
 
 默认凭据适配器读取以下 **host-scoped 环境变量**。Host 与 Git remote 对应，只填写主机，
@@ -141,14 +150,12 @@ $env:HARNESS_MRTOOL_GITLAB_TOKEN = Read-Host 'GitLab API token' -MaskInput
 
 ```sh
 hmr profiles detect --output json
-hmr create --auth api --dry-run --output json
-# 阅读自动标签、diff 摘要和计划；确认后正式创建：
 hmr create --auth api --output json
 ```
 
-向导引导选择 Profile、人员、风险和验证状态，并打开编辑器填写长文本。
-标签由 CLI 自动计算：已知类型直接展示，歧义类型要求核对 diff 并显式确认，
-提升优先级要求理由。不要将尚未执行的测试填写成通过。
+向导收集缺少的 Profile、人员、风险和验证信息，并打开编辑器填写长文本，完成后直接创建。
+标签由 CLI 自动计算，默认 p2，不再要求接受自动标签或询问是否提优先级。
+歧义类型仍要求核对 diff 并显式确认，显式提升优先级仍要求理由。不要将尚未执行的测试填写成通过。
 
 **交互 dry-run 和正式 create 是两次独立收集，不自动复用上次编辑内容。**
 希望先预览再原样提交同一个 Request，请使用下面的 JSON 流程。
@@ -196,17 +203,22 @@ cp "$MRTOOL_HOME/examples/request.json" /absolute/private/mr-input/request.json
 输入文件可放在私有目录，避免把人员信息/说明误提交进仓库；它不影响基于已提交 `HEAD` 的 MR 流程。
 完整合同以当前 `schema show`、`profiles list` 和验证错误为准。
 
-### 5.3 预览 → dry-run → 创建 → 验证
+### 5.3 直接创建 → 验证 → 返回链接
 
 ```sh
-hmr preview --auth api --input /absolute/private/mr-input/request.json --input-format json --output json
-hmr create --auth api --input /absolute/private/mr-input/request.json --input-format json --dry-run --output json
-# 确认输入和计划后，下面这一步会实际创建 MR：
 hmr create --auth api --input /absolute/private/mr-input/request.json --input-format json --output json
 hmr verify 88 --auth api --level structure --output json
 ```
 
-把 `88` 换成实际 MR IID。`preview` 和 dry-run 不写 GitLab、不 push、不消费候选；
+把 `88` 换成实际 MR IID。普通流程不要求额外确认，验证通过后返回真实 MR 链接。
+只有主动要求预览时才执行以下可选命令，它们不是创建前置步骤：
+
+```sh
+hmr preview --auth api --input /absolute/private/mr-input/request.json --input-format json --output json
+hmr create --auth api --input /absolute/private/mr-input/request.json --input-format json --dry-run --output json
+```
+
+`preview` 和 dry-run 不写 GitLab、不 push、不消费候选；
 成功写入会消费相应上下文，重试/下一次更新请重新获取。
 `create --upsert` 可复用同分支已有 MR，但必须验证该 MR 的 receipt 和精确历史模板；
 若历史 Bundle 不同，按错误提示改走 `context --mr` + `update`，不能跳过认证。
@@ -214,7 +226,7 @@ hmr verify 88 --auth api --level structure --output json
 如果 `create` 已经创建了 MR，但在写入最终 description 前中断（返回 `PARTIAL_WRITE`），可以直接改用
 `update <iid>` 继续；也可以保留原始 Request 文件和私有证明，修复阻断后重新
 运行普通 `context`（不加 `--mr`），把原来选中的人员映射到新候选票据，其余 Request 内容保持
-一致，先预览，然后显式恢复已有 MR：
+一致，然后显式恢复已有 MR：
 
 ```sh
 hmr create --resume 157 --resume-from /absolute/private/original.json --input /absolute/private/fresh.json --dry-run --output json
@@ -253,7 +265,6 @@ hmr verify 157 --level structure --output json
 遇到 `LABEL_ERROR` 的歧义提示，先审查实际 diff，再复制 CLI 返回的当前 `diffDigest`：
 
 ```sh
-hmr preview --auth api --input /absolute/private/mr-input/request.json --confirm-label-type bug --label-diff-digest <diffDigest> --output json
 hmr create --auth api --input /absolute/private/mr-input/request.json --confirm-label-type bug --label-diff-digest <diffDigest> --output json
 ```
 
@@ -261,20 +272,19 @@ hmr create --auth api --input /absolute/private/mr-input/request.json --confirm-
 两个确认参数必须同时提供，且在正式写入时保留。diff 改变后旧摘要失效；
 已经明确分类的 diff 不能用冲突确认强行覆盖。`--type` 只是标题提示，不是标签授权。
 
-提升优先级时，在 preview 和 create/update 中使用同样的参数：
+显式提升优先级时，在 create/update 中提供参数和理由；如主动要求预览，沿用同样的参数：
 
 ```sh
-hmr preview --auth api --input /absolute/private/mr-input/request.json --priority p1 --priority-reason '说明本次为何需要优先处理' --output json
+hmr create --auth api --input /absolute/private/mr-input/request.json --priority p1 --priority-reason '说明本次为何需要优先处理' --output json
 ```
 
 ## 7. 更新、历史模板和显式迁移
 
 普通更新沿用 MR 的可信历史 Bundle；先取得 **update 专用 context**，更新 JSON 中的
-contextId/人员 token，再预览 dry-run 和执行（不要拿 create 的 context 更新 MR）：
+contextId/人员 token，然后直接更新并验证（不要拿 create 的 context 更新 MR）：
 
 ```sh
 hmr context --mr 88 --auth api --output json
-hmr update 88 --auth api --input /absolute/private/mr-input/request.json --dry-run --output json
 hmr update 88 --auth api --input /absolute/private/mr-input/request.json --output json
 hmr verify 88 --auth api --level structure --output json
 ```

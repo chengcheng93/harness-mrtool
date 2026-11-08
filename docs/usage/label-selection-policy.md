@@ -37,7 +37,7 @@ CLI 读取已提交的 canonical actual diff，绑定 `sourceHeadSha`、`targetR
 遇到未知/歧义类型，先审查实际 diff，再使用 CLI 返回的 digest 显式确认：
 
 ```text
-harness-mrtool preview --auth api --input request.json --input-format json --confirm-label-type <type-suffix> --label-diff-digest <sha256> --output json
+harness-mrtool create --auth api --input request.json --input-format json --confirm-label-type <type-suffix> --label-diff-digest <sha256> --output json
 ```
 
 `<type-suffix>` 为固定池中的类型后缀，例如 `doc`，不是标题类型 `docs`。
@@ -57,7 +57,8 @@ harness-mrtool preview --auth api --input request.json --input-format json --con
 
 ## 写入、dry-run 与已有 MR
 
-API 写入前校验 diff 和实时库存，事务写入后回读完整标签集合；无法证明结果
+默认直接 create/update，后台校验 diff 和实时库存，事务写入后回读完整标签集合并返回 MR 链接；
+不增加普通预览或确认步骤。只有用户主动要求时才执行 preview/dry-run。无法证明结果
 时不能报告成功。`preview` 以及 API create/update 的 `--dry-run` 不推送、
 不执行 GitLab 写入，也不消费候选 context；仍可读取实时上下文，不等于离线。
 

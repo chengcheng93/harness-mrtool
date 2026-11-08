@@ -11,7 +11,8 @@ import {
   type WizardLongFormEditor,
 } from "../../src/cli/wizard.ts";
 import { bugLabelDiff } from "../helpers/label-diff.ts";
-import { labelDiffDigest } from "../../src/app/mandatory-labels.ts";
+import { labelDiffDigest, selectMandatoryLabels } from "../../src/app/mandatory-labels.ts";
+import { labelOptionsForProductionInvocation, updateConfirmationsForProductionInvocation } from "../../src/cli/production-invocation.ts";
 import type { InputIo } from "../../src/input/load-input.ts";
 
 const secretTokens = [
@@ -168,7 +169,10 @@ function consoleFixture(options: {
       assert.notEqual(value, undefined, `unexpected text input ${id}`);
       return value!;
     },
-    confirm: async ({ id }) => id !== "labels.escalate",
+    confirm: async ({ id }) => {
+      assert.equal(id.startsWith("labels."), false, "routine label confirmation is disabled");
+      return true;
+    },
   };
 }
 
@@ -240,9 +244,9 @@ test("TTY wizard derives candidate values only from enumerated choices and keeps
   assert.deepEqual(request.review.reviewerCandidateTokens, [secretTokens[2]]);
 });
 
-test("TTY displays automatic labels and digest without exposing tokens or offering legacy choices", async () => {
+test("TTY create derives default labels and digest without routine confirmation, tokens, or legacy choices", async () => {
   const baseConsole = consoleFixture();
-  const shownLabels: string[] = [];
+  const prompts: string[] = [];
   const emptyDescriptionCatalog: WizardCatalog = {
     ...catalog,
     labelCandidates: catalog.labelCandidates.map((candidate) => ({
@@ -257,24 +261,23 @@ test("TTY displays automatic labels and digest without exposing tokens or offeri
       ...baseConsole,
       selectMany: async (input) => {
         assert.equal(input.id.startsWith("labels."), false);
+        prompts.push(input.prompt);
         return baseConsole.selectMany(input);
       },
       confirm: async (input) => {
-        if (input.id === "labels.accept") shownLabels.push(input.prompt);
+        prompts.push(input.prompt);
         return baseConsole.confirm(input);
       },
     },
     editor: { edit: async () => Buffer.from(JSON.stringify(longForm), "utf8") },
   });
+  const invocation = parseCliInvocation(["create"]);
+  const request = await createProductionRequestSource({ stdinIsTerminal: () => true, wizard }).read(invocation);
+  const labels = selectMandatoryLabels({ ...catalog.automaticLabels!, options: labelOptionsForProductionInvocation(invocation) });
 
-  const request = await createProductionRequestSource({ stdinIsTerminal: () => true, wizard })
-    .read(parseCliInvocation(["preview"]));
-
-  assert.equal(shownLabels.length, 1);
-  for (const expected of ["type::bug", "priority::p2", "status::review", labelDiffDigest(catalog.automaticLabels!.diff)]) {
-    assert.ok(shownLabels[0]!.includes(expected));
-  }
-  assert.equal(shownLabels.some((label) => label.includes(secretTokens[0])), false);
+  assert.deepEqual(labels.names, ["type::bug", "priority::p2", "status::review"]);
+  assert.equal(labels.diffDigest, labelDiffDigest(catalog.automaticLabels!.diff));
+  assert.equal(prompts.some((prompt) => prompt.includes(secretTokens[0])), false);
   assert.deepEqual(request.mergeRequest.labelCandidateTokens, []);
 });
 
@@ -494,7 +497,7 @@ test("TTY editor cannot see or inject the preselected work item relation and IID
   assert.doesNotMatch(initial, /workItem|relation|\biid\b/u);
 });
 
-test("TTY update requires exact marker, replacement, and migration confirmations", async () => {
+test("TTY update only requires exact replacement and migration confirmations", async () => {
   const markerDigest = "1".repeat(64);
   const descriptionDigest = "2".repeat(64);
   const migrationDigest = `${"3".repeat(64)}:${"4".repeat(64)}`;
@@ -521,7 +524,6 @@ test("TTY update requires exact marker, replacement, and migration confirmations
     console: consoleFixture({
       confirmationCalls,
       confirmationValues: {
-        "confirmation.update-marker": markerDigest,
         "confirmation.force-replace": descriptionDigest,
         "confirmation.migration": migrationDigest,
       },
@@ -537,7 +539,6 @@ test("TTY update requires exact marker, replacement, and migration confirmations
   assert.equal(request.contextId, catalog.contextId);
   assert.equal(editorCalls, 1);
   assert.deepEqual(confirmationCalls, [
-    "confirmation.update-marker",
     "confirmation.force-replace",
     "confirmation.migration",
   ]);
@@ -545,7 +546,7 @@ test("TTY update requires exact marker, replacement, and migration confirmations
   const wrongWizard = createInteractiveRequestWizard({
     catalogSource: { load: async () => updateCatalog },
     console: consoleFixture({
-      confirmationValues: { "confirmation.update-marker": "wrong" },
+      confirmationValues: { "confirmation.force-replace": "wrong" },
     }),
     editor,
   });
@@ -555,6 +556,25 @@ test("TTY update requires exact marker, replacement, and migration confirmations
       error.message === "Interactive confirmation did not match",
   );
   assert.equal(editorCalls, 1, "mismatched confirmation must stop before editor handoff");
+});
+
+
+test("TTY ordinary update binds verified context digests without asking the user to retype them", async () => {
+  const confirmations = { updateMarkerDigest: "1".repeat(64), descriptionDigest: "2".repeat(64) };
+  let editorCalls = 0;
+  const wizard = createInteractiveRequestWizard({
+    catalogSource: { load: async () => ({ ...catalog, confirmations }) },
+    console: consoleFixture(),
+    editor: { edit: async () => {
+      editorCalls += 1;
+      return Buffer.from(JSON.stringify(longForm), "utf8");
+    } },
+  });
+  const invocation = parseCliInvocation(["update", "123"]);
+  const request = await createProductionRequestSource({ stdinIsTerminal: () => true, wizard }).read(invocation);
+  assert.equal(request.contextId, catalog.contextId);
+  assert.equal(editorCalls, 1);
+  assert.deepEqual(updateConfirmationsForProductionInvocation(invocation), confirmations);
 });
 
 test("TTY wizard maps injected catalog, console, editor, and close failures to fixed secret-free errors", async () => {

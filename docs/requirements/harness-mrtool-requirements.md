@@ -1392,7 +1392,7 @@ harness-mrtool version
 ```
 
 `--auth api` 是 CLI 与 Codex Skill 的默认认证方式，默认业务路径为
-`schema show -> profiles list -> context -> Request -> preview -> create/update -> verify`。
+`schema show -> profiles list -> context -> Request -> create/update -> verify -> MR URL`。
 `--auth auto` 只保留为 API 选择的兼容写法，不自动回退 SSH；缺少 Token、
 认证失败或 API 请求失败时停止，并按错误和安全下一步处理。
 仅在人类明确要求手工交接时，才使用 `manual --auth ssh`，生成本地材料和
@@ -1479,9 +1479,9 @@ Skill 名建议为 `harness-mr`，职责为：
 1. 调用本地 `schema show` 和 `profiles list`；
 2. 默认获取 API `context`，分析 diff、commits 和实际测试输出；
 3. 依据 CLI 返回的 Schema 和当前 context 组织 Request；
-4. 对无法从仓库确定的信息逐项询问用户；
-5. 默认调用 API `preview`，展示标题、正文、标签和人员计划；
-6. 审查后执行 `create/update` 并 `verify` 回读；源分支应提前发布，Git 可以使用 SSH 传输；
+4. 仅在缺少必要信息且无法从仓库和上下文确定、类型歧义或执行失败时询问或报告阻断；
+5. 用户要求提交或更新即授权本次普通写入，后台校验后直接执行 `create/update`，不要求预览或重复确认；
+6. 执行 `verify` 回读，成功后返回实际 MR 链接；`preview`/`--dry-run` 仅在用户主动要求时使用；源分支应提前发布，Git 可以使用 SSH 传输；
 7. 只有人类明确要求手工交接时，才使用 `manual --auth ssh`，审查后可显式普通分支 push，再由用户在 GitLab 网页创建 MR；`--ssh-mr` 禁用并返回 `LABEL_ERROR`；
 8. 只根据 CLI JSON 结果报告成功或失败；缺少凭据或 API 失败时停止，不自动回退；普通 handoff/push 不得报告为已创建或已验证 MR。
 

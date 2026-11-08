@@ -30,8 +30,8 @@ const longForm = {
 };
 
 function journey(options: {
-  catalog?: WizardCatalog; args?: string[]; escalate?: boolean; priority?: number;
-  reason?: string; type?: string; digest?: string; accept?: boolean; editorFails?: boolean; editorInvalid?: boolean;
+  catalog?: WizardCatalog; args?: string[];
+  type?: string; digest?: string; editorFails?: boolean; editorInvalid?: boolean;
   answerShownConfirmation?: boolean; confirmationValues?: Readonly<Record<string, string>>;
 } = {}) {
   const shown: Array<{ id: string; prompt: string }> = [];
@@ -42,7 +42,6 @@ function journey(options: {
     selectOne: async (input) => {
       shown.push(input); selections.push(input.id);
       if (input.id === "labels.confirm-type") return input.choices.findIndex(({ label }) => label === (options.type ?? "bug"));
-      if (input.id === "labels.priority") return options.priority ?? 0;
       return 0;
     },
     selectMany: async (input) => {
@@ -57,13 +56,11 @@ function journey(options: {
           : "wrong");
       }
       if (input.id === "labels.confirm-digest") return options.digest ?? labelDiffDigest((options.catalog ?? catalog).automaticLabels!.diff);
-      if (input.id === "labels.priority-reason") return options.reason ?? "Customer outage";
       return "boundary";
     },
     confirm: async (input) => {
       shown.push(input);
-      if (input.id === "labels.escalate") return options.escalate ?? false;
-      if (input.id === "labels.accept") return options.accept ?? true;
+      assert.equal(input.id.startsWith("labels."), false, "automatic labels do not require routine confirmation");
       return input.defaultValue;
     },
     close: () => { closes += 1; },
@@ -83,17 +80,18 @@ function journey(options: {
     editorCalls: () => editorCalls, closes: () => closes };
 }
 
-test("wizard displays automatic bug/p2/review and never offers managed tokens, a title type or an intent", async () => {
-  const run = journey({ args: ["preview", "--type", "feat"] });
+test("wizard create uses bug/p2/review without routine label or submission confirmation", async () => {
+  const run = journey({ args: ["create", "--type", "feat"] });
   const request = await run.read();
   assert.equal(request.title.type, "fix");
   assert.equal(Object.hasOwn(request, "intent"), false);
   assert.deepEqual(request.mergeRequest.labelCandidateTokens, []);
-  assert.equal(run.selections.some((id) => id.startsWith("labels.") || id === "title.type" || id === "intent"), false);
-  assert.equal(run.shown.some(({ id }) => id === "intent"), false);
-  const summary = run.shown.find(({ id }) => id === "labels.accept")?.prompt ?? "";
-  for (const expected of ["type::bug", "priority::p2", "status::review", labelDiffDigest(diff)]) assert.ok(summary.includes(expected), expected);
-  assert.equal(summary.includes("status::doing"), false);
+  assert.equal(run.shown.some(({ id }) => id.startsWith("labels.") || id.startsWith("confirmation.") || id === "title.type" || id === "intent"), false);
+  const effective = productionInvocation.labelOptionsForProductionInvocation(run.invocation);
+  assert.deepEqual(effective, {});
+  assert.deepEqual(selectMandatoryLabels({ ...catalog.automaticLabels!, options: effective }).names,
+    ["type::bug", "priority::p2", "status::review"]);
+  assert.equal(run.editorCalls(), 1);
   assert.equal(run.closes(), 1);
 });
 
@@ -116,18 +114,19 @@ test("ambiguous wizard type is explicitly digest-confirmed and survives the prod
   assert.deepEqual(selected.names, ["type::feature", "priority::p2", "status::review"]);
 });
 
-for (const [priority, expected] of [[0, "p1"], [1, "p0"]] as const) {
-  test(`wizard explicit escalation to ${expected} carries its reason without modifying frozen CLI options`, async () => {
-    const run = journey({ escalate: true, priority, reason: "  Customer outage  " });
+for (const priority of ["p1", "p0"] as const) {
+  test("wizard preserves explicit CLI priority " + priority + " and its reason without extra prompts", async () => {
+    const run = journey({ args: ["create", "--priority", priority, "--priority-reason", "Customer outage"] });
     await run.read();
     const effective = productionInvocation.labelOptionsForProductionInvocation(run.invocation);
-    assert.deepEqual(effective, { priority: expected, priorityReason: "Customer outage" });
-    assert.equal(run.invocation.options.priority, null);
+    assert.deepEqual(effective, { priority, priorityReason: "Customer outage" });
+    assert.equal(run.invocation.options.priority, priority);
     assert.equal(Object.isFrozen(run.invocation.options), true);
     assert.equal(Object.isFrozen(effective), true);
     assert.deepEqual(selectMandatoryLabels({ ...catalog.automaticLabels!, options: effective }).names,
-      ["type::bug", `priority::${expected}`, "status::review"]);
-    assert.deepEqual(productionInvocation.labelOptionsForProductionInvocation(parseCliInvocation(["preview"])), {});
+      ["type::bug", "priority::" + priority, "status::review"]);
+    assert.equal(run.shown.some(({ id }) => id.startsWith("labels.")), false);
+    assert.deepEqual(productionInvocation.labelOptionsForProductionInvocation(parseCliInvocation(["create"])), {});
   });
 }
 
@@ -135,8 +134,6 @@ const { automaticLabels: _evidence, ...legacyCatalog } = catalog;
 
 for (const [name, options] of [
   ["stale type digest", { catalog: unknownCatalog, digest: "0".repeat(64) }],
-  ["blank escalation reason", { escalate: true, reason: "  " }],
-  ["declined automatic labels", { accept: false }],
   ["missing diff evidence", { catalog: legacyCatalog }],
   ["stale bound diff", { catalog: { ...catalog, automaticLabels: { ...catalog.automaticLabels!, binding: { ...binding, sourceHeadSha: "d".repeat(40) } } } }],
   ["missing p2 inventory", { catalog: { ...catalog, automaticLabels: { ...catalog.automaticLabels!, inventory: inventory.filter(({ name }) => name !== "priority::p2") } } }],
@@ -145,8 +142,6 @@ for (const [name, options] of [
     const run = journey(options as Parameters<typeof journey>[0]);
     const reasons: Readonly<Record<string, string>> = {
       "stale type digest": "Interactive confirmation did not match",
-      "blank escalation reason": "priority elevation requires an explicit choice and reason",
-      "declined automatic labels": "automatic labels were not accepted",
       "missing diff evidence": "canonical automatic-label evidence is unavailable",
       "stale bound diff": "missing, empty or stale canonical diff",
       "missing p2 inventory": "required label missing or ambiguous in the live inventory",
@@ -170,22 +165,21 @@ test("explicit CLI priority and bound confirmation are reused without redundant 
   });
 });
 
-test("editor failure does not publish interactive escalation options", async () => {
-  const run = journey({ escalate: true, editorFails: true });
+test("editor failure does not publish interactive type confirmation", async () => {
+  const run = journey({ catalog: unknownCatalog, type: "feature", editorFails: true });
   await assert.rejects(run.read());
   assert.deepEqual(productionInvocation.labelOptionsForProductionInvocation(run.invocation), {});
 });
 
-
 test("a new collection clears prior decisions and invalid editor documents never publish options", async () => {
-  const options = { escalate: true, accept: true };
+  const options = { catalog: unknownCatalog, type: "feature", editorFails: false };
   const run = journey(options);
   await run.read();
-  assert.equal(productionInvocation.labelOptionsForProductionInvocation(run.invocation).priority, "p1");
-  options.accept = false;
+  assert.equal(productionInvocation.labelOptionsForProductionInvocation(run.invocation).confirmedType, "feature");
+  options.editorFails = true;
   await assert.rejects(run.read());
   assert.deepEqual(productionInvocation.labelOptionsForProductionInvocation(run.invocation), {});
-  const invalid = journey({ escalate: true, editorInvalid: true });
+  const invalid = journey({ catalog: unknownCatalog, type: "feature", editorInvalid: true });
   await assert.rejects(invalid.read());
   assert.equal(invalid.editorCalls(), 1);
   assert.deepEqual(productionInvocation.labelOptionsForProductionInvocation(invalid.invocation), {});
@@ -198,12 +192,11 @@ test("stale explicit CLI confirmation is rejected rather than replaced by a wiza
   assert.equal(run.editorCalls(), 0);
 });
 
-test("numeric terminal journey confirms an ambiguous diff, escalates priority and produces effective write options", async () => {
+test("numeric terminal journey confirms only an ambiguous diff and keeps default p2", async () => {
   const digest = labelDiffDigest(unknownCatalog.automaticLabels!.diff);
   const answers: Array<[string, string]> = [
     ["Select work item relation", "1"], ["Select request profiles", "1"],
-    ["Diff type is ambiguous", "1"], ["Type the exact diff digest", digest], ["Automatic labels", "y"],
-    ["Select explicit priority escalation", "1"], ["Explain why", "Customer outage"], ["Automatic labels", ""],
+    ["Diff type is ambiguous", "1"], ["Type the exact diff digest", digest],
     ["Enter title module", "boundary"], ["Enter title summary", "Add boundary handler"],
     ["Select impact areas", "1"], ["Select impact nature", "1"], ["Select verification items", "-"],
     ["Select documentation items", "-"], ["Select risk level", "1"], ["Select assignee", "1"],
@@ -228,14 +221,14 @@ test("numeric terminal journey confirms an ambiguous diff, escalates priority an
   const invocation = parseCliInvocation(["create"]);
   const request = await createProductionRequestSource({ stdinIsTerminal: () => true, wizard }).read(invocation);
   const effective = productionInvocation.labelOptionsForProductionInvocation(invocation);
-  assert.deepEqual(effective, { confirmedType: "feature", confirmationDigest: digest, priority: "p1", priorityReason: "Customer outage" });
+  assert.deepEqual(effective, { confirmedType: "feature", confirmationDigest: digest });
   assert.deepEqual(selectMandatoryLabels({ ...unknownCatalog.automaticLabels!, options: effective }).names,
-    ["type::feature", "priority::p1", "status::review"]);
+    ["type::feature", "priority::p2", "status::review"]);
   assert.equal(request.title.type, "feat");
   assert.equal(Object.hasOwn(request, "intent"), false);
   assert.equal(transcript.some((prompt) => prompt.startsWith("Select merge request intent")), false);
   assert.deepEqual(request.mergeRequest.labelCandidateTokens, []);
-  assert.ok(transcript.some((prompt) => prompt.includes("priority::p1") && prompt.includes(digest)));
+  assert.equal(transcript.some((prompt) => prompt.startsWith("Automatic labels") || prompt.startsWith("Select explicit priority")), false);
   assert.deepEqual(answers, []);
   assert.equal(closed, true);
 });
@@ -246,19 +239,22 @@ const updateEvidence = {
   migrationDigest: `${"3".repeat(64)}:${"4".repeat(64)}`,
 };
 for (const [name, flags, ids] of [
-  ["ordinary update", [], ["confirmation.update-marker"]],
-  ["forced replacement", ["--force-replace-description"], ["confirmation.update-marker", "confirmation.force-replace"]],
+  ["ordinary update", [], []],
+  ["forced replacement", ["--force-replace-description"], ["confirmation.force-replace"]],
   ["migration and replacement", ["--migrate-template", "--force-replace-description"],
-    ["confirmation.update-marker", "confirmation.force-replace", "confirmation.migration"]],
+    ["confirmation.force-replace", "confirmation.migration"]],
 ] as const) {
-  test(`wizard ${name} displays exact verified digests and publishes accepted update evidence after collection`, async () => {
+  test(`wizard ${name} binds verified update evidence and only confirms explicit replacement or migration`, async () => {
     const { migrationDigest, ...ordinaryEvidence } = updateEvidence;
     const confirmations = flags.some((flag) => flag === "--migrate-template") ? updateEvidence : ordinaryEvidence;
     const run = journey({ catalog: { ...catalog, confirmations }, args: ["update", "123", ...flags], answerShownConfirmation: true });
     const request = await run.read();
     assert.equal(run.editorCalls(), 1);
     assert.deepEqual(run.shown.filter(({ id }) => id.startsWith("confirmation.")).map(({ id }) => id), ids);
-    assert.ok(run.shown.find(({ id }) => id === "confirmation.update-marker")!.prompt.includes(updateEvidence.descriptionDigest));
+    assert.equal(run.shown.some(({ id }) => id === "confirmation.update-marker"), false);
+    if (flags.some((flag) => flag === "--force-replace-description")) {
+      assert.ok(run.shown.find(({ id }) => id === "confirmation.force-replace")!.prompt.includes(updateEvidence.descriptionDigest));
+    }
     assert.deepEqual(productionInvocation.updateConfirmationsForProductionInvocation(run.invocation), confirmations);
     assert.equal(Object.isFrozen(productionInvocation.updateConfirmationsForProductionInvocation(run.invocation)), true);
     assert.equal(Object.hasOwn(request, "confirmations"), false);
@@ -273,8 +269,7 @@ for (const [name, confirmations, flags] of [
   ["conflicting CLI migration pair", updateEvidence, ["--migrate-template", "--confirm-migration", `${"5".repeat(64)}:${"6".repeat(64)}`]],
 ] as const) {
   test(`wizard preflights ${name} before any update confirmation or editor prompt`, async () => {
-    const run = journey({ catalog: { ...catalog, confirmations } as WizardCatalog, args: ["update", "123", ...flags],
-      confirmationValues: { "confirmation.update-marker": updateEvidence.updateMarkerDigest } });
+    const run = journey({ catalog: { ...catalog, confirmations } as WizardCatalog, args: ["update", "123", ...flags] });
     await assert.rejects(run.read(), (error) => isToolError(error, "INPUT_ERROR"));
     assert.equal(run.shown.some(({ id }) => id.startsWith("confirmation.")), false);
     assert.equal(run.editorCalls(), 0);
@@ -290,4 +285,22 @@ test("unsuccessful update collection never leaves accepted evidence from a prior
   options.editorFails = true;
   await assert.rejects(run.read());
   assert.equal(productionInvocation.updateConfirmationsForProductionInvocation(run.invocation), null);
+});
+
+for (const [name, flags] of [
+  ["description replacement", ["--force-replace-description"]],
+  ["template migration", ["--migrate-template"]],
+] as const) {
+  test("wizard still rejects unconfirmed " + name + " before editing", async () => {
+    const run = journey({ catalog: { ...catalog, confirmations: updateEvidence }, args: ["update", "123", ...flags] });
+    await assert.rejects(run.read(), (error) => isToolError(error, "INPUT_ERROR") && error.message.includes("confirmation did not match"));
+    assert.equal(run.editorCalls(), 0);
+    assert.equal(productionInvocation.updateConfirmationsForProductionInvocation(run.invocation), null);
+  });
+}
+
+test("explicit priority escalation still requires a nonblank reason before the wizard starts", () => {
+  for (const args of [["create", "--priority", "p1"], ["create", "--priority", "p0", "--priority-reason", "  "]]) {
+    assert.throws(() => journey({ args }), (error) => isToolError(error, "INPUT_ERROR"));
+  }
 });

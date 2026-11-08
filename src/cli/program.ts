@@ -14,6 +14,7 @@ type ProjectTemplateProfile = "general" | "code" | "docs" | "ops";
 
 export type CliCommand =
   | { readonly kind: "doctor" }
+  | { readonly kind: "auth.check"; readonly host: string | null }
   | { readonly kind: "context"; readonly mrIid: number | null; readonly migrateTemplate: boolean }
   | { readonly kind: "create"; readonly upsert: boolean; readonly resumeIid?: number; readonly resumeFrom?: string }
   | {
@@ -82,6 +83,7 @@ const LOCAL_COMMON_FLAGS = new Set([
 
 
 const SPECIFIC_FLAGS: Readonly<Partial<Record<CommandKind, Readonly<Record<string, FlagArity>>>>> = {
+  "auth.check": { "--host": "value" },
   manual: { "--ssh-mr": "boolean" },
   create: { "--upsert": "boolean", "--resume": "value", "--resume-from": "value" },
   context: { "--mr": "value", "--migrate-template": "boolean" },
@@ -130,6 +132,7 @@ function route(arguments_: readonly string[]): { readonly kind: CommandKind; rea
     invalid("command", "a V1 command", "missing command");
   }
   const groups: Readonly<Record<string, ReadonlySet<string>>> = {
+    auth: new Set(["check"]),
     schema: new Set(["show"]),
     profiles: new Set(["list", "detect"]),
     labels: new Set(["list"]),
@@ -220,6 +223,21 @@ function commandFor(
   options: CliOptions,
 ): CliCommand {
   switch (kind) {
+    case "auth.check": {
+      requireNoPositionals(positionals);
+      const host = specificValue(specific, "--host");
+      if (host !== undefined) {
+        try {
+          const parsed = new URL(host);
+          if (!["http:", "https:"].includes(parsed.protocol) || parsed.username !== "" || parsed.password !== "" ||
+              parsed.pathname !== "/" || parsed.search !== "" || parsed.hash !== "" ||
+              (host !== parsed.origin && host !== `${parsed.origin}/`)) throw new TypeError();
+        } catch {
+          invalid("--host", "an exact HTTP(S) origin without credentials, path, query, or fragment", "invalid GitLab origin");
+        }
+      }
+      return Object.freeze({ kind, host: host === undefined ? null : new URL(host).origin });
+    }
     case "doctor":
       requireNoPositionals(positionals);
       return Object.freeze({ kind });

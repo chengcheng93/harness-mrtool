@@ -1,6 +1,7 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 
 import { ToolError } from "../contracts/errors.ts";
+import { GitLabCredentialError, isGitLabCredentialError } from "../platform/gitlab-credential.ts";
 import { copyJsonValue, type JsonValue } from "../contracts/jcs.ts";
 import {
   createScanner,
@@ -73,8 +74,14 @@ export class GitLabRequestError extends ToolError<"AUTH_ERROR" | "GITLAB_ERROR">
   ) {
     const code = kind === "auth" ? "AUTH_ERROR" : "GITLAB_ERROR";
     super(code, code === "AUTH_ERROR"
-      ? "GitLab rejected the credential or permission"
-      : "GitLab request failed", {
+      ? status === 401
+        ? "GitLab rejected the API credential (HTTP 401)"
+        : "GitLab denied access to the requested resource (HTTP 403)"
+      : kind === "timeout"
+        ? "The GitLab API request timed out"
+        : kind === "network"
+          ? "The GitLab API could not be reached"
+          : "GitLab request failed", {
       field: "gitlab",
       expected: "an authenticated, bounded GitLab API response",
       actual: status === null
@@ -83,7 +90,9 @@ export class GitLabRequestError extends ToolError<"AUTH_ERROR" | "GITLAB_ERROR">
           ? `HTTP ${String(status)}`
           : `HTTP ${String(status)}; request-id ${requestId}`,
       safeNextStep: code === "AUTH_ERROR"
-        ? "Refresh the GitLab credential and verify the required project permission."
+        ? status === 401
+          ? "The token may be expired or revoked. Run the plugin scripts/setup-gitlab.ps1 authorization guide, or rerun the Windows CLI installer with -SetupOnly, then harness-mrtool auth check --output json."
+          : "Verify the token API scope and the account permission for the requested GitLab resource."
         : "Retry the read-only operation or inspect the GitLab request ID with an administrator.",
     });
     this.name = "GitLabRequestError";
@@ -304,12 +313,13 @@ export class GitLabHttpClient {
     let token: string;
     try {
       token = await this.tokenProvider();
-    } catch {
-      throw new GitLabRequestError("auth", null, null);
+    } catch (error) {
+      if (isGitLabCredentialError(error)) throw error;
+      throw new GitLabCredentialError("source-unavailable");
     }
     if (typeof token !== "string" || token === "" || token !== token.trim() ||
         token.length > MAX_TOKEN_LENGTH || /[\r\n\u0000]/u.test(token)) {
-      throw new GitLabRequestError("auth", null, null);
+      throw new GitLabCredentialError("token-invalid");
     }
     this.rememberCredential(token);
     const encodedBody = body === null ? null : new TextEncoder().encode(JSON.stringify(body));

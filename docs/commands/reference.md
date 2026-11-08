@@ -6,6 +6,7 @@ installation-path material.
 
 | Command | Purpose |
 | --- | --- |
+| `auth check [--host <http-or-https-origin>]` | Read-only installation preflight: identity and api scope; without --host, a bound repository also checks project permissions. Independent of branches, diffs, and Template Bundle. |
 | `doctor` | Read-only repository, GitLab, Bundle, capability, and update diagnostics. |
 | `context` | Resolve real project/group label candidates from the fixed pool; default priority is p2. Existing-MR context requires a trusted exact Bundle. |
 | `preview` | Produce a deterministic write plan without consuming candidates or mutating GitLab. |
@@ -20,8 +21,11 @@ installation-path material.
 | `skill install/activate/status` | Stage, explicitly activate, or inspect a standalone Skill. |
 
 `--auth auto|ssh|api` selects the authentication path. `api` is the default for
-the CLI and Codex Skill: `context -> preview -> create/update -> verify` uses
-GitLab credentials and verified readback. `--auth auto` remains a compatibility
+the CLI and Codex Skill: `context -> create/update -> verify -> MR URL` uses
+GitLab credentials and verified readback. A submission request authorizes the
+normal create/update; validation runs in the background without another
+confirmation, and success returns the MR URL. Preview and dry-run are optional
+and run only when explicitly requested. `--auth auto` remains a compatibility
 selection of API without SSH fallback. Missing credentials or API errors stop
 the flow; they do not authorize automatic manual handoff.
 
@@ -39,6 +43,16 @@ fallback when HTTP is unavailable during project discovery.
 `--offline` uses only verified local state. `--no-update` skips network update
 work but does not bypass command or trust validation. Tokens and update URLs
 are never accepted as command-line options.
+
+## GitLab initialization
+
+Run `auth check` after installation or connecting a new host, not for the first
+time during MR submission. `--host` selects an exact HTTP(S) origin without
+credentials, path, query, or fragment, and performs instance-only validation.
+Without it, the command selects the repository remote or configured credential
+host. Missing authorization is `AUTH_ERROR` with a setup next step. Unknown or
+insufficient token scope is not reported as ready. `--offline` and `--auth ssh`
+are incompatible with live API validation. The check performs no remote writes.
 
 ## Mandatory labels (working tree; Bundle 1.2.0)
 
@@ -75,7 +89,7 @@ an explicit priority escalation reason when needed.
   explicit template migration. It does not silently substitute the current Bundle.
 - `create --resume <iid> --resume-from <original-request>` is separate from upsert.
   Obtain a fresh ordinary create context, select the same candidate identities,
-  preview the equivalent request, and pass it through `--input`. Dry-run verifies
+  pass the equivalent request through `--input`. An explicit recovery dry-run verifies
   the provisional MR without consuming candidates. Recovery requires the original
   private context, exact request/description/Bundle/diff identity, and a unique
   matching open MR that GitLab does not mark as work in progress. The description

@@ -233,7 +233,7 @@ async function remoteUrl(runner: GitRunner, remote: string, push: boolean): Prom
   return values[0];
 }
 
-async function inspectTargetRemote(
+export async function inspectGitLabTargetRemote(
   cwd: string,
   options: GitLabTargetProjectResolverOptions,
 ): Promise<{ readonly remote: string; readonly endpoint: NormalizedGitLabRemote }> {
@@ -287,7 +287,7 @@ export function createGitLabTargetSessionResolver(
   const credentials = options.credentials ?? createHostScopedGitLabCredentialProvider();
   return Object.freeze({
     async resolve({ cwd }: { readonly cwd: string }): Promise<TargetGitLabSession> {
-      const target = await inspectTargetRemote(cwd, options);
+      const target = await inspectGitLabTargetRemote(cwd, options);
       const usedCredentials = new Set<string>();
       const assertNoCredentialExposure = credentialExposureAssertion(usedCredentials);
       let lastCredential: string | undefined;
