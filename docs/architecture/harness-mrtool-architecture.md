@@ -159,12 +159,12 @@ CLI 从 GitLab 实时读取项目及祖先组库存并解析真实 ID；所需�
 缺失或仍有歧义则失败关闭，绝不自动创建远端标签定义。
 
 - `type` 基于 canonical actual committed diff，绑定 source HEAD、target SHA、merge-base 和规范化 diff digest，不信任标题/分支名或调用者摘要；
-- 有界分类无法确定类型时必须显式提供类型与匹配 digest，不兜底为 chore；`--type` 标题提示不是确认，过期或冲突确认必须拒绝；
+- 纯文档或注释修改自动归为 `type::doc`；其他已知规则直接分类，无法确定或包含多种主类型时稳定使用 `type::chore`，不询问用户选择或抄写 digest；`--type` 标题提示不能覆盖实际 diff 分类；
 - `priority` 默认 p2，提升为 p0/p1 必须明确选择并提供非空理由；
 - 每个 MR 都使用 `status::review`；项目不再需要 `status::doing`；
 - 最终恰好三个标签，type/priority/status 各一；新策略拥有完整标签集合，更新移除 week 和池外人工标签，不再保留额外标签；
 - mutation 可通过必要的 ID ADD/REMOVE 达到精确集合替换，不能把最小 mutation 理解为保留额外标签；
-- preview 披露计划，写前重验 diff/库存，写后回读完整集合。自动向导使用同一选择器并收集歧义确认和提优先级理由。
+- 仅在主动请求时使用 preview 披露计划，写前重验 diff/库存，写后回读完整集合。自动向导直接采用同一选择器的结果；提升优先级仍需提供具体理由，这属于业务输入，不增加确认步骤。
 
 详见[标签选择策略](../usage/label-selection-policy.md)。
 
@@ -191,10 +191,10 @@ stateDiagram-v2
 create context 的 Bundle 不同，当前路径失败关闭并提示 `context --mr <iid>`
 后 `update <iid>` 或显式迁移，而不是自动回退当前 Bundle。默认 production
 迁移 adapter 验证旧 receipt 与精确历史 Bundle，绑定迁移 context，并校验
-old:new manifest-hash 显式确认；事务使用目标 Bundle 写入并生成新回执。
+由程序自动绑定、校验 old:new manifest-hash，不要求人工确认或复制哈希；事务使用目标 Bundle 写入并生成新回执。
 受控生产入口测试覆盖旧 1.0.0 week 策略迁移至 1.2.0；真实 GitLab 验收另行记录。
 
-update 默认使用 MR marker 固定的原 Bundle。description 有人工漂移时默认拒绝，只有显式 `--force-replace-description` 才可覆盖受管 description；无合法 marker 的 MR 返回 `UNMANAGED_MR`，V1 不接管。
+update 默认使用 MR marker 固定的原 Bundle。description 有人工漂移时默认拒绝，只有已授权的显式 `--force-replace-description` 操作才可覆盖受管 description，执行时自动校验绑定快照，不再重复询问；无合法 marker 的 MR 返回 `UNMANAGED_MR`，V1 不接管。
 
 ## 7. 更新信任模型
 

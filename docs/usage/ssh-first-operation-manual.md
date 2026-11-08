@@ -77,15 +77,15 @@ API 标签规则见[标签选择策略](label-selection-policy.md)：Bundle `1.2
 13 标签池，最终恰好 type/priority/status 各一个；默认 p2，提升至 p0/p1 必须
 提供理由，每个 MR 的 status 固定为 `status::review`。更新移除额外标签和 week 标签；
 所需标签必须已存在，CLI 不会自动创建远端标签。类型来自绑定 HEAD/target/
-merge-base 的真实 canonical diff；未知类型必须显式确认并绑定 CLI digest，
-不能用标题提示代替。向导自动接入相同规则。
+merge-base 的真实 canonical diff；注释/文档自动 doc，无法细分的类型自动 chore，
+不询问类型或 digest。向导自动接入相同规则。
 
 只有用户主动要求时才使用可选的 `preview` 或 API create/update `--dry-run`；
 它们无远端写入且不消费候选 context，
 但仍可进行实时读取。`create --upsert` 认证已有 MR 的 receipt；Bundle 不同
 时使用 `context --mr <iid>` 后 `update <iid>` 或显式迁移，不静默回退当前
-Bundle。可信旧签名 policy 仍可读取，显式迁移需专用 context 和准确的
-old:new 哈希确认；这些本地实现不代表已发布或完成真实 GitLab 验收。
+Bundle。可信旧签名 policy 仍可读取，显式迁移需专用 context，程序自动校验
+准确 old:new 哈希绑定，不要求人确认；这些本地实现不代表已发布或完成真实 GitLab 验收。
 这些保证仅覆盖 mrtool，不限制原始 Git/API 或网页操作。
 
 Token 不得进入命令行参数、Remote URL、Request、日志、MR 正文或聊天消息。使用结束后清理当前会话：
@@ -107,7 +107,7 @@ harness-mrtool manual --auth ssh --input /absolute/private/request.json --input-
 ```
 
 审查输出中的 `title`、`description`、`targetBranch`、`sourceHeadSha` 和
-`pushPlan`，确认后可显式推送普通分支：
+`pushPlan`。用户已经要求推送时，直接执行普通分支推送：
 
 ```text
 harness-mrtool manual --auth ssh --input /absolute/private/request.json --input-format json --push --output json
@@ -126,7 +126,7 @@ Git 使用 SSH 时，需已有公钥和源项目推送权限，可用 `ssh -T gi
 
 | 状态 | 含义 | 操作 |
 | --- | --- | --- |
-| `manual` | 人类明确要求的本地交接材料和普通分支推送计划 | 确认后显式 `manual --auth ssh --push`，再在网页创建 MR |
+| `manual` | 人类明确要求的本地交接材料和普通分支推送计划 | 按已有授权直接 `manual --auth ssh --push`，再在网页创建 MR |
 | `LABEL_ERROR`（`--ssh-mr`） | 在 push 前拒绝 SSH MR 创建 | 使用默认 API 验证路径 |
 | `AUTH_ERROR` | API 模式没有可用 Host-scoped Token | 停止并配置 API 凭据，不自动回退 manual/SSH |
 | API 请求失败 | 当前 API 操作失败或结果未证明 | 按输出安全下一步处理，不自动回退 manual/SSH |

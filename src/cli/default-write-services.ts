@@ -260,7 +260,6 @@ export function createDefaultWriteServices(
       } });
       migration = {
         previousBundle: previous.bundle, previousReleaseTag: previous.reference.releaseTag,
-        confirmation: confirmed?.migrationDigest ?? command.confirmation ?? "",
         oldHash: previous.bundleManifestHash, newHash: planned.selection.bundleManifestHash,
       };
       validateUpdateMigration(migration, planned.selection.bundle, planned.selection.releaseTag);

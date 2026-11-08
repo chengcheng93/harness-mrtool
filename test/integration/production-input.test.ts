@@ -169,10 +169,6 @@ function consoleFixture(options: {
       assert.notEqual(value, undefined, `unexpected text input ${id}`);
       return value!;
     },
-    confirm: async ({ id }) => {
-      assert.equal(id.startsWith("labels."), false, "routine label confirmation is disabled");
-      return true;
-    },
   };
 }
 
@@ -263,10 +259,6 @@ test("TTY create derives default labels and digest without routine confirmation,
         assert.equal(input.id.startsWith("labels."), false);
         prompts.push(input.prompt);
         return baseConsole.selectMany(input);
-      },
-      confirm: async (input) => {
-        prompts.push(input.prompt);
-        return baseConsole.confirm(input);
       },
     },
     editor: { edit: async () => Buffer.from(JSON.stringify(longForm), "utf8") },
@@ -497,65 +489,19 @@ test("TTY editor cannot see or inject the preselected work item relation and IID
   assert.doesNotMatch(initial, /workItem|relation|\biid\b/u);
 });
 
-test("TTY update only requires exact replacement and migration confirmations", async () => {
-  const markerDigest = "1".repeat(64);
-  const descriptionDigest = "2".repeat(64);
-  const migrationDigest = `${"3".repeat(64)}:${"4".repeat(64)}`;
-  const confirmationCalls: string[] = [];
-  let editorCalls = 0;
-  const updateCatalog: WizardCatalog = {
-    ...catalog,
-    confirmations: { updateMarkerDigest: markerDigest, descriptionDigest, migrationDigest },
-  };
-  const editor: WizardLongFormEditor = {
-    edit: async () => {
-      editorCalls += 1;
-      return Buffer.from(JSON.stringify(longForm), "utf8");
-    },
-  };
-  const invocation = parseCliInvocation([
-    "update",
-    "123",
-    "--migrate-template",
-    "--force-replace-description",
-  ]);
+test("TTY update binds replacement and migration evidence without approval prompts", async () => {
+  const confirmations = { updateMarkerDigest: "1".repeat(64), descriptionDigest: "2".repeat(64), migrationDigest: "3".repeat(64) + ":" + "4".repeat(64) };
+  const calls: string[] = [];
+  const invocation = parseCliInvocation(["update", "123", "--migrate-template", "--force-replace-description"]);
   const wizard = createInteractiveRequestWizard({
-    catalogSource: { load: async () => updateCatalog },
-    console: consoleFixture({
-      confirmationCalls,
-      confirmationValues: {
-        "confirmation.force-replace": descriptionDigest,
-        "confirmation.migration": migrationDigest,
-      },
-    }),
-    editor,
+    catalogSource: { load: async () => ({ ...catalog, confirmations }) },
+    console: { ...consoleFixture(), text: async input => { assert.doesNotMatch(input.id, /confirm|digest/u); calls.push(input.id); return consoleFixture().text(input); } },
+    editor: { edit: async () => Buffer.from(JSON.stringify(longForm), "utf8") },
   });
-
-  const request = await createProductionRequestSource({
-    stdinIsTerminal: () => true,
-    wizard,
-  }).read(invocation);
-
+  const request = await createProductionRequestSource({ stdinIsTerminal: () => true, wizard }).read(invocation);
   assert.equal(request.contextId, catalog.contextId);
-  assert.equal(editorCalls, 1);
-  assert.deepEqual(confirmationCalls, [
-    "confirmation.force-replace",
-    "confirmation.migration",
-  ]);
-
-  const wrongWizard = createInteractiveRequestWizard({
-    catalogSource: { load: async () => updateCatalog },
-    console: consoleFixture({
-      confirmationValues: { "confirmation.force-replace": "wrong" },
-    }),
-    editor,
-  });
-  await assert.rejects(
-    createProductionRequestSource({ stdinIsTerminal: () => true, wizard: wrongWizard }).read(invocation),
-    (error: unknown) => isToolError(error, "INPUT_ERROR") &&
-      error.message === "Interactive confirmation did not match",
-  );
-  assert.equal(editorCalls, 1, "mismatched confirmation must stop before editor handoff");
+  assert.deepEqual(updateConfirmationsForProductionInvocation(invocation), confirmations);
+  assert.equal(calls.some(id => /confirm|digest/u.test(id)), false);
 });
 
 

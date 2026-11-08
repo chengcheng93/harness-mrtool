@@ -31,20 +31,13 @@ CLI 读取已提交的 canonical actual diff，绑定 `sourceHeadSha`、`targetR
 有界分类；标题、分支名、文件名中的意图词或调用者摘要不能替代真实变更证据。
 未提交内容不参与 MR diff 或推送。staged、unstaged、untracked 文件（包括
 `.superpowers` 报告）均可保留；不要求工作区干净，不自动 add、stash、clean 或删除。
-支持性文档/测试不会覆盖唯一的主变更类型；未知、混合且无法确定或不支持的
-变更不会自动兜底为 `chore`。
+支持性文档/测试不会覆盖唯一的主变更类型。纯文档或源码注释修改自动使用
+`type::doc`；能够识别的其他改动直接使用对应类型。未知、混合且无法细分或
+不支持的内容统一使用 `type::chore`，不再交给人选择或确认。
 
-遇到未知/歧义类型，先审查实际 diff，再使用 CLI 返回的 digest 显式确认：
-
-```text
-harness-mrtool create --auth api --input request.json --input-format json --confirm-label-type <type-suffix> --label-diff-digest <sha256> --output json
-```
-
-`<type-suffix>` 为固定池中的类型后缀，例如 `doc`，不是标题类型 `docs`。
-`--type` 只是标题提示，不构成类型确认。两个确认参数必须一起提供；digest
-过期或与已知分类冲突时拒绝。执行 create/update 时保留对应确认；diff 改变后
-重新获取证据并确认，不复用旧 digest。空或失效的 canonical diff 不是可绕过的
-“未知类型”。
+类型由程序自动决定，不接受人工类型或摘要确认参数。`--type` 只是标题提示，
+不能覆盖真实 diff 的自动标签。diff digest 继续由程序计算并用于并发一致性校验，
+无需用户复制或输入。空或失效的 canonical diff 仍然是错误，不能当作未知类型。
 
 ## 优先级与生命周期
 
@@ -52,8 +45,8 @@ harness-mrtool create --auth api --input request.json --input-format json --conf
 - 提升为 `p0` 或 `p1` 必须明确选择并提供非空理由：
   `--priority p1 --priority-reason "<reason>"`。
 - 每个 MR 都使用 `status::review`；项目不再需要 `status::doing` 标签。
-- 自动交互向导使用同一选择器，展示自动标签和 digest；歧义时要求类型与
-  digest 确认，提优先级时收集理由。非交互调用缺证据时失败，不擅自代答。
+- 自动交互向导和非交互调用使用同一选择器；类型、标签、哈希、squash 和删除源分支
+  不再弹出确认，使用程序规则或请求中已有的值。提优先级仍需事实理由。
 
 ## 写入、dry-run 与已有 MR
 
@@ -68,8 +61,9 @@ harness-mrtool create --auth api --input request.json --input-format json --conf
 已有可信签名的历史 policy 仍可按其原 Bundle 读取和验证，不能原地改写成新策略。
 新 `1.2.0` 写入的三标签约束也不能被历史 policy 宽松规则绕过。
 `--migrate-template` 是显式迁移入口：先用
-`context --mr <iid> --migrate-template` 获取迁移绑定的上下文，再在 update 中提供
-`--confirm-migration <oldHash>:<newHash>`；TTY 向导展示哈希并收集确认。
+`context --mr <iid> --migrate-template` 获取迁移绑定的上下文，再执行
+`update <iid> --migrate-template`。程序自动构造并校验精确 old:new 绑定，
+不要求用户抄写哈希或确认。
 production adapter 验证原 receipt、精确历史 Bundle 和迁移绑定后执行事务。
 用 Bundle 1.0.0 或 1.1.0 创建的 MR 仍可读取、更新和验证；旧版工具留下、从未更新过的半成品 MR
 在执行一次 `update` 之前会在 `verify` 的标签检查中失败。受控迁移集成测试不代表已发布或完成真实 GitLab 验收。
@@ -78,6 +72,6 @@ production adapter 验证原 receipt、精确历史 Bundle 和迁移绑定后执
 
 `manual --ssh-mr` 返回 `LABEL_ERROR`，在 push 规划或执行前停止，即使同时
 传入 `--push` 也不能创建基础 MR。仅在人类明确要求手工交接时，才使用
-`manual --auth ssh` 生成本地 handoff，确认后可执行普通分支推送；这不是
+`manual --auth ssh` 生成本地 handoff，已要求推送时直接附加 `--push` 执行；这不是
 已验证 MR，更不代表标签达标。Git 本身仍可使用 SSH 发布源分支，随后由
 默认 API 事务路径创建、更新并证明标签状态。

@@ -30,7 +30,7 @@ for (const path of ["docs/execute.ts", "data/custom.txt", ".github/custom.ts", "
     assert.equal(typeLabelFromDiff([modified(path)]), null);
   });
 }
-test("binary and submodule changes always require confirmation, including misleading documentation paths", () => {
+test("binary and submodule changes remain inconclusive, including misleading documentation paths", () => {
   assert.equal(typeLabelFromDiff([{ ...modified("README.md"), binary: true }]), null);
   assert.equal(typeLabelFromDiff([{ ...modified("docs/manual.md"), submodule: true }]), null);
 });
@@ -65,7 +65,7 @@ test("replacing membership scans with a precomputed Set is a recognized performa
 test("unknown source mixed with tests is not a test-only change", () => {
   assert.equal(typeLabelFromDiff([modified("src/a.ts"), modified("test/a.test.ts")]), null);
 });
-test("unrelated primary types require confirmation instead of arbitrary precedence", () => {
+test("unrelated primary types remain inconclusive instead of arbitrary precedence", () => {
   assert.equal(typeLabelFromDiff([modified("package.json"), modified(".github/workflows/build.yml")]), null);
 });
 test("empty diff and unsupported items are not chore", () => {
@@ -78,7 +78,7 @@ for (const [context, content] of [
   ["template literal", "export const example = `\nexport function sample() {}\n`;\n"],
   ["continued quoted string", "const example = \"example\\\nexport function sample() {}\";\n"],
 ] as const) {
-  test(`export examples inside a ${context} require confirmation rather than feature classification`, () => {
+  test(`export examples inside a ${context} remain inconclusive rather than feature classification`, () => {
     assert.equal(typeLabelFromDiff([{
       status: "added", newPath: "src/example.ts", binary: false, submodule: false, after: content,
     }]), null);
@@ -105,4 +105,42 @@ test("simple genuine added and appended declarations still classify as features"
     const before = "export const value = 1;\n";
     assert.equal(typeLabelFromDiff([modified("src/example.ts", before, before + declaration)]), "type::feature");
   }
+});
+
+
+test("source comment text changes automatically classify as documentation", () => {
+  for (const [path, before, after] of [
+    ["src/runtime.ts", "// This thin adapter owns JS/WASM copying and leaves command semantics in C++.\nexport class Runtime {}\n", "// This adapter handles JS/WASM data copying while command semantics stay in C++.\nexport class Runtime {}\n"],
+    ["src/runtime.cpp", "/** Old adapter prose. */\nint value = 1;\n", "/** Clarified adapter prose. */\nint value = 1;\n"],
+    ["src/runtime.py", "value = '# literal'\n# Old comment\n", "value = '# literal'\n# New comment\n"],
+    ["src/runtime.ts", "const url = 'https://example.com';\n// Old comment\n", "const url = 'https://example.com';\n// New comment\n"],
+  ]) assert.equal(typeLabelFromDiff([modified(path!, before, after)]), "type::doc");
+});
+
+test("strings, regexes, changed code and compiler directives cannot disguise changes as doc", () => {
+  for (const [before, after] of [
+    ["const value = '// old';\n", "const value = '// new';\n"],
+    ["const value = /[//old]/;\n", "const value = /[//new]/;\n"],
+    ["// old\nconst value = 1;\n", "// new\nconst value = 2;\n"],
+    ["// @ts-ignore\nconst value = missing;\n", "// @ts-expect-error\nconst value = missing;\n"],
+    ["return/*\nold*/1;\n", "return/*new*/1;\n"],
+    ["/* old */\nconst value = 1;\n", "// new */\nconst value = 1;\n"],
+    ["const value = 'unterminated; // old\n", "const value = 'unterminated; // new\n"],
+  ]) assert.equal(typeLabelFromDiff([modified("src/runtime.ts", before, after)]), null);
+});
+
+test("unchanged template literals are opaque while surrounding comment edits are doc", () => {
+  const tick = String.fromCharCode(96);
+  const interpolation = String.fromCharCode(36) + "{";
+  const prefix = "const value = " + tick + "url // literal " + interpolation + "render('/* literal */')}" + tick + ";\n";
+  assert.equal(typeLabelFromDiff([modified("src/runtime.ts", prefix + "// old\n", prefix + "// new\n")]), "type::doc");
+  assert.equal(typeLabelFromDiff([modified("src/runtime.ts", prefix, prefix.replace("url // literal", "url // changed"))]), null);
+  const nested = "const value = " + tick + interpolation + "render(" + tick + "nested // literal" + tick + ")}" + tick + ";\n";
+  assert.equal(typeLabelFromDiff([modified("src/runtime.ts", nested + "// old\n", nested + "// new\n")]), "type::doc");
+});
+
+test("Unicode line endings and escaped comment continuations do not hide code changes", () => {
+  assert.equal(typeLabelFromDiff([modified("src/runtime.ts", "// old\u2028const value = 1;", "// new\u2028const value = 2;")]), null);
+  const slash = String.fromCharCode(92);
+  assert.equal(typeLabelFromDiff([modified("src/runtime.cpp", "// old " + slash + "\nvalue();\n", "// new\nvalue();\n")]), null);
 });

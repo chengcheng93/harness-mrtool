@@ -53,7 +53,7 @@ test("manual handoff renders a token-free MR title and description and never cal
   mergeRequest.labelCandidateTokens = [`hmrc1_${"C".repeat(43)}`];
   const repository = fakeRepository();
   const plan: SourceBranchPushPlan = {
-    kind: "confirmation-required",
+    kind: "not-requested",
     relation: "absent",
     beforeSha: null,
     command: ["push", "--no-force", "origin", `${repository.sourceHeadSha}:${repository.sourceRemoteRef}`],
@@ -207,7 +207,7 @@ test("manual --ssh-mr cannot bypass mandatory labels through SSH push options", 
   let capturedOptions: readonly string[] | undefined;
   const repository = fakeRepository();
   const basePlan: SourceBranchPushPlan = {
-    kind: "confirmation-required",
+    kind: "not-requested",
     relation: "absent",
     beforeSha: null,
     command: ["push", "--push-option=merge_request.create"],

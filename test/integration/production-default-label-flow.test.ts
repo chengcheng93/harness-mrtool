@@ -144,11 +144,6 @@ async function setup(t: test.TestContext) {
             if (id === "title.titleSummary") return raw.title.titleSummary;
             throw new Error(`Unexpected text ${id}`);
           },
-          confirm: async ({ id, defaultValue }) => {
-            prompts.push(id);
-            assert.equal(id.startsWith("labels."), false, "routine automatic label confirmation is disabled");
-            return defaultValue;
-          },
         },
         wizardEditor: { edit: async () => {
           if (driftDuringCollection && state.mr !== null) state.mr = { ...state.mr, description: `Changed during collection.\n${state.mr.description}` };
@@ -196,14 +191,28 @@ test("production main default update and verify use the durable receipt and exac
   assert.deepEqual(f.state.mr!.labels.map((label) => label.name).sort(), ["priority::p2", "status::review", "type::bug"]);
 });
 
-test("production main rejects ambiguous source intent and stale confirmation before mutation", async (t) => {
+test("production main creates a doc MR from the actual WASM comment change without confirmation", async (t) => {
   const f = await setup(t);
-  f.diff.items[0]!.after = "export const changed = 42;";
+  Object.assign(f.diff.items[0]!, {
+    newPath: "luban-web-wasm/src/lb_web_runtime.ts",
+    before: "// This thin adapter owns JS/WASM copying and leaves command semantics in C++.\nexport const runtime = true;\n",
+    after: "// This adapter handles JS/WASM data copying while command semantics stay in C++.\nexport const runtime = true;\n",
+  });
   await f.issue();
-  const unknown = await f.run(["create"]);
-  assert.notEqual(unknown.code, 0); assert.match(unknown.stdout, /LABEL_ERROR/); assert.deepEqual(f.state.writes, []);
-  const stale = await f.run(["create", "--confirm-label-type", "bug", "--label-diff-digest", "0".repeat(64)]);
-  assert.notEqual(stale.code, 0); assert.match(stale.stdout, /LABEL_ERROR/); assert.deepEqual(f.state.writes, []);
+  const result = await f.run(["create"]);
+  assert.equal(result.code, 0, result.stdout + result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout).data.mandatoryLabels.names, ["type::doc", "priority::p2", "status::review"]);
+  assert.equal(f.state.mr!.title.startsWith("[docs]"), true);
+  assert.deepEqual(f.state.mr!.labels.map(label => label.name).sort(), ["priority::p2", "status::review", "type::doc"]);
+});
+
+test("production main automatically classifies ambiguous source changes as chore", async (t) => {
+  const f = await setup(t); f.diff.items[0]!.after = "export const changed = 42;"; await f.issue();
+  const result = await f.run(["create"]);
+  assert.equal(result.code, 0, result.stdout + result.stderr);
+  const selected = JSON.parse(result.stdout).data.mandatoryLabels;
+  assert.equal(selected.source, "fallback");
+  assert.deepEqual(selected.names, ["type::chore", "priority::p2", "status::review"]);
 });
 
 test("production main never reports success when remote label readback differs", async (t) => {
@@ -223,15 +232,12 @@ test("production main upsert updates an existing MR without a second create", as
   assert.equal(JSON.parse(result.stdout).data.command, "update");
 });
 
-test("production main accepts an explicit type only for the current ambiguous diff digest", async (t) => {
-  const f = await setup(t); f.diff.items[0]!.after = "export const changed = 42;"; await f.issue();
-  const unknown = await f.run(["create"]);
-  const parsed = JSON.parse(unknown.stdout);
-  const digest = parsed.error.actual.diffDigest;
-  assert.match(digest, /^[a-f0-9]{64}$/u);
-  const result = await f.run(["create", "--confirm-label-type", "bug", "--label-diff-digest", digest]);
-  assert.equal(result.code, 0, result.stdout + result.stderr);
-  assert.equal(JSON.parse(result.stdout).data.mandatoryLabels.source, "confirmed");
+test("retired manual type confirmation flags are rejected before any mutation", async (t) => {
+  const f = await setup(t); await f.issue();
+  const result = await f.run(["create", "--confirm-label-type", "bug", "--label-diff-digest", "0".repeat(64)]);
+  assert.notEqual(result.code, 0);
+  assert.equal(JSON.parse(result.stdout).code, "INPUT_ERROR");
+  assert.deepEqual(f.state.writes, []);
 });
 
 test("production main create dry-run validates labels without writing or consuming the context", async (t) => {
@@ -322,15 +328,14 @@ test("API create refuses offline mode before any live mutation", async (t) => {
   assert.doesNotMatch(error.safeNextStep, /manual/iu);
 });
 
-test("default production migration consumes migration-bound context only after exact hash confirmation", async (t) => {
+test("default production migration uses automatic verified Bundle bindings without a confirmation parameter", async (t) => {
   const f = await setup(t); await f.issue();
   const created = await f.run(["create"]); assert.equal(created.code, 0, created.stdout);
   await f.issue(88, true);
   const before = f.state.writes.length;
   const stale = await f.run(["update", "88", "--migrate-template", "--confirm-migration", `${"0".repeat(64)}:${"0".repeat(64)}`]);
   assert.notEqual(stale.code, 0); assert.equal(f.state.writes.length, before);
-  const hash = f.currentBundle.bundleManifestHash;
-  const result = await f.run(["update", "88", "--migrate-template", "--confirm-migration", `${hash}:${hash}`]);
+  const result = await f.run(["update", "88", "--migrate-template"]);
   assert.equal(result.code, 0, result.stdout + result.stderr);
   assert.equal(JSON.parse(result.stdout).data.command, "update");
 });

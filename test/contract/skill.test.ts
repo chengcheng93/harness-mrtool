@@ -106,6 +106,8 @@ function assertApiDefaultInstructions(instructions: string): void {
   assert.match(normalized, /failure or partial write.*faithfully report.*ok.*code/u);
   assert.doesNotMatch(normalized, /Report only the CLI JSON result|Report the single CLI JSON document/u);
   assert.doesNotMatch(normalized, /Show the preview and obtain required confirmation before writing/u);
+  assert.doesNotMatch(instructions, /--confirm-label-type|--label-diff-digest|--confirm-migration/u);
+  assert.doesNotMatch(normalized, /obtain explicit user type confirmation|After confirmation, rerun|obtain confirmation before/u);
   assert.match(normalized, /API credentials are missing or API requests fail, stop and explain/u);
   assert.match(normalized, /Never automatically fall back to manual/u);
   assert.match(normalized, /Manual mode is disabled by default/u);

@@ -79,11 +79,12 @@ published release or live GitLab acceptance. Bundle `1.2.0` uses a fixed 13-labe
 pool and exactly three final labels: one type, one priority, one lifecycle status.
 
 - Let the CLI classify the canonical actual committed diff and compute its digest.
-  A title, branch name, or `--type` hint is not classification confirmation.
-- For unknown/ambiguous changes, show the actual diff and obtain explicit user
-  type confirmation. Pass `--confirm-label-type <suffix>` together with the CLI's
-  `--label-diff-digest <sha256>`; never invent a digest, silently choose `chore`, or
-  reuse confirmation after the diff changes. Known conflicting types are rejected.
+  Titles, branch names, and `--type` hints do not override this classification.
+- Documentation and source-comment-only changes are automatically `doc`.
+  Other recognized changes use their detected type; unknown or ambiguous changes
+  automatically use `chore`. Do not ask the user to choose or confirm a type,
+  copy a digest, approve labels, or supply confirmation flags. The diff digest
+  remains an automatic consistency check.
 - Default priority is p2. Only an explicit p0/p1 escalation with a nonblank
   `--priority-reason` may override it. Every merge request gets the review
   lifecycle status label.
@@ -96,12 +97,13 @@ pool and exactly three final labels: one type, one priority, one lifecycle statu
 A user request to submit, create, or update an MR authorizes the normal API write.
 Run automatic checks and proceed directly to create/update; do not add a preview
 or repeat human confirmation for an already authorized submission. Ask only for
-required information that cannot be established or an explicit confirmation
-required by a genuine blocker, such as unknown/ambiguous diff classification.
+required factual information that cannot be established. Do not add human
+approval, type selection, hash entry, or confirmation steps anywhere in the MR
+workflow, including unknown classification, updates, migration, or resume.
 
 Stream the structured Request through stdin; never place request contents,
 candidate tokens, credentials, or long text in arguments. Preserve the exact
-normalized Request and any diff-bound confirmation. Use exactly one of create
+normalized Request and its automatically derived diff binding. Use exactly one of create
 for a new MR or update for an existing MR:
 
 ```text
@@ -120,7 +122,7 @@ harness-mrtool verify <iid> --auth api --level structure --client codex-skill --
 
 Run the read-only preview only when the user explicitly requests it; it is not a
 prerequisite for ordinary API create/update. If the user asks to review a preview
-before submission, show it and wait for their decision:
+before submission, return the preview without submitting an MR:
 
 ```text
 harness-mrtool preview --auth api --client codex-skill --client-version <skill-semver> --skill-protocol <protocol> --input - --input-format json --output json
@@ -135,9 +137,8 @@ If that Bundle differs from the create context, follow the CLI's direction to
 `context --mr <iid>` plus `update <iid>`, or explicit template migration; never
 fall back to the current Bundle. Trusted old signed policies remain readable.
 For explicit migration, obtain `context --mr <iid> --migrate-template` and use
-`update <iid> --migrate-template --confirm-migration <oldHash>:<newHash>`.
-Read the displayed hashes before confirming; do not invent or reuse stale
-confirmation. The adapter verifies the previous receipt and exact historical
+`update <iid> --migrate-template`. The adapter automatically binds and verifies
+the exact old and new Bundle hashes, the previous receipt, and exact historical
 Bundle. Controlled migration tests are not proof of live acceptance or publication.
 
 On verified success, return a concise Markdown MR link, with at most one short
@@ -173,7 +174,7 @@ After resolving the blocker, obtain a fresh ordinary create context using the
 API context command above without `--mr`. Build a separate fresh Request with
 the same committed diff, request meaning, and selected candidate identities.
 Carry forward the existing authorization for this unchanged submission and the
-same diff-bound confirmation flags for resume and any explicitly requested
+same Request meaning and automatic diff binding for resume and any requested
 preview. Historical private proof is read-only: at most 16 expired contexts
 remain for up to 24 hours after expiry; retention never revives expired or
 consumed candidate tickets.
@@ -198,8 +199,8 @@ harness-mrtool manual --auth ssh --input - --input-format json --output json
 ```
 
 Manual mode never calls GitLab or resolves labels, assignees, or reviewers. Show
-the title, description, target branch, and push plan; obtain confirmation before
-rerunning with `--push`. A branch push or subsequent user-created web MR is not
+the title, description, target branch, and push plan. If the user requested the
+branch push, run with `--push` directly; do not ask for another confirmation. A branch push or subsequent user-created web MR is not
 mrtool-verified. `--ssh-mr` is disabled and returns `LABEL_ERROR` before push
 planning or execution, even with `--push`. Do not substitute raw Git push options
 or API calls to bypass this refusal. mrtool's guarantees do not govern operations

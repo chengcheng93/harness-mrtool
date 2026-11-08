@@ -64,9 +64,6 @@ export interface MigrateTemplateInputs {
   readonly proposedValues?: JsonObject;
   readonly oldSchema?: JsonValue;
   readonly newSchema?: JsonValue;
-  readonly nonInteractive?: boolean;
-  readonly confirmation?: string | null;
-  readonly confirm?: () => Promise<boolean> | boolean;
   readonly transaction: MigrationTransaction;
 }
 
@@ -149,10 +146,6 @@ function manifestHash(bundle: LoadedTemplateBundle): string {
   return sha256Utf8(`${canonicalizeJson(bundle.manifest)}\n`);
 }
 
-function exactConfirmation(value: string | null | undefined, oldHash: string, newHash: string): boolean {
-  return value === `${oldHash}:${newHash}`;
-}
-
 function receiptDescription(historical: LoadedMrBundle): string | undefined {
   const receipt = historical.receipt;
   if (receipt !== null && typeof receipt === "object" && !Array.isArray(receipt) &&
@@ -229,7 +222,7 @@ function validateNewDescription(
   return marker;
 }
 
-/** Execute an explicit, hash-confirmed, lossless Template Bundle migration. */
+/** Execute an explicitly requested lossless migration with verified Bundle bindings. */
 export async function migrateTemplate(input: MigrateTemplateInputs): Promise<MigrateTemplateResult> {
   if (input === null || typeof input !== "object" || input.transaction === undefined) {
     throw error("INPUT_ERROR", "migration transaction is unavailable");
@@ -281,20 +274,6 @@ export async function migrateTemplate(input: MigrateTemplateInputs): Promise<Mig
       receiptDescription(input.historical) === undefined) {
     throw error("CONCURRENT_UPDATE", "the current description changed without a durable migration base");
   }
-  const confirmation = input.confirmation ?? null;
-  if (input.nonInteractive === true) {
-    if (!exactConfirmation(confirmation, oldHash, newHash)) {
-      throw error("INPUT_ERROR", "non-interactive migration requires exact old:new hash confirmation");
-    }
-  } else if (confirmation !== null && !exactConfirmation(confirmation, oldHash, newHash)) {
-    throw error("INPUT_ERROR", "migration confirmation must be the exact old:new hash pair");
-  } else if (confirmation === null) {
-    if (input.confirm === undefined) {
-      throw error("INPUT_ERROR", "interactive migration requires an explicit confirmation");
-    }
-    if (!(await input.confirm())) throw error("INPUT_ERROR", "migration confirmation was declined");
-  }
-
   const mergedBody = plan.description?.description ?? markerBody(input.newDescription);
   const mergedDescription = rewriteMarkerBody(mergedBody, input.newDescription);
   // Re-check the generated marker after merging, before any durable backup write.

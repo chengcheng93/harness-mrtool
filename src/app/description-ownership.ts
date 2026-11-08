@@ -17,7 +17,7 @@ function ownershipError(
     expected: "a final harness-mrtool marker whose body and pinned Bundle are verifiable",
     actual: "managed description ownership could not be proven",
     safeNextStep: code === "MANUAL_DESCRIPTION_CHANGE"
-      ? "Map the manual text back into the structured Request, or explicitly confirm --force-replace-description."
+      ? "Map the manual text back into the structured Request, or use --force-replace-description when replacement is the requested operation."
       : "Refresh the MR and load the exact immutable Template Bundle named by its verified marker.",
   });
 }

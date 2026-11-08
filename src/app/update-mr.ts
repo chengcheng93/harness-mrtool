@@ -56,7 +56,6 @@ function concurrentUpdateError(): ToolError<"CONCURRENT_UPDATE"> {
 export interface UpdateMergeRequestMigration {
   readonly previousBundle: LoadedTemplateBundle;
   readonly previousReleaseTag: string;
-  readonly confirmation: string;
   readonly oldHash: string;
   readonly newHash: string;
 }
@@ -71,11 +70,10 @@ export function validateUpdateMigration(
   validateTemplateBundle(bundle);
   const oldHash = sha256Utf8(`${canonicalizeJson(migration.previousBundle.manifest)}\n`);
   const newHash = sha256Utf8(`${canonicalizeJson(bundle.manifest)}\n`);
-  if (migration.oldHash !== oldHash || migration.newHash !== newHash ||
-      migration.confirmation !== `${oldHash}:${newHash}`) {
-    throw new ToolError("INPUT_ERROR", "Migration confirmation does not match the exact old and new Bundles", {
-      field: "migration.confirmation", expected: `${oldHash}:${newHash}`, actual: "stale or mismatched migration confirmation",
-      safeNextStep: "Refresh migration context and explicitly confirm the exact old:new Bundle hashes.",
+  if (migration.oldHash !== oldHash || migration.newHash !== newHash) {
+    throw new ToolError("INPUT_ERROR", "Migration binding does not match the verified old and new Bundles", {
+      field: "migration.bundleHashes", expected: `${oldHash}:${newHash}`, actual: "stale or mismatched migration binding",
+      safeNextStep: "Refresh migration context and reload the verified historical and destination Bundles.",
     });
   }
   if (migration.previousReleaseTag !== `templates-v${migration.previousBundle.manifest.version}` ||

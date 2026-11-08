@@ -453,7 +453,7 @@ export function createManualCommandServices(
       const manualSteps = [
         "Review the generated title and description; GitLab labels, assignee, and reviewers were not read.",
         invocation.options.push
-          ? "The source branch push was requested through the configured Git remote; confirm the execution result below."
+          ? "The source branch push was requested through the configured Git remote; read the verified execution result below."
           : "Run pushPlan.command with your SSH agent or Git credential helper if the source branch is not already remote.",
         invocation.command.kind === "manual" && invocation.command.sshMergeRequest
           ? "The SSH push requested a Merge Request with generated title and description; creation is not API-verified. Open GitLab and verify it before adding labels, assignee, and reviewers."

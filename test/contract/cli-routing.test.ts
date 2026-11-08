@@ -54,7 +54,6 @@ test("returns typed command-specific values and common options", () => {
     "--client", "script",
     "--client-version", "2.1.0",
     "--migrate-template",
-    "--confirm-migration", `${"a".repeat(64)}:${"b".repeat(64)}`,
     "--force-replace-description",
   ]);
 
@@ -62,7 +61,6 @@ test("returns typed command-specific values and common options", () => {
     kind: "update",
     iid: 123,
     migrateTemplate: true,
-    confirmation: `${"a".repeat(64)}:${"b".repeat(64)}`,
     forceReplaceDescription: true,
   });
   assert.equal(invocation.options.input, "-");
@@ -145,21 +143,17 @@ test("does not reflect rejected command-line values", () => {
   });
 });
 
-test("MR commands accept diff-bound type confirmation and explicit priority elevation", () => {
-  const invocation = parseCliInvocation(["create", "--confirm-label-type", "bug", "--label-diff-digest", "a".repeat(64),
-    "--priority", "p0", "--priority-reason", "Production incident 42"]);
-  assert.equal(invocation.options.confirmLabelType, "bug");
-  assert.equal(invocation.options.labelDiffDigest, "a".repeat(64));
+test("MR commands accept explicit priority while retired approval flags are rejected", () => {
+  const invocation = parseCliInvocation(["create", "--priority", "p0", "--priority-reason", "Production incident 42"]);
   assert.equal(invocation.options.priority, "p0");
   assert.equal(invocation.options.priorityReason, "Production incident 42");
+  assert.deepEqual(parseCliInvocation(["update", "12", "--migrate-template", "--non-interactive"]).command,
+    { kind: "update", iid: 12, migrateTemplate: true, forceReplaceDescription: false });
   for (const args of [
-    ["create", "--confirm-label-type", "bug"],
+    ["create", "--confirm-label-type", "bug", "--label-diff-digest", "a".repeat(64)],
     ["create", "--label-diff-digest", "a".repeat(64)],
-    ["create", "--confirm-label-type", "anything", "--label-diff-digest", "a".repeat(64)],
-    ["create", "--confirm-label-type", "bug", "--label-diff-digest", "yes"],
-    ["create", "--priority", "p0"],
-    ["create", "--priority", "p9"],
-    ["create", "--priority-reason", "unattached reason"],
-    ["version", "--priority", "p2"],
+    ["update", "12", "--migrate-template", "--confirm-migration", "a".repeat(64) + ":" + "b".repeat(64)],
+    ["create", "--priority", "p0"], ["create", "--priority", "p9"],
+    ["create", "--priority-reason", "unattached reason"], ["version", "--priority", "p2"],
   ]) inputError(args);
 });

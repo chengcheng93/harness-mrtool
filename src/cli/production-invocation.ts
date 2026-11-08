@@ -65,7 +65,7 @@ export function clearWizardLabelOptions(invocation: CliInvocation): void {
 }
 
 
-/** Planner-derived evidence, accepted in the TTY and rechecked before update writes. */
+/** Planner-derived evidence bound automatically and rechecked before update writes. */
 export interface UpdateConfirmationEvidence {
   readonly updateMarkerDigest: string;
   readonly descriptionDigest: string;

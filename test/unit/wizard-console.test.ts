@@ -53,11 +53,12 @@ test("node wizard console accepts only numeric indexes for enumerated choices", 
 });
 
 test("node wizard console preserves exact text and handles defaults without pre-reading", async () => {
-  const fixture = questions("  exact digest  ", "", "n");
+  const fixture = questions("  exact summary  ", "", "n");
   const console = createNodeWizardConsole({ questionPort: fixture.port });
 
-  assert.equal(await console.text({ id: "digest", prompt: "Digest" }), "  exact digest  ");
-  assert.equal(await console.confirm({ id: "default", prompt: "Default", defaultValue: true }), true);
-  assert.equal(await console.confirm({ id: "no", prompt: "No", defaultValue: true }), false);
+  assert.equal(await console.text({ id: "summary", prompt: "Summary" }), "  exact summary  ");
+  assert.equal(await console.text({ id: "default", prompt: "Default", defaultValue: "value" }), "value");
+  assert.equal(await console.text({ id: "literal", prompt: "Literal" }), "n");
+  assert.equal(Object.hasOwn(console, "confirm"), false);
   assert.equal(fixture.calls.length, 3);
 });

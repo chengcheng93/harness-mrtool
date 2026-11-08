@@ -21,7 +21,6 @@ export type CliCommand =
       readonly kind: "update";
       readonly iid: number | null;
       readonly migrateTemplate: boolean;
-      readonly confirmation: string | null;
       readonly forceReplaceDescription: boolean;
     }
   | { readonly kind: "verify"; readonly iid: number | null; readonly level: VerificationLevel }
@@ -75,7 +74,7 @@ const REQUEST_COMMON_FLAGS = new Set([
   "--type",
   "--module",
   "--title-summary",
-  "--confirm-label-type", "--label-diff-digest", "--priority", "--priority-reason",
+  "--priority", "--priority-reason",
 ]);
 const LOCAL_COMMON_FLAGS = new Set([
   ...BASE_COMMON_FLAGS,
@@ -89,7 +88,6 @@ const SPECIFIC_FLAGS: Readonly<Partial<Record<CommandKind, Readonly<Record<strin
   context: { "--mr": "value", "--migrate-template": "boolean" },
   update: {
     "--migrate-template": "boolean",
-    "--confirm-migration": "value",
     "--force-replace-description": "boolean",
   },
   verify: { "--level": "value" },
@@ -284,22 +282,10 @@ function commandFor(
     case "update": { // eslint-disable-line no-case-declarations
       const iid = optionalIid(positionals, "iid");
       const migrateTemplate = specific.has("--migrate-template");
-      const confirmationRaw = specificValue(specific, "--confirm-migration");
-      const confirmation = confirmationRaw === undefined ? null : scalar(confirmationRaw, "--confirm-migration");
-      if (confirmation !== null && !migrateTemplate) {
-        invalid("--confirm-migration", "used only with --migrate-template", "migration is disabled");
-      }
-      if (confirmation !== null && !/^[a-f0-9]{64}:[a-f0-9]{64}$/u.test(confirmation)) {
-        invalid("--confirm-migration", "<old-sha256>:<new-sha256>", "invalid confirmation hash pair");
-      }
-      if (migrateTemplate && options.nonInteractive && confirmation === null) {
-        invalid("--confirm-migration", "required for non-interactive migration", "confirmation is missing");
-      }
       return Object.freeze({
         kind,
         iid,
         migrateTemplate,
-        confirmation,
         forceReplaceDescription: specific.has("--force-replace-description"),
       });
     }

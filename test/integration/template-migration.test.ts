@@ -215,7 +215,7 @@ test("missing historical asset fails closed before migration planning", async ()
   );
 });
 
-test("non-interactive migration requires exact old:new confirmation", async () => {
+test("migration binds verified Bundles automatically without a confirmation callback", async () => {
   const bundle = await fixtureBundle();
   const newer = await nextBundle();
   const mr = await markedMr(OLD_HASH);
@@ -230,20 +230,12 @@ test("non-interactive migration requires exact old:new confirmation", async () =
     execute: async () => { writes.push("execute"); return { readbackVerified: true, receiptStaged: true }; },
   };
 
-  await assert.rejects(
-    migrateTemplate({
-      current: mr,
-      historical: loaded,
-      currentBundle: newer.bundle,
-      newBundleHash: newer.hash,
-      newDescription: descriptionForBundle(mr.description, newer.bundle, newer.hash),
-      nonInteractive: true,
-      confirmation: "yes",
-      transaction,
-    }),
-    /old.*new.*hash/iu,
-  );
-  assert.deepEqual(writes, []);
+  const result = await migrateTemplate({
+    current: mr, historical: loaded, currentBundle: newer.bundle,
+    newBundleHash: newer.hash, newDescription: descriptionForBundle(mr.description, newer.bundle, newer.hash), transaction,
+  });
+  assert.equal(result.committed, true);
+  assert.deepEqual(writes, ["backup", "execute"]);
 });
 
 test("three-way migration keeps manual prose and reports managed conflicts", () => {
@@ -314,8 +306,6 @@ test("successful migration backs up before full transaction and readback receipt
     currentBundle: newer.bundle,
     newBundleHash: newer.hash,
     newDescription: descriptionForBundle(mr.description, newer.bundle, newer.hash),
-    nonInteractive: true,
-    confirmation: `${OLD_HASH}:${newer.hash}`,
     transaction,
   });
   assert.deepEqual(events, [`backup:${OLD_HASH}`, "transaction"]);
@@ -341,8 +331,6 @@ test("managed conflict stops migration before backup or remote transaction", asy
       newBundleHash: newer.hash,
       newDescription: descriptionForBundle(original.description.replace("old summary", "new summary"), newer.bundle, newer.hash),
       baseDescription: original.description,
-      nonInteractive: true,
-      confirmation: `${OLD_HASH}:${newer.hash}`,
       transaction: {
         backup: async () => { writes.push("backup"); },
         execute: async () => { writes.push("execute"); return { readbackVerified: true, receiptStaged: true }; },
@@ -371,8 +359,6 @@ test("EOL historical Bundle blocks migration before backup", async () => {
       currentBundle: newer.bundle,
       newBundleHash: newer.hash,
       newDescription: descriptionForBundle(original.description, newer.bundle, newer.hash),
-      nonInteractive: true,
-      confirmation: `${OLD_HASH}:${newer.hash}`,
       transaction: {
         backup: async () => { writes.push("backup"); },
         execute: async () => { writes.push("execute"); return { readbackVerified: true, receiptStaged: true }; },
@@ -405,8 +391,6 @@ test("marker drift stops migration before backup", async () => {
       currentBundle: newer.bundle,
       newBundleHash: newer.hash,
       newDescription: descriptionForBundle(original.description, newer.bundle, newer.hash),
-      nonInteractive: true,
-      confirmation: `${OLD_HASH}:${newer.hash}`,
       transaction: {
         backup: async () => { writes.push("backup"); },
         execute: async () => { writes.push("execute"); return { readbackVerified: true, receiptStaged: true }; },

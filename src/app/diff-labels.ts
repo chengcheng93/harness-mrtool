@@ -18,8 +18,121 @@ function surface(path: string): Surface {
 }
 
 // These are bounded, explainable heuristics, not a claim to infer arbitrary program
-// intent. Unknown source changes require an explicit diff-bound confirmation.
+// intent. Unknown results use the mandatory-label selector's automatic fallback.
+
+interface CommentFingerprint { readonly code: string; readonly comments: number }
+
+/** Compare code bytes while discarding only lexically established comments.
+ * Strings and templates are opaque; uncertain slash/raw-literal contexts decline
+ * the doc classification and are handled by the deterministic fallback instead. */
+function commentFingerprint(text: string, path: string): CommentFingerprint | null {
+  const hashComments = /\.(?:py|rb)$/u.test(path);
+  if (/\b(?:u8|u|U|L)?R"|\br#+"|\$@?"|@\$"/u.test(text) ||
+      (hashComments && /\b(?:[fF][rR]?|[rR][fF])["']/u.test(text))) return null;
+  const quotedEnd = (start: number): number | null => {
+    const quote = text[start]!;
+    const delimiter = hashComments && text.startsWith(quote.repeat(3), start) ? quote.repeat(3) : quote;
+    let index = start + delimiter.length;
+    while (index < text.length) {
+      if (text[index] === "\\") { index += 2; continue; }
+      if (text.startsWith(delimiter, index)) return index + delimiter.length;
+      index += 1;
+    }
+    return null;
+  };
+  const blockEnd = (start: number): number | null => {
+    let index = start + 2;
+    let depth = 1;
+    while (index < text.length) {
+      if (path.endsWith(".rs") && text.startsWith("/*", index)) { depth += 1; index += 2; }
+      else if (text.startsWith("*/", index)) {
+        depth -= 1; index += 2;
+        if (depth === 0) return index;
+      } else index += 1;
+    }
+    return null;
+  };
+  const lineEnd = (start: number): number => {
+    let index = start;
+    while (index < text.length && !/[\n\r\u2028\u2029]/u.test(text[index]!)) index += 1;
+    return index;
+  };
+  const templateEnd = (start: number, nesting = 0): number | null => {
+    if (nesting > 64) return null;
+    let index = start + 1;
+    if (path.endsWith(".go")) {
+      const end = text.indexOf(String.fromCharCode(96), index);
+      return end < 0 ? null : end + 1;
+    }
+    while (index < text.length) {
+      if (text[index] === "\\") { index += 2; continue; }
+      if (text.charCodeAt(index) === 96) return index + 1;
+      if (!text.startsWith("\${", index)) { index += 1; continue; }
+      index += 2;
+      let depth = 1;
+      while (index < text.length && depth > 0) {
+        const character = text[index]!;
+        if (character === "'" || character === '"') {
+          const end = quotedEnd(index); if (end === null) return null; index = end;
+        } else if (text.charCodeAt(index) === 96) {
+          const end = templateEnd(index, nesting + 1); if (end === null) return null; index = end;
+        } else if (text.startsWith("//", index)) index = lineEnd(index + 2);
+        else if (text.startsWith("/*", index)) {
+          const end = blockEnd(index); if (end === null) return null; index = end;
+        } else if (character === "/") return null;
+        else {
+          if (character === "{") depth += 1;
+          if (character === "}") depth -= 1;
+          index += 1;
+        }
+      }
+      if (depth !== 0) return null;
+    }
+    return null;
+  };
+  let index = 0;
+  let code = "";
+  let comments = 0;
+  while (index < text.length) {
+    const character = text[index]!;
+    if (character === "'" || character === '"') {
+      // C# verbatim literals use doubled quotes, which this lexer deliberately
+      // does not interpret as ordinary JavaScript/C escaped strings.
+      if (!hashComments && (text[index - 1] === "@" || text.startsWith(character.repeat(3), index))) return null;
+      const end = quotedEnd(index); if (end === null) return null;
+      code += text.slice(index, end); index = end;
+    } else if (text.charCodeAt(index) === 96) {
+      const end = templateEnd(index); if (end === null) return null;
+      code += text.slice(index, end); index = end;
+    } else if ((hashComments && character === "#") || (!hashComments && text.startsWith("//", index))) {
+      const end = lineEnd(index);
+      const comment = text.slice(index, end);
+      // Compiler/build directives are not merely prose.
+      code += /^(?:#!|#\s*(?:coding|type\s*:|frozen_string_literal)|\/\/\s*(?:@|#|<reference|<amd|go:|line\b|swift-tools-version:))/u.test(comment) || /\\$|\?\?\/$|coding\s*[:=]/u.test(comment) ? comment : "";
+      comments += 1; index = end;
+    } else if (!hashComments && text.startsWith("/*", index)) {
+      const end = blockEnd(index); if (end === null) return null;
+      const comment = text.slice(index, end);
+      code += /^\/\*[!@#]|@ts-|__PURE__/u.test(comment) ? comment : " " + (comment.match(/\r\n|[\r\n\u2028\u2029]/gu) ?? []).join("");
+      comments += 1; index = end;
+    } else if (!hashComments && character === "/") {
+      // Without a full language parser, regex literals and division have
+      // ambiguous lexical contexts. Never remove apparent comments inside them.
+      return null;
+    } else { code += character; index += 1; }
+  }
+  return { code, comments };
+}
+
+function commentOnlyChange(item: DiffContentItem): boolean {
+  if (item.status !== "modified" || typeof item.before !== "string" || typeof item.after !== "string" || item.before === item.after) return false;
+  const before = commentFingerprint(item.before, item.newPath);
+  const after = commentFingerprint(item.after, item.newPath);
+  return before !== null && after !== null && before.comments + after.comments > 0 && before.code === after.code;
+}
+
 function sourceType(item: DiffContentItem): DiffTypeLabel | null {
+  if (commentOnlyChange(item)) return "doc";
   const { before, after } = item;
   if (item.status === "renamed" && before !== undefined && before.length > 0 && before === after) return "refactor";
   if (after === undefined || after.trim() === "") return null;
@@ -69,7 +182,7 @@ function itemType(item: DiffContentItem): DiffTypeLabel | null {
   return kind === "source" ? sourceType(item) : kind;
 }
 
-/** Support docs/tests do not outweigh the unique main change; unknowns never become chore. */
+/** Report conclusive evidence; mandatory label selection handles unknowns automatically. */
 export function typeLabelFromDiff(items: readonly DiffContentItem[]): `type::${DiffTypeLabel}` | null {
   if (!Array.isArray(items) || items.length === 0) return null;
   const types = items.map(itemType);

@@ -5,7 +5,7 @@ AI/人负责填写变更说明，工具负责输入校验、自动标签、写�
 不是 GitLab 服务端合并门禁，也不能限制绕过工具的网页或原始 Git/API 操作。
 
 > **版本状态**：当前 main 已实现强制标签策略（Template Bundle **1.2.0**）。
-> CLI/Plugin **0.1.8** 是待验收发布候选，不代表已有可安装的新 Release。
+> CLI/Plugin **0.1.9** 是待验收发布候选，不代表已有可安装的新 Release。
 > 既有 [CLI 0.1.5](https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.5)
 > 和 [Plugin 0.1.5](https://github.com/chengcheng93/harness-mrtool/releases/tag/plugin-v0.1.5)
 > 不包含本次强制标签改造。新版尚未发布，完成发布后才更新正式下载链接。
@@ -90,12 +90,12 @@ SHA256SUMS 和签名 receipt；不要把本机生成的 Darwin `dist/harness-mrt
 git status
 git remote -v
 git fetch origin
-# 检查并提交自己的改动之后，确认将要推送的分支/提交：
+# 检查并提交自己的改动之后，检查将要推送的分支/提交：
 git push -u origin HEAD
 hmr doctor --auth api --output json
 ```
 
-`git push` 是实际远端写入；确认目标后再执行。后续每次代码或远端引用变化，都重新获取 context。
+`git push` 是实际远端写入；按用户已授权的目标直接执行，不增加审批。后续每次代码或远端引用变化，都重新获取 context。
 Git remote 可以继续使用 SSH 推送分支；Git 传输方式与创建 MR 的 API 认证方式相互独立。
 GitLab API 支持 HTTP 和 HTTPS。显式 `http://` / `https://` remote 保留原协议；
 SSH/scp/git remote 推断 API 地址时优先 HTTP，HTTP 不可用时兼容尝试同主机 HTTPS。
@@ -155,7 +155,7 @@ hmr create --auth api --output json
 
 向导收集缺少的 Profile、人员、风险和验证信息，并打开编辑器填写长文本，完成后直接创建。
 标签由 CLI 自动计算，默认 p2，不再要求接受自动标签或询问是否提优先级。
-歧义类型仍要求核对 diff 并显式确认，显式提升优先级仍要求理由。不要将尚未执行的测试填写成通过。
+注释和文档改动自动归为 doc，未知或歧义类型自动归为 chore；不再询问类型、标签或哈希确认。显式提升优先级仍要求理由。不要将尚未执行的测试填写成通过。
 
 **交互 dry-run 和正式 create 是两次独立收集，不自动复用上次编辑内容。**
 希望先预览再原样提交同一个 Request，请使用下面的 JSON 流程。
@@ -194,7 +194,7 @@ cp "$MRTOOL_HOME/examples/request.json" /absolute/private/mr-input/request.json
 | `contextId` | 刚取得的 `data.contextId` |
 | `profileIds` | 根据 `profiles detect/list` 及实际变更填写；样例为 code |
 | `targetBranch` | 工具发现的目标项目默认分支 |
-| `title`、`changes`、`motivation`、`impact`、`risk` 等 | 替换为本次真实内容；标题 type 不是标签确认 |
+| `title`、`changes`、`motivation`、`impact`、`risk` 等 | 替换为本次真实内容；标签 type 由程序从真实 diff 自动选择 |
 | `verification.items` | 填写真实证据；没验证就是 pending，不能保留示例当验收证据 |
 | `profileFields` | 按选中 Profile 补充；例如 docs 有额外必填字段 |
 | `mergeRequest.assigneeCandidateToken`、`review.reviewerCandidateTokens` | 来自本次 context；审核人可以为空，之后在 GitLab 中添加，工具不强制最少人数 |
@@ -246,14 +246,13 @@ hmr verify 157 --level structure --output json
 写入的标签和 metadata，继续剩余步骤。它不创建第二个 MR，不把过期票据重新变成写权限，
 也不代替普通 `update` 的回执校验；`verify` 只验证存储状态，不恢复事务。
 私有上下文的历史证明保留至过期后 24 小时，最多 16 条；原始文件、私有证明丢失或计划变化时
-会拒绝恢复。需要原有 diff 类型确认的命令，
-恢复时继续传入相同且仍与当前 diff 匹配的 `--confirm-label-type` / `--label-diff-digest`。
+会拒绝恢复。恢复时程序重新计算类型和 diff 绑定，不需要人工确认或复用确认参数。
 
-## 6. 自动标签规则与人工确认
+## 6. 自动标签规则
 
 | 类别 | 固定池 | 规则 |
 | --- | --- | --- |
-| type | feature / bug / doc / test / refactor / performance / build / ci / chore | 从真实 diff 保守推断，无法确定不能静默归为 chore |
+| type | feature / bug / doc / test / refactor / performance / build / ci / chore | 从真实 diff 自动判定；注释/文档为 doc，无法细分为 chore |
 | priority | p0 / p1 / p2 | 默认 p2；p0/p1 需要理由 |
 | status | review | 每个 MR 都写入 `status::review`；项目不再需要 `status::doing` |
 
@@ -262,15 +261,10 @@ hmr verify 157 --level structure --output json
 最终 MR **恰好三个标签**：更新时既移除旧 week，也移除池外人工标签关联，
 不是仅增加三个标签，更不是删除远端标签定义。
 
-遇到 `LABEL_ERROR` 的歧义提示，先审查实际 diff，再复制 CLI 返回的当前 `diffDigest`：
-
-```sh
-hmr create --auth api --input /absolute/private/mr-input/request.json --confirm-label-type bug --label-diff-digest <diffDigest> --output json
-```
-
-`<diffDigest>` 是占位符，运行前替换，不含尖括号；`bug` 也必须与自己审查的意图一致。
-两个确认参数必须同时提供，且在正式写入时保留。diff 改变后旧摘要失效；
-已经明确分类的 diff 不能用冲突确认强行覆盖。`--type` 只是标题提示，不是标签授权。
+类型完全由程序决定，不接受人工类型确认参数。注释和纯文档修改使用 `type::doc`，
+确定的其他改动使用对应类型；未知或混合且无法细分时使用 `type::chore`。
+`diffDigest` 只用于自动校验当前提交与计划一致，程序不会要求用户复制或输入它。
+`--type` 只是标题提示，不能覆盖真实 diff 的自动标签。
 
 显式提升优先级时，在 create/update 中提供参数和理由；如主动要求预览，沿用同样的参数：
 
@@ -295,15 +289,15 @@ MR 执行一次 `update`，会按 `[type][module] 摘要` 重写标题并打上 
 `--force-replace-description` 只用于明确决定覆盖受管正文的情况，不能绕过 marker/receipt 认证。
 私有状态目录包含候选、回执、信任状态，不能把删除状态当成“修复”方案。
 
-旧模板显式升级时，获取 **migrate 专用 context** 并审查旧/新 manifest hash：
+旧模板升级时，获取 **migrate 专用 context**，程序自动绑定和校验旧/新 manifest hash：
 
 ```sh
 hmr context --mr 88 --migrate-template --auth api --output json
-hmr update 88 --migrate-template --confirm-migration <oldHash>:<newHash> --auth api --input /absolute/private/mr-input/request.json --output json
+hmr update 88 --migrate-template --auth api --input /absolute/private/mr-input/request.json --output json
 ```
 
-先更新 Request 中的迁移 contextId/人员 token，并替换哈希占位符。
-非交互迁移必须提供准确的 old:new 确认；TTY 向导会展示并要求确认。
+先更新 Request 中的迁移 contextId/人员 token。交互与非交互迁移都由程序校验
+精确 old:new 绑定，不要求用户输入哈希或再次确认。
 历史资产不可用、无签名锚点或文件被篡改时停止，不以当前模板冒充旧模板。
 
 ## 8. 仅在人类明确要求时使用手工 SSH 交接
@@ -327,7 +321,7 @@ hmr manual --auth ssh --input /absolute/private/mr-input/request.json --push --o
 | --- | --- |
 | `AUTH_ERROR` | 停止 API 流程，核对 host 与 remote 一致、Token 有效且有项目权限；不自动回退 manual/SSH，不打印 Token |
 | `REPOSITORY_ERROR` | 检查功能分支、目标引用和已提交的源 SHA；源提交未发布就先 push，再刷新 context |
-| `LABEL_ERROR` | 检查所需远端标签是否存在/唯一；仅对未知类型按当前 digest 显式确认 |
+| `LABEL_ERROR` | 检查所需远端标签是否存在/唯一及 diff 是否有效；类型由程序自动选择 |
 | `CONCURRENT_UPDATE` | 代码、引用、人员或标签已经漂移；重新读取 context 和计划，不复用旧授权 |
 | `MANUAL_DESCRIPTION_CHANGE` / `UNMANAGED_MR` | 核对正文所有权和历史 receipt；不要盲目强制覆盖 |
 | `UPDATE_SECURITY_ERROR` | 检查签名历史资产/信任状态；不得跳过校验、伪造回执或用新模板顶替旧模板 |

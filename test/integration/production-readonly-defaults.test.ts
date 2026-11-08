@@ -224,7 +224,6 @@ test("default TTY wizard issues one context through the same readonly planner wi
         "title.module": expected.title.module,
         "title.titleSummary": expected.title.titleSummary,
       } as const)[id]!,
-      confirm: async ({ id }) => id !== "labels.escalate",
     },
     wizardEditor: {
       edit: async () => {
@@ -284,10 +283,8 @@ test("production text mode validates source-pinned trust before requiring struct
   assert.equal(result.error, undefined);
   assert.equal(result.status, 2, result.stderr || result.stdout);
   assert.equal(result.stdout, "");
-  assert.equal(
-    result.stderr,
-    "INPUT_ERROR: Structured input is required for non-interactive execution\n",
-  );
+  assert.match(result.stderr, /^INPUT_ERROR: Structured input is required for non-interactive execution/u);
+  assert.match(result.stderr, /Safe next step: Pass --input/u);
   assert.doesNotMatch(result.stderr, /requires --output json/u);
 });
 

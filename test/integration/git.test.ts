@@ -703,7 +703,7 @@ test("absent source ref needs authorization and dry-run never writes", async (t)
   });
 
   const unauthorizedPlan = await planSourceBranchPush(repository, { allowPush: false });
-  assert.equal(unauthorizedPlan.kind, "confirmation-required");
+  assert.equal(unauthorizedPlan.kind, "not-requested");
   assert.equal(unauthorizedPlan.relation, "absent");
   const unauthorized = await executeSourceBranchPush(repository, unauthorizedPlan, {
     authorized: false,

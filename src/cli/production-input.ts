@@ -54,15 +54,6 @@ function interactiveWizardUnavailable(): ToolError<"INPUT_ERROR"> {
   });
 }
 
-function automationMigrationConfirmationRequired(): ToolError<"INPUT_ERROR"> {
-  return new ToolError("INPUT_ERROR", "Template migration confirmation is required for automation", {
-    field: "--confirm-migration",
-    expected: "the exact <old-sha256>:<new-sha256> pair with --migrate-template",
-    actual: "migration confirmation missing",
-    safeNextStep: "Pass the exact confirmation pair returned by migration context, then retry.",
-  });
-}
-
 export function normalizeProductionRequest(value: unknown): Request {
   if (value !== null && typeof value === "object" && normalizedRequests.has(value)) {
     return value as Request;
@@ -85,12 +76,6 @@ export function createProductionRequestSource(
   const stdinIsTerminal = options.stdinIsTerminal ?? (() => process.stdin.isTTY === true);
   return Object.freeze({
     read: async (invocation: CliInvocation): Promise<Request> => {
-      if (
-        invocation.command.kind === "update" && invocation.command.migrateTemplate &&
-        invocation.command.confirmation === null && invocation.options.input !== null
-      ) {
-        throw automationMigrationConfirmationRequired();
-      }
       if (invocation.options.input !== null) {
         const value = options.inputIo === undefined
           ? await loadCliInput(invocation.options)

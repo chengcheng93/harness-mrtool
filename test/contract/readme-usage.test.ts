@@ -40,10 +40,11 @@ test("README CLI examples use supported commands and flags", async () => {
 
 test("README distinguishes unpublished source, real API writes, manual handoff and fixed-three replacement", async () => {
   const readme = await readFile(resolve(root, "README.md"), "utf8");
-  for (const phrase of ["尚未发布", "API MR 命令不自动 push", "恰好三个标签", "池外人工标签", "不自动复用", "HARNESS_MRTOOL_GITLAB_HOST", "HARNESS_MRTOOL_GITLAB_TOKEN", "--confirm-migration", "--label-diff-digest"]) {
+  for (const phrase of ["尚未发布", "API MR 命令不自动 push", "恰好三个标签", "池外人工标签", "不自动复用", "HARNESS_MRTOOL_GITLAB_HOST", "HARNESS_MRTOOL_GITLAB_TOKEN"]) {
     assert.ok(readme.includes(phrase), phrase);
   }
   assert.ok(readme.includes("[输入样例](examples/request.json)"));
+  assert.doesNotMatch(readme, /--confirm-label-type|--label-diff-digest|--confirm-migration/u);
   // The Draft stage was removed: the README must not describe a Draft-first flow or an intent field.
   assert.doesNotMatch(readme, /`intent`|Draft 输入样例|request\.draft\.json|PARTIAL_DRAFT/u);
 });

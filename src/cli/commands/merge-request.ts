@@ -268,7 +268,7 @@ function snapshotPreparedUpdate(value: PreparedUpdateMergeRequestCommand): Prepa
     : deepFreeze(copyJsonValue(value.migration, "$migration") as unknown as UpdateMergeRequestMigration);
   if (migration !== undefined) {
     if (migration === null || !exactFields(migration as unknown as JsonObject,
-      ["previousBundle", "previousReleaseTag", "confirmation", "oldHash", "newHash"])) throw preparedInputFailure();
+      ["previousBundle", "previousReleaseTag", "oldHash", "newHash"])) throw preparedInputFailure();
     validateUpdateMigration(migration, base.bundle, base.releaseTag);
   }
   return Object.freeze({ ...base, initial: snapshotRemoteMergeRequest(value.initial),

@@ -3,8 +3,6 @@ import { copyJsonValue, type JsonObject, type JsonValue } from "../contracts/jcs
 import type { InputFormat, InputIo } from "../input/load-input.ts";
 import { decodeInputBytes, MAX_INPUT_BYTES } from "../input/load-input.ts";
 import { normalizeProductionRequest, type InteractiveRequestWizard } from "./production-input.ts";
-import { DEFAULT_LABEL_POOL } from "../app/label-defaults.ts";
-import type { DiffTypeLabel } from "../app/diff-labels.ts";
 import { selectMandatoryLabels, type MandatoryLabelInput, type LabelSelectionOptions } from "../app/mandatory-labels.ts";
 import {
   clearWizardLabelOptions, labelOptionsForProductionInvocation, recordWizardLabelOptions,
@@ -37,11 +35,6 @@ export interface WizardConsole {
     readonly prompt: string;
     readonly defaultValue?: string;
   }) => Promise<string>;
-  readonly confirm: (input: {
-    readonly id: string;
-    readonly prompt: string;
-    readonly defaultValue: boolean;
-  }) => Promise<boolean>;
   readonly close?: () => void | Promise<void>;
 }
 
@@ -140,8 +133,6 @@ function guardedConsole(console: WizardConsole): WizardConsole {
       callWizardPort("console", async () => console.selectMany(input)),
     text: (input: Parameters<WizardConsole["text"]>[0]) =>
       callWizardPort("console", async () => console.text(input)),
-    confirm: (input: Parameters<WizardConsole["confirm"]>[0]) =>
-      callWizardPort("console", async () => console.confirm(input)),
     ...(console.close === undefined
       ? {}
       : { close: () => callWizardPort("console", async () => console.close!()) }),
@@ -333,65 +324,22 @@ function validateCatalog(catalogValue: WizardCatalog): WizardCatalog {
       (typeof confirmation.descriptionDigest !== "string" || !SHA256.test(confirmation.descriptionDigest)) ||
       (confirmation.migrationDigest !== undefined && !SHA256_PAIR.test(confirmation.migrationDigest))
     ) {
-      throw wizardError("confirmation catalog is invalid");
+      throw wizardError("update evidence catalog is invalid");
     }
   }
   return catalog;
 }
 
-function confirmationMismatch(): ToolError<"INPUT_ERROR"> {
-  return new ToolError("INPUT_ERROR", "Interactive confirmation did not match", {
-    field: "confirmation",
-    expected: "the exact marker or hash digest shown for this update",
-    actual: "confirmation mismatch",
-    safeNextStep: "Refresh update context, inspect the current state, and type the exact digest again.",
-  });
-}
-
-async function assertExactConfirmation(
-  console: WizardConsole,
-  id: string,
-  prompt: string,
-  expected: string | undefined,
-): Promise<void> {
-  if (expected === undefined) throw wizardError("required update confirmation is unavailable");
-  const actual = await console.text({ id, prompt });
-  if (actual !== expected) throw confirmationMismatch();
-}
-
-async function confirmInteractiveUpdate(
+function bindInteractiveUpdate(
   invocation: CliInvocation,
   catalog: WizardCatalog,
-  console: WizardConsole,
-): Promise<UpdateConfirmationEvidence | null> {
+): UpdateConfirmationEvidence | null {
   const command = invocation.command;
   if (command.kind !== "update") return null;
   const evidence = catalog.confirmations;
-  // Preflight the complete operation before asking for any partial approval.
+  // Bind verified update evidence automatically before request collection.
   if (evidence === null || (command.migrateTemplate && evidence.migrationDigest === undefined)) {
-    throw wizardError("required update confirmation is unavailable");
-  }
-  if (command.migrateTemplate && command.confirmation !== null && command.confirmation !== evidence.migrationDigest) {
-    throw confirmationMismatch();
-  }
-  // Bind ordinary updates to the verified catalog automatically. The production
-  // write gate rechecks these digests before mutation; no digest transcription is
-  // needed unless the user explicitly requests replacement or migration below.
-  if (command.forceReplaceDescription) {
-    await assertExactConfirmation(
-      console,
-      "confirmation.force-replace",
-      `Replace the current description of MR !${command.iid}. Type its exact SHA-256. Confirmation digest: ${evidence.descriptionDigest}`,
-      evidence.descriptionDigest,
-    );
-  }
-  if (command.migrateTemplate) {
-    await assertExactConfirmation(
-      console,
-      "confirmation.migration",
-      `Migrate MR !${command.iid}. Type the exact old:new Bundle hash pair. Confirmation digest: ${evidence.migrationDigest}`,
-      evidence.migrationDigest,
-    );
+    throw wizardError("required verified update evidence is unavailable");
   }
   return {
     updateMarkerDigest: evidence.updateMarkerDigest,
@@ -609,32 +557,8 @@ async function collectAutomaticLabels(
 ) {
   const evidence = catalog.automaticLabels;
   if (evidence === undefined) throw wizardError("canonical automatic-label evidence is unavailable");
-  let options = labelOptionsForProductionInvocation(invocation);
-  const select = () => selectMandatoryLabels({ ...evidence, options });
-  let selection;
-  try {
-    selection = select();
-  } catch (error) {
-    // Only this precise ambiguity is recoverable interactively. Stale evidence,
-    // stale CLI confirmations and inventory failures must not become a fallback.
-    const actual = error instanceof ToolError ? error.details.actual : undefined;
-    if (error instanceof ToolError && error.code === "LABEL_ERROR" &&
-        actual !== null && typeof actual === "object" && !Array.isArray(actual) &&
-        actual.reason === "diff type requires confirmation" && typeof actual.diffDigest === "string") {
-      const digest = actual.diffDigest;
-      const types = DEFAULT_LABEL_POOL.filter((name) => name.startsWith("type::"))
-        .map((name) => name.slice("type::".length) as DiffTypeLabel);
-      const confirmedType = await chooseOne(console, "labels.confirm-type",
-        `Diff type is ambiguous. Review the committed diff and confirm its type. Diff digest: ${digest}`,
-        types, String);
-      await assertExactConfirmation(console, "labels.confirm-digest",
-        `Type the exact diff digest to bind your type confirmation: ${digest}`, digest);
-      options = { ...options, confirmedType, confirmationDigest: digest };
-      selection = select();
-    } else {
-      throw error;
-    }
-  }
+  const options = labelOptionsForProductionInvocation(invocation);
+  const selection = selectMandatoryLabels({ ...evidence, options });
   // Known changes use the default p2 automatically. Priority escalation remains
   // an explicit CLI choice with a required reason, not a routine wizard prompt.
   return { selection, options };
@@ -651,7 +575,7 @@ async function collectRequest(
   if (catalog.issueIid !== workItemSelection.iid) {
     throw wizardError("wizard context issue binding changed");
   }
-  const updateConfirmations = await confirmInteractiveUpdate(invocation, catalog, console);
+  const updateConfirmations = bindInteractiveUpdate(invocation, catalog);
   const profiles = await explicitOrSelectedProfiles(invocation, catalog, console);
   const profileIds = profiles.map((profile) => profile.id);
   const automaticLabels = await collectAutomaticLabels(invocation, catalog, console);
@@ -721,16 +645,8 @@ async function collectRequest(
     reviewers.length,
     reviewers.flatMap((candidate, index) => candidate.currentlyApplied ? [index] : []),
   );
-  const removeSourceBranch = await console.confirm({
-    id: "mergeRequest.removeSourceBranch",
-    prompt: "Remove source branch after merge",
-    defaultValue: true,
-  });
-  const squash = await console.confirm({
-    id: "mergeRequest.squash",
-    prompt: "Squash commits",
-    defaultValue: true,
-  });
+  const removeSourceBranch = true;
+  const squash = true;
   const selectedProfileFields = catalog.profileFields.filter((field) => profileIds.includes(field.profileId));
   const initial = Buffer.from(stringifyYaml(
     emptyLongForm(selectedVerification.length, selectedProfileFields.length),

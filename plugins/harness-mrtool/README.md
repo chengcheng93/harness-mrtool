@@ -6,7 +6,7 @@ profiles, rendering, labels, writes, and verification.
 
 ## Prerequisites
 
-CLI/Plugin 0.1.8 is a release candidate, not yet published. Build the CLI from
+CLI/Plugin 0.1.9 is a release candidate, not yet published. Build the CLI from
 current `main` source using the pinned-runtime instructions in the repository's
 root README; the plugin does not include a CLI binary. New release download links
 will be added only after publication.
@@ -101,7 +101,7 @@ does not automatically add, stash, clean, or delete them.
 Use `manual --auth ssh` only after an explicit human request for manual handoff:
 
 ```text
-schema/profiles -> structured Request -> manual --auth ssh -> user confirmation -> manual --auth ssh --push -> web MR
+schema/profiles -> structured Request -> manual --auth ssh --push (when the user requested the branch push) -> web MR
 ```
 
 The manual path does not claim a remote MR was created and does not choose live

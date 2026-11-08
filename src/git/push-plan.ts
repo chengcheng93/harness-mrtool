@@ -28,7 +28,7 @@ interface PushPlanCommon {
 export type SourceBranchPushPlan =
   | (PushPlanCommon & { readonly kind: "up-to-date"; readonly relation: "equal" })
   | (PushPlanCommon & {
-      readonly kind: "confirmation-required";
+      readonly kind: "not-requested";
       readonly relation: "absent" | "behind";
     })
   | (PushPlanCommon & {
@@ -766,7 +766,7 @@ export async function planSourceBranchPush(
   }
   const ready = options.allowPush && options.dryRun !== true;
   return Object.freeze({
-    kind: ready ? "ready" : "confirmation-required",
+    kind: ready ? "ready" : "not-requested",
     relation,
     beforeSha: remoteSha,
     command: commandFor(repository, pushOptions),
@@ -799,7 +799,7 @@ export async function executeSourceBranchPush(
     });
   }
   if (
-    plan.kind === "confirmation-required" ||
+    plan.kind === "not-requested" ||
     !options.authorized ||
     options.dryRun === true
   ) {

@@ -69,14 +69,12 @@ label. Existing extras, including week labels, are removed rather than
 preserved. Required labels must exist in the project/ancestor groups; no
 command creates remote labels automatically.
 
-`create`, `update`, and `preview` accept `--confirm-label-type <suffix>` together
-with `--label-diff-digest <sha256>`. Review the actual diff before confirming an
-unknown or ambiguous type. Use the digest returned by the CLI; a stale digest or
-confirmation conflicting with a known classification is rejected. The ordinary
-`--type` title hint is not confirmation. Omitting `--priority` selects `p2`;
-`--priority p0|p1` requires a nonblank `--priority-reason`. The wizard presents
-automatic labels, requires digest-bound confirmation for ambiguity, and collects
-an explicit priority escalation reason when needed.
+Type selection is automatic: documentation and source-comment-only changes use
+`doc`, recognized changes use their detected type, and unknown or ambiguous
+changes use `chore`. No type/digest confirmation flags or human approval are
+required. The diff digest remains an automatic consistency binding. The ordinary
+`--type` title hint cannot override automatic labels. Omitting `--priority` selects
+`p2`; `--priority p0|p1` requires a nonblank `--priority-reason`.
 
 ## Preview, dry-run, and existing MRs
 
@@ -116,8 +114,9 @@ an explicit priority escalation reason when needed.
   then such an MR fails `verify` on its labels.
 - `update <iid> --migrate-template` is the explicit migration route; its production
   adapter verifies the previous receipt and exact historical Bundle, consumes a
-  migration-bound context, and requires `--confirm-migration <oldHash>:<newHash>`.
-  In a TTY, the wizard displays the hashes before accepting confirmation.
+  migration-bound context. The program derives and validates the exact old:new
+  Bundle binding automatically; neither TTY nor automation asks for hash entry
+  or human approval.
   Controlled integration coverage does not replace live GitLab acceptance.
 
 The label guarantee belongs to mrtool's verified transaction path; it does not

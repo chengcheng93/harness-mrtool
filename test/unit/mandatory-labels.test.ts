@@ -37,18 +37,40 @@ for (const field of ["sourceHeadSha", "targetRefSha", "mergeBaseSha"] as const) 
     assert.throws(() => mandatory.selectMandatoryLabels({ ...input, binding: { ...binding, [field]: "d".repeat(40) } }), { code: "LABEL_ERROR" });
   });
 }
-test("unknown intent never falls back to chore or an unconfirmed caller type", () => {
-  const unknown: CanonicalLabelChangeSet = { ...diff, items: [{ status: "modified", newPath: "src/auth.ts", binary: false, submodule: false, before: "const x = 1;", after: "const x = 2;" }] };
-  assert.throws(() => mandatory.selectMandatoryLabels({ ...input, diff: unknown }), { code: "LABEL_ERROR" });
-  assert.throws(() => mandatory.selectMandatoryLabels({ ...input, diff: unknown, options: { confirmedType: "bug" } }), { code: "LABEL_ERROR" });
-  const digest = mandatory.labelDiffDigest(unknown);
-  const selection = mandatory.selectMandatoryLabels({ ...input, diff: unknown, options: { confirmedType: "bug", confirmationDigest: digest } });
-  assert.equal(selection.source, "confirmed");
-  assert.equal(selection.names[0], "type::bug");
-  assert.throws(() => mandatory.selectMandatoryLabels({ ...input, diff: { ...unknown, sourceHeadSha: "e".repeat(40) }, binding: { ...binding, sourceHeadSha: "e".repeat(40) }, options: { confirmedType: "bug", confirmationDigest: digest } }), { code: "LABEL_ERROR" });
+test("unknown intent and mixed primary types automatically use stable chore without caller confirmation", () => {
+  for (const items of [
+    [{ status: "modified", newPath: "src/auth.ts", binary: false, submodule: false, before: "const x = 1;", after: "const x = 2;" }],
+    [{ status: "modified", newPath: "package.json", binary: false, submodule: false }, { status: "modified", newPath: ".gitlab-ci.yml", binary: false, submodule: false }],
+    [{ status: "modified", newPath: "assets/data.bin", binary: true, submodule: false }],
+  ] as const) {
+    const selection = mandatory.selectMandatoryLabels({ ...input, diff: { ...diff, items } });
+    assert.deepEqual(selection.names, ["type::chore", "priority::p2", "status::review"]);
+    assert.equal(selection.source, "fallback");
+    assert.equal(selection.titleType, "chore");
+    assert.equal(selection.diffDigest, mandatory.labelDiffDigest({ ...diff, items }));
+  }
 });
-test("explicit confirmation cannot silently override a conclusive classifier result", () => {
-  assert.throws(() => mandatory.selectMandatoryLabels({ ...input, options: { confirmedType: "bug", confirmationDigest: mandatory.labelDiffDigest(diff) } }), { code: "LABEL_ERROR" });
+test("obsolete human type fields cannot override an automatically detected or fallback type", () => {
+  for (const options of [{ confirmedType: "bug" }, { confirmationDigest: mandatory.labelDiffDigest(diff) },
+    { confirmedType: "bug", confirmationDigest: mandatory.labelDiffDigest(diff) }]) {
+    assert.throws(() => mandatory.selectMandatoryLabels({ ...input, options: options as never }), (error: unknown) => {
+      assert.equal((error as { code: string }).code, "LABEL_ERROR");
+      assert.doesNotMatch((error as Error).message, /requires confirmation|stale type confirmation/u);
+      return true;
+    });
+  }
+});
+test("the WASM adapter comment change selects doc without a type or digest argument", () => {
+  const selection = mandatory.selectMandatoryLabels({ ...input, diff: { ...diff, items: [{
+    status: "modified", newPath: "luban-web-wasm/src/lb_web_runtime.ts", binary: false, submodule: false,
+    before: "// This thin adapter owns JS/WASM copying and leaves command semantics in C++.\nexport class LbWebRuntime {}\n",
+    after: "// This adapter handles JS/WASM data copying while command semantics stay in C++.\nexport class LbWebRuntime {}\n",
+  }] } });
+  assert.deepEqual(selection.names, ["type::doc", "priority::p2", "status::review"]);
+  assert.equal(selection.source, "diff");
+});
+test("malformed diff items remain errors rather than becoming the unknown fallback", () => {
+  assert.throws(() => mandatory.selectMandatoryLabels({ ...input, diff: { ...diff, items: [{ status: "invalid" } as never] } }), { code: "LABEL_ERROR" });
 });
 test("missing real labels and duplicate names or ids block rather than invent IDs", () => {
   assert.throws(() => mandatory.selectMandatoryLabels({ ...input, inventory: inventory.filter((entry) => entry.name !== "priority::p2") }), { code: "LABEL_ERROR" });

@@ -952,7 +952,7 @@ Template Bundle 更新只影响新的 preview/create，不得自动改写已经�
 - 普通 `update` 默认继续使用原始 Bundle，前提是当前 CLI 仍支持其 Schema；`context --mr <iid>` 和 `schema show --from-mr <iid>` 必须从 marker 精确加载该 Bundle，供人工与 Skill 获取旧 Request Schema、Profile 和候选合同；
 - 只有显式 `update <iid> --migrate-template` 才迁移到当前 Bundle；必须先输出旧/新版本、完整 description diff 和校验结果；
 - migration context 必须同时返回旧/新 Schema、可自动映射字段、无法映射字段和新增必填字段；任何有损或缺失字段都要求用户补充，AI 不得猜值；
-- 交互模式要求再次确认；非交互模式必须提供 `--confirm-migration <old-bundle-hash>:<new-bundle-hash>`，不接受通用 `--yes`；
+- 交互与非交互模式均在显式 `--migrate-template` 操作下由程序自动绑定、校验 migration context 的旧/新 Bundle hash，不要求再次确认、抄写哈希或提供通用 `--yes`；
 - 原始 Bundle 已 EOL 或无法验证时，普通 update 失败并说明迁移路径；`verify` 仍应尽可能保持只读，但没有经过验证的原始 Bundle 时不得声称结构合格；
 - 没有合法 marker 的人工 MR 不自动归属任何 Bundle；V1 的 `update`/`verify` 返回 `UNMANAGED_MR`，不接管或覆盖 description。把人工 MR 转为受管 MR 的 adopt/migration assistant 延后到 V2。
 
@@ -1011,17 +1011,17 @@ labels:
 
 实际可选值始终是“Policy 匹配规则”与“目标 GitLab 当前有效标签”的交集。必选类别在目标项目没有候选项时，CLI 停止并指出缺失类别，不得自动创建标签。
 
-`week`、`type` 和 `priority` 由用户或调用方从实时 token 候选中选择。`status` 是 lifecycle-derived 受管类别，不接受 Request 自报：每个 MR 在创建和更新时都写入 Policy 的 `ready` 名称（默认 `status::review`），`merge` 验证要求 `merge` 名称；项目不再需要 `doing` 状态标签。项目 Policy 可以版本化修改这些 exact names；匹配的实时标签不存在时失败，不能退回任意 `status::` 值。合并后把 Issue/MR 状态改为 `done` 不属于 V1 的自动行为。
+当前 Bundle `1.2.0` 不再选择 week 标签；`type` 由实际 committed diff 自动派生，纯文档或注释修改为 `type::doc`，有明确规则时直接采用该类型，未知或混合主类型使用 `type::chore`；`priority` 默认 p2，提升至 p0/p1 时需业务理由。类型不要求用户选择或绑定确认 digest。`status` 是 lifecycle-derived 受管类别，不接受 Request 自报：每个 MR 在创建和更新时都写入 Policy 的 `ready` 名称（默认 `status::review`），`merge` 验证要求 `merge` 名称；项目不再需要 `doing` 状态标签。项目 Policy 可以版本化修改这些 exact names；匹配的实时标签不存在时失败，不能退回任意 `status::` 值。合并后把 Issue/MR 状态改为 `done` 不属于 V1 的自动行为。
 
 Lifecycle exact name 使用与普通标签相同的 project-over-group 解析规则。相同优先级出现多个同名对象、名称缺失、已归档或不匹配 `status` category 时返回 `LABEL_ERROR`；CLI 不凭颜色/描述猜测。exact name 只是 Policy 的派生目标，不是用户可选标签清单的静态副本。
 
-### 10.3 人工与 Codex 选择
+### 10.3 自动派生与候选解析
 
-交互模式展示名称、描述、类别、来源和当前是否已应用。
+程序直接采用自动派生的类型、优先级和状态；交互模式可以展示名称、描述、类别、来源和当前是否已应用，但不要求用户确认。
 
 Codex 只接收 CLI 返回的结构化候选列表，只能提交 opaque candidate token。任何标签名称字符串、原始 GitLab ID、未知 token、已归档对象或类别冲突都返回 `LABEL_ERROR`。
 
-Profile 可以提出建议，例如 `fix -> type::bug` 或 `docs -> type::doc`，但映射目标必须在实时候选集中存在，否则要求重新选择。
+Profile 可以提出结构化字段建议，但不能覆盖真实 diff 自动派生的类型。所需映射目标必须在实时候选集中唯一存在；缺失或重名时返回实际库存错误，不要求用户再次确认类型，也不自动创建标签。
 
 ### 10.4 写入安全
 
@@ -1219,7 +1219,7 @@ Profile 可以提出建议，例如 `fix -> type::bug` 或 `docs -> type::doc`�
 - `type` 是 Bundle registry 中的稳定 enum，V1 默认包含 `feat`、`fix`、`docs`、`test`、`refactor`、`perf`、`build`、`ci`、`chore`；项目 Profile 可以收窄但不能由 AI新增；
 - `module` 必须是 trim 后非空的单行 slug，字符集为 ASCII 小写字母、数字和单个连字符，长度 1-32，不得以连字符开头/结尾；
 - `titleSummary` 长度 1-72 个 Unicode scalar value；完整 title 上限 100；
-- selected `type` 必须与 Policy 的 type label compatibility table 一致，例如 `fix` 只能搭配存在于实时候选中的 `type::bug` 映射；不存在映射候选时要求用户重新选择，不自动创建标签；
+- selected `type` 由程序与实际 diff 的 type label 同步，例如 `fix` 搭配 `type::bug`、`docs` 搭配 `type::doc`；不存在唯一映射候选时返回库存错误，不要求用户选择或确认，不自动创建标签；
 - Profile 可以给 type/module 建议，但最终值始终经过 Schema 和跨字段校验。
 
 `changes.summary`：
@@ -1263,7 +1263,7 @@ CLI 从当前 Git 仓库确定：
 创建 MR 前必须确认 source branch 在 source project 的远端 ref 存在且指向本地 HEAD：
 
 - 已存在且 SHA 相同：继续；
-- 远端分支不存在或严格落后于本地、可以 fast-forward：交互模式展示 remote、ref、commit range 和 exact push command，获得明确确认后执行普通 push；非交互模式只有显式 `--push` 才执行；
+- 远端分支不存在或严格落后于本地、可以 fast-forward：根据已有用户操作授权执行显式 `--push`，程序验证 remote、ref、commit range 和 exact push command，不重复询问确认；没有 push 操作授权时只返回计划；
 - 远端领先、diverged、目标 remote/project 不唯一或 branch 受保护拒绝写入：失败并说明原因；
 - V1 不执行 force push、tag push 或其他分支 push；工作区可保留 staged、unstaged 和 untracked 文件，普通 push 只发送已提交的 `HEAD`；
 - push 完成后必须重新读取远端 source SHA，只有与本地 HEAD 完全一致才进入 MR 查询/创建；
@@ -1274,7 +1274,7 @@ CLI 从当前 Git 仓库确定：
 按 source project、source branch 和 target project 查询打开的 MR：
 
 - 零个：创建；
-- 恰好一个：经确认或 `--upsert` 更新；
+- 恰好一个：按已授权的 `update <iid>` 或 `create --upsert` 更新，不再增加确认步骤；
 - 多个：停止并要求指定 IID。
 
 ### 12.3 安全创建顺序
@@ -1312,10 +1312,10 @@ CLI 从当前 Git 仓库确定：
 - 当前 description 与标记 digest 一致时可以按 9 节定义的原始 Bundle 确定性重渲染；
 - 检测到人工修改时默认停止，避免静默覆盖；
 - 用户可以先导出、把人工内容映射回结构化字段，再更新；
-- `--force-replace-description` 必须显式确认，并在 JSON 结果记录覆盖行为；
+- 已授权的显式 `--force-replace-description` 操作自动校验 description/marker 绑定快照，并在 JSON 结果记录覆盖行为，不要求再次确认；
 - 不得只依靠模糊文本匹配合并两份 Markdown。
 
-`--force-replace-description` 只处理“受管 MR 的 description 被人工修改”这一种情况，不等于模板迁移，也不允许接管无 marker 的 MR。模板迁移使用独立的 `--migrate-template` 确认合同；V1 没有 adopt，任何 flag 都不能隐式接管人工 MR。
+`--force-replace-description` 只处理“受管 MR 的 description 被人工修改”这一种情况，不等于模板迁移，也不允许接管无 marker 的 MR。模板迁移使用独立的 `--migrate-template` 操作及自动证据绑定合同；V1 没有 adopt，任何 flag 都不能隐式接管人工 MR。
 
 ### 12.5 回读校验
 
@@ -1453,7 +1453,7 @@ JSON 输出必须包含稳定的：
 
 `context` 不创建或修改 MR。
 
-无 `--mr` 时，`context` 使用当前 stable Bundle，适用于 preview/create。`context --mr <iid>` 先读取 marker 并使用原始 Bundle，适用于普通 update/verify；加 `--migrate-template` 时同时返回原始和当前 Bundle 的 Schema、结构化字段映射、待补字段、description diff 前置数据和确认 hashes。`schema show --from-mr <iid>` 是只读的旧 Schema 查询快捷方式。marker 缺失或 Bundle 无法验证时必须显式报错，不能静默使用当前 Bundle。
+无 `--mr` 时，`context` 使用当前 stable Bundle，适用于 preview/create。`context --mr <iid>` 先读取 marker 并使用原始 Bundle，适用于普通 update/verify；加 `--migrate-template` 时同时返回原始和当前 Bundle 的 Schema、结构化字段映射、待补字段、description diff 前置数据和自动绑定的旧/新 Bundle hashes，不要求人工复制或确认。`schema show --from-mr <iid>` 是只读的旧 Schema 查询快捷方式。marker 缺失或 Bundle 无法验证时必须显式报错，不能静默使用当前 Bundle。
 
 ### 13.4 `preview`
 
@@ -1479,7 +1479,7 @@ Skill 名建议为 `harness-mr`，职责为：
 1. 调用本地 `schema show` 和 `profiles list`；
 2. 默认获取 API `context`，分析 diff、commits 和实际测试输出；
 3. 依据 CLI 返回的 Schema 和当前 context 组织 Request；
-4. 仅在缺少必要信息且无法从仓库和上下文确定、类型歧义或执行失败时询问或报告阻断；
+4. 仅在缺少必要业务信息且无法从仓库和上下文确定时收集输入，执行失败时报告实际阻断；类型歧义自动使用稳定分类规则，不要求人工确认；
 5. 用户要求提交或更新即授权本次普通写入，后台校验后直接执行 `create/update`，不要求预览或重复确认；
 6. 执行 `verify` 回读，成功后返回实际 MR 链接；`preview`/`--dry-run` 仅在用户主动要求时使用；源分支应提前发布，Git 可以使用 SSH 传输；
 7. 只有人类明确要求手工交接时，才使用 `manual --auth ssh`，审查后可显式普通分支 push，再由用户在 GitLab 网页创建 MR；`--ssh-mr` 禁用并返回 `LABEL_ERROR`；
@@ -1697,14 +1697,14 @@ JSON 输出至少区分：
 36. 不使用本工具的同事原有 GitLab 工作流不受影响；
 37. 在 GitLab 测试项目完成端到端测试，确认未创建任何意外标签；
 38. Authenticode 缺失不阻止 V1 功能验收，但发布说明准确披露 unsigned 状态。
-39. 已有 MR 默认继续使用其 marker 固定的原始 Bundle；只有显式 hash-confirmed migration 才更新模板版本；
+39. 已有 MR 默认继续使用其 marker 固定的原始 Bundle；只有显式 migration 操作经程序校验旧/新 Bundle hash 绑定后才更新模板版本，无人工确认步骤；
 40. 创建流程在 GitLab 写入受管字段后按回读快照二次渲染，最终 description 写入是最后一个正常写操作，最终只接受唯一 `final` marker；
 41. status label 由 Policy 自动派生，每个 MR 都是 `status::review`，Request 不能自报；
 42. 普通 manifest 检查在 2 秒网络预算内结束；发现新版后的业务前更新阶段使用独立的 5 分钟上限和明确进度；Windows 业务后持久化不计入该预算并准确报告 pending；所有字符串错误码遵循稳定 process exit-code 映射；
 43. `context --mr` 与 `schema show --from-mr` 能精确返回旧 Bundle 合同，显式迁移能列出全部可映射和待补字段；
 44. auto Profile 对任何 known+unknown 混合 diff 返回 ambiguous，而不是静默忽略未知文件。
 45. 创建前远端 source ref 必须与本地 HEAD 一致；非交互模式没有显式 `--push` 时不会写 branch，任何模式都不 force push。
-46. 无合法 marker 的 MR 返回 `UNMANAGED_MR` 且不发生写入；模板迁移覆盖原 Bundle 缺失、EOL、hash mismatch、缺字段和确认 hash 不匹配。
+46. 无合法 marker 的 MR 返回 `UNMANAGED_MR` 且不发生写入；模板迁移覆盖原 Bundle 缺失、EOL、hash mismatch、缺字段和自动旧/新 hash 绑定漂移。
 47. 并发标签更新只使用最小 ADD/REMOVE 与写后漂移检测；测试明确验证并披露无服务端 CAS 的 TOCTOU 残余限制。
 
 ## 19. 测试范围
@@ -1748,7 +1748,7 @@ JSON 输出至少区分：
 - 人工标签保留；
 - description 人工修改；
 - markerless/unmanaged MR；
-- 原 Bundle 缺失、EOL、hash mismatch、migration 缺字段与确认 hash 不匹配；
+- 原 Bundle 缺失、EOL、hash mismatch、migration 缺字段与自动旧/新 hash 绑定漂移；
 - 零个、一个和多个候选 MR；
 - GitLab timeout、`401`、`403`、`429` 和 `5xx`。
 

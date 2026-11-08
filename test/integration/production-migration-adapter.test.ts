@@ -145,7 +145,7 @@ async function fixture(t: test.TestContext, productionIds = false) {
     request: normalizeAndValidateRequest(rawRequest), binding, bundle, releaseTag, cliVersion, sourceBranch, remote,
     initial: structuredClone(remote.current), labelDiff: bugLabelDiff(snapshot),
     migration: { previousBundle: authenticated.bundle, previousReleaseTag: authenticated.reference.releaseTag,
-      oldHash, newHash, confirmation: `${oldHash}:${newHash}` },
+      oldHash, newHash },
   };
   const operations: string[] = [];
   const hooks: { bindingRead?: () => void } = {};
@@ -178,8 +178,8 @@ test("migration consumes migrate tokens, checks old ownership and completes the 
   assert.deepEqual(old?.receipt, f.oldReceipt);
 });
 
-test("stale migration confirmation and mismatched hashes fail before any writes", async (t) => {
-  for (const field of ["confirmation", "oldHash", "newHash"] as const) {
+test("mismatched verified migration hashes fail before any writes", async (t) => {
+  for (const field of ["oldHash", "newHash"] as const) {
     await t.test(field, async (t) => {
       const f = await fixture(t);
       (f.prepared.migration as any)[field] = "0".repeat(64);
@@ -207,8 +207,7 @@ test("migration retains old marker identity and manual description ownership che
       if (change === "tag") (f.prepared.migration as any).previousReleaseTag = "templates-v9.0.0";
       else if (change === "bundle") {
         Object.assign(f.prepared.migration!, { previousBundle: f.prepared.bundle,
-          previousReleaseTag: f.prepared.releaseTag, oldHash: f.prepared.migration!.newHash,
-          confirmation: `${f.prepared.migration!.newHash}:${f.prepared.migration!.newHash}` });
+          previousReleaseTag: f.prepared.releaseTag, oldHash: f.prepared.migration!.newHash });
       } else {
         f.remote.current = { ...f.remote.current, description: `Manual note\n${f.remote.current.description}` };
         (f.prepared as any).initial = structuredClone(f.remote.current);
@@ -220,15 +219,14 @@ test("migration retains old marker identity and manual description ownership che
 });
 
 
-test("changing the migration contract at the mutation gate cannot write or consume a stale approval", async (t) => {
+test("changing the migration contract at the mutation gate cannot write or consume stale migration evidence", async (t) => {
   const f = await fixture(t);
   f.hooks.bindingRead = () => {
     if (f.operations.length === 2) {
       // This replacement is internally hash-consistent: only the immutable prepared
-      // fingerprint, not the old:new syntax check, can catch its late substitution.
+      // fingerprint, not isolated manifest hash checks, can catch its late substitution.
       Object.assign(f.prepared.migration!, { previousBundle: f.prepared.bundle,
-        previousReleaseTag: f.prepared.releaseTag, oldHash: f.prepared.migration!.newHash,
-        confirmation: `${f.prepared.migration!.newHash}:${f.prepared.migration!.newHash}` });
+        previousReleaseTag: f.prepared.releaseTag, oldHash: f.prepared.migration!.newHash });
     }
   };
   await assert.rejects(f.run());
@@ -367,20 +365,20 @@ test("production route authenticates signed 1.0.0 history before migrating week 
   Object.assign(raw, { contextId: issued.contextId });
   Object.assign(raw.mergeRequest, { assigneeCandidateToken: issued.userCandidates.find((value: any) => value.kind === "assignee" && value.username === "alice").token });
   Object.assign(raw.review, { reviewerCandidateTokens: [issued.userCandidates.find((value: any) => value.kind === "reviewer" && value.username === "bob").token] });
-  const args = ["update", "88", "--migrate-template", "--input", "request.json", "--confirm-migration"];
-  const stale = await run([...args, `${"0".repeat(64)}:${f.prepared.migration!.newHash}`]);
+  const args = ["update", "88", "--migrate-template", "--input", "request.json"];
+  const stale = await run([...args, "--confirm-migration", `${"0".repeat(64)}:${f.prepared.migration!.newHash}`]);
   assert.notEqual(stale.code, 0);
   assert.deepEqual(f.remote.writes, []);
   assert.equal(f.remote.current.description, f.oldReceipt.expected.description);
   tamper = true;
-  const corrupted = await run([...args, f.prepared.migration!.confirmation]);
+  const corrupted = await run(args);
   assert.notEqual(corrupted.code, 0, "tampered historical bytes must fail before migration writes");
   assert.equal(corrupted.json.code, "UPDATE_SECURITY_ERROR");
   assert.deepEqual(f.remote.writes, []);
   assert.equal(f.remote.current.description, f.oldReceipt.expected.description);
   tamper = false;
   // Reuse exactly the same issued context: a failed historical check must not consume it.
-  const migrated = await run([...args, f.prepared.migration!.confirmation]);
+  const migrated = await run(args);
   assert.equal(migrated.code, 0, migrated.stdout + migrated.stderr);
   assert.deepEqual(migrated.json.data.mandatoryLabels.names, ["type::bug", "priority::p2", "status::review"]);
   assert.equal(migrated.json.data.lifecycle, "ready");

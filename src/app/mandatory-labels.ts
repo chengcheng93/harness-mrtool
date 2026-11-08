@@ -7,8 +7,6 @@ import { DEFAULT_LABEL_POOL } from "./label-defaults.ts";
 export interface LabelSelectionOptions {
   readonly priority?: "p0" | "p1" | "p2";
   readonly priorityReason?: string;
-  readonly confirmedType?: DiffTypeLabel;
-  readonly confirmationDigest?: string;
 }
 export interface LabelDiffBinding {
   readonly sourceHeadSha: string;
@@ -25,7 +23,7 @@ export interface MandatoryLabelSelection {
   readonly names: readonly string[];
   readonly ids: readonly string[];
   readonly titleType: string;
-  readonly source: "diff" | "confirmed";
+  readonly source: "diff" | "fallback";
   readonly diffDigest: string;
 }
 const TITLE_TYPES: Readonly<Record<DiffTypeLabel, string>> = Object.freeze({
@@ -40,8 +38,7 @@ function labelError(reason: string, digest?: string): ToolError<"LABEL_ERROR"> {
   return new ToolError("LABEL_ERROR", `Mandatory MR labels: ${reason}`, {
     field: "labels", expected: "one fixed-pool type, priority and lifecycle status derived from the current committed diff",
     actual: digest === undefined ? reason : { reason, diffDigest: digest },
-    safeNextStep: digest === undefined ? "Refresh repository/context and retry with existing fixed-pool labels."
-      : "Review the committed diff and explicitly confirm a type with this diff digest; do not use a title or a fallback label as confirmation.",
+    safeNextStep: "Refresh repository/context and retry with the current committed diff and existing fixed-pool labels.",
   });
 }
 
@@ -71,21 +68,22 @@ export function selectMandatoryLabels(input: MandatoryLabelInput): MandatoryLabe
         const field = key as keyof LabelDiffBinding;
         return typeof diff[field] !== "string" || !/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(diff[field]) || diff[field] !== binding[field];
       })) throw labelError("missing, empty or stale canonical diff");
-  if (Object.keys(options).some((key) => !["priority", "priorityReason", "confirmedType", "confirmationDigest"].includes(key))) {
+  if (Object.keys(options).some((key) => !["priority", "priorityReason"].includes(key))) {
     throw labelError("unknown label selection option");
   }
+  if (diff.items.some((item) => {
+    if (item === null || typeof item !== "object" || !["added", "modified", "deleted", "renamed"].includes(item.status) ||
+        typeof item.binary !== "boolean" || typeof item.submodule !== "boolean" ||
+        (item.unsupported !== undefined && typeof item.unsupported !== "boolean") ||
+        (item.before !== undefined && typeof item.before !== "string") ||
+        (item.after !== undefined && typeof item.after !== "string")) return true;
+    const paths = item.status === "renamed" ? [item.oldPath, item.newPath]
+      : item.status === "deleted" ? [item.oldPath] : [item.newPath];
+    return paths.some((path) => typeof path !== "string" || path === "" || /[\r\n\u0000]/u.test(path));
+  })) throw labelError("invalid canonical diff item");
   const digest = labelDiffDigest(diff);
   const detected = typeLabelFromDiff(diff.items);
-  const confirmed = options.confirmedType;
-  if (confirmed !== undefined && (!Object.hasOwn(TITLE_TYPES, confirmed) || options.confirmationDigest !== digest)) {
-    throw labelError("invalid or stale type confirmation", digest);
-  }
-  if ((options.confirmationDigest !== undefined && confirmed === undefined) ||
-      (confirmed !== undefined && detected !== null && detected !== `type::${confirmed}`)) {
-    throw labelError("type confirmation conflicts with diff classification", digest);
-  }
-  if (detected === null && confirmed === undefined) throw labelError("diff type requires confirmation", digest);
-  const typeName = detected ?? `type::${confirmed!}`;
+  const typeName = detected ?? "type::chore";
   const priority = options.priority ?? "p2";
   if (!["p0", "p1", "p2"].includes(priority) || (priority !== "p2" &&
       (typeof options.priorityReason !== "string" || options.priorityReason.trim().length === 0))) {
@@ -102,5 +100,5 @@ export function selectMandatoryLabels(input: MandatoryLabelInput): MandatoryLabe
     return matches[0]!.id;
   }));
   const selectedType = typeName.slice("type::".length) as DiffTypeLabel;
-  return Object.freeze({ names, ids, titleType: TITLE_TYPES[selectedType], source: detected === null ? "confirmed" : "diff", diffDigest: digest });
+  return Object.freeze({ names, ids, titleType: TITLE_TYPES[selectedType], source: detected === null ? "fallback" : "diff", diffDigest: digest });
 }

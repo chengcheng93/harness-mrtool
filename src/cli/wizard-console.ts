@@ -112,14 +112,6 @@ export function createNodeWizardConsole(
       );
       return answer === "" && defaultValue !== undefined ? defaultValue : answer;
     },
-    confirm: async ({ prompt, defaultValue }: Parameters<WizardConsole["confirm"]>[0]) => {
-      for (;;) {
-        const answer = (await question(port, `${prompt} [${defaultValue ? "Y/n" : "y/N"}]: `)).trim().toLowerCase();
-        if (answer === "") return defaultValue;
-        if (answer === "y" || answer === "yes") return true;
-        if (answer === "n" || answer === "no") return false;
-      }
-    },
     close: async () => {
       try {
         await port.close();
