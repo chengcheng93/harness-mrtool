@@ -61,4 +61,12 @@ node scripts/test.mjs --test-concurrency=1
 - 2026-11-09 信任根轮换：`release-key-1` 私钥无法找回，经用户决定生成新的 Ed25519 根 `release-key-2`（`scripts/create-release-key.mjs`，私钥保存在仓库外的用户目录，目录 ACL 仅当前用户）。`src/update/trust-config.ts` 改钉新公钥与指纹，`create-skill-receipt.mjs`、`create-template-receipt.mjs`（新增 `--key-id`）、测试与文档同步。此前 `release-key-1` 从未签发过任何 `templates-v*` 发布，因此没有需要迁移的历史模板包信任锚；但用旧源码构建的已安装 CLI 不会信任新根，必须用携带新配置的构建重新安装。
   - 新根公钥 SPKI（base64url）：`MCowBQYDK2VwAyEAQo1ijk0TBXo4bpj6kQjpx0TTh3wUfNP7A15mT-P5dH8`
   - 新根指纹（SPKI SHA-256）：`0fa7f1278ffe8aa1c5e922c9e2319f275b48784620ba0975656f66a87f2c81f1`
-- `templates-v1.2.0` 回执已用 `release-key-2` 签发并通过 `scripts/verify-template-publication.mjs` 校验：`receiptPayloadSha256 = 1c247234b2af1762deb507ae2f61d88a201047afac54782560c3777ec12c7746`，`bundleManifestHash = 3b3c9d959ed1d18f9e6d8d8e6eba7ee4b27c15a05a302c0a728ff58c1e06b442`。发布步骤与结果见下文追加记录。
+- `templates-v1.2.0` 回执已用 `release-key-2` 签发并通过 `scripts/verify-template-publication.mjs` 校验：`receiptPayloadSha256 = 1c247234b2af1762deb507ae2f61d88a201047afac54782560c3777ec12c7746`，`bundleManifestHash = 3b3c9d959ed1d18f9e6d8d8e6eba7ee4b27c15a05a302c0a728ff58c1e06b442`。
+
+### 发布结果（2026-11-09）
+
+- 信任根轮换提交 `bdc7e01` 推送到 `codex/mr-submit-performance`；仓库 Secret `TEMPLATE_BUNDLE_RECEIPT_B64`（新建）与 `BUNDLE_RECEIPT_B64`（更新）写入同一份 base64 回执（通过 GitHub REST API 以仓库公钥 sealed-box 加密上传，值未在任何输出中出现）。
+- 注解标签 `templates-v1.2.0` 指向 `bdc7e01`，推送后触发 Release Template Bundle 工作流运行 `42586601589`：16 个步骤全部成功（版本一致性、typecheck、bundle/manifest 测试、生成回执、签名校验、attest、Draft 发布、Draft 资产回读比对、正式发布、immutable 确认），用时 26 秒。
+- Release `templates-v1.2.0` 于 2026-11-09T08:32:11Z 发布，非 draft、immutable，目标提交 `bdc7e01`，资产 `harness-mr-templates.zip`（7430 字节，SHA-256 `78d57d00afe9a4baee3a18f25ccbce9ee5c455f187864d190a5c02c2294bed93`）、`bundle-receipt.envelope.json`（2298 字节）、`SHA256SUMS`。这是本仓库第一个真正发布的 `templates-v*` Release。
+- 本机独立复核：重新下载三份资产，`sha256sum -c` 通过；发布的回执与本地签发的字节完全一致；归档内 10 个文件与提交的 `template-bundle/` 逐字节一致；以生产信任根（无测试注入）运行 `verify-template-publication.mjs --archive` 通过，并在进程内用归档内容重新验签通过（`release-key-2`，sequence 1）。
+- 仍未做：签名的 GitHub Pages 稳定渠道信封（`publish-channel.yml`，需要 `CHANNEL_ENVELOPE_B64`）；新信任根下的 `cli-v*`/`skill-v*`/`plugin-v*` 发布；真实 GitLab MR 验收。已安装的旧版 CLI 钉旧根，不会信任本次发布。

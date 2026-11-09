@@ -63,8 +63,24 @@ current-state evidence is:
   0.1.6/1.1.0 formal release assets have been accepted as the candidate's
   immutable production release.
 
+## Template bundle 1.2.0 — 2026-11-09
+
+- Signing root rotated to `release-key-2` (commit `bdc7e01`); `release-key-1`'s
+  private key was unrecoverable and had never signed a published template
+  release. Clients built with the old root must be reinstalled.
+- Release Template Bundle run `42586601589` published immutable
+  [`templates-v1.2.0`](https://github.com/chengcheng93/harness-mrtool/releases/tag/templates-v1.2.0)
+  (archive SHA-256 `78d57d00…4bed93`, receipt signed by `release-key-2`,
+  sequence 1). This is the first published `templates-v*` release; `1.0.0` and
+  `1.1.0` remain tags without releases. Independent local readback and
+  production-root verification are recorded in
+  `direct-merge-request-2026-11-06.md`.
+- Still pending: signed Pages channel envelope, CLI/Skill/Plugin releases under
+  the new root, real GitLab acceptance.
+
 Therefore the current status remains **pending external release and real-use
-acceptance**. Missing evidence is protected signing/release authorization and
+acceptance** for the CLI, Skill, Plugin and channel; the template bundle gate
+above is complete for 1.2.0. Missing evidence is protected signing/release authorization and
 immutable dual-platform assets, stable signed channel deployment, real native
 install/update/rollback/recovery on both platforms, current Mac Skill/Plugin
 host activation and discovery, and an authorized isolated GitLab target and
