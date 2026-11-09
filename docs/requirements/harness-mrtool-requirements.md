@@ -283,7 +283,7 @@ GitHub Pages 只托管体积很小的 signed channel envelope，不托管二进�
   "payload": "<base64url encoded UTF-8 manifest bytes>",
   "signatures": [
     {
-      "keyId": "release-key-1",
+      "keyId": "release-key-2",
       "algorithm": "Ed25519",
       "signature": "<base64url detached signature over decoded payload bytes>"
     }
@@ -350,7 +350,7 @@ GitHub Pages 只托管体积很小的 signed channel envelope，不托管二进�
       "bundleManifestHash": "...",
       "receiptPayloadSha256": "...",
       "signingSequence": 42,
-      "signingKeyId": "release-key-1"
+      "signingKeyId": "release-key-2"
     }
   ],
   "recommendedSkillVersion": "1.1.0"

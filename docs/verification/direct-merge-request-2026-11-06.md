@@ -58,10 +58,7 @@ node scripts/test.mjs --test-concurrency=1
 - 发布流程 `.github/workflows/release-template.yml` 在推送 `templates-v*` 标签时运行，要求仓库 Secret `TEMPLATE_BUNDLE_RECEIPT_B64`（或 `BUNDLE_RECEIPT_B64`）包含由 `release-key-1` 签名的模板包回执信封。源码只钉公钥（`src/update/trust-config.ts`），私钥保存在仓库之外，本机未找到。
 - 新增 `scripts/create-template-receipt.mjs`：读取 `template-bundle/`，按 `src/update/bundle-receipt.ts` 的精确结构生成回执载荷，用指定的 Ed25519 私钥签名，并同时输出 Secret 所需的 base64 文本。`test/integration/template-receipt.test.ts` 用一次性测试密钥验证其产物能通过 `scripts/verify-template-publication.mjs` 的完整校验，并验证篡改载荷、重复写出、非钉定密钥均被拒绝（4 项通过）。
 - 2026-11-08 核查 GitHub：不存在任何 `templates-v*` Release。`templates-v1.0.0` 与 `templates-v1.1.0` 只有标签；唯一一次模板发布工作流运行（2026-08-23，针对 1.0.0）失败。现有 `bundle-receipt.envelope.json` 只随 `cli-v0.1.x` Release 发布过。也就是说，跨机器加载历史模板包这一环节此前任何版本都未真正打通。
-- 待办（需要 `release-key-1` 私钥）：
-
-```text
-node scripts/create-template-receipt.mjs --directory template-bundle --key <私钥路径> --output <仓库外目录>/bundle-receipt.envelope.json
-```
-
-  把生成的 `.b64` 文件内容写入 Secret `TEMPLATE_BUNDLE_RECEIPT_B64`，再推送 `templates-v1.2.0` 标签触发发布。之后的 `cli-v*` 发布同样依赖这份 1.2.0 回执，因为 `release-cli.yml` 按当前模板版本校验 `BUNDLE_RECEIPT_B64`。
+- 2026-11-09 信任根轮换：`release-key-1` 私钥无法找回，经用户决定生成新的 Ed25519 根 `release-key-2`（`scripts/create-release-key.mjs`，私钥保存在仓库外的用户目录，目录 ACL 仅当前用户）。`src/update/trust-config.ts` 改钉新公钥与指纹，`create-skill-receipt.mjs`、`create-template-receipt.mjs`（新增 `--key-id`）、测试与文档同步。此前 `release-key-1` 从未签发过任何 `templates-v*` 发布，因此没有需要迁移的历史模板包信任锚；但用旧源码构建的已安装 CLI 不会信任新根，必须用携带新配置的构建重新安装。
+  - 新根公钥 SPKI（base64url）：`MCowBQYDK2VwAyEAQo1ijk0TBXo4bpj6kQjpx0TTh3wUfNP7A15mT-P5dH8`
+  - 新根指纹（SPKI SHA-256）：`0fa7f1278ffe8aa1c5e922c9e2319f275b48784620ba0975656f66a87f2c81f1`
+- `templates-v1.2.0` 回执已用 `release-key-2` 签发并通过 `scripts/verify-template-publication.mjs` 校验：`receiptPayloadSha256 = 1c247234b2af1762deb507ae2f61d88a201047afac54782560c3777ec12c7746`，`bundleManifestHash = 3b3c9d959ed1d18f9e6d8d8e6eba7ee4b27c15a05a302c0a728ff58c1e06b442`。发布步骤与结果见下文追加记录。

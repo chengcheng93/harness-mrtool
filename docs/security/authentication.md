@@ -74,10 +74,12 @@ this tool are not subject to its guarantees.
 
 Update trust is build-time data. The repository, Pages channel, Ed25519 roots,
 and bootstrap metadata are immutable inputs to a production build. The checked-in
-source configuration pins the reviewed `release-key-1` public root and its
-fingerprint. Missing/substituted roots and invalid signed evidence
-fail closed; the private signing key is not stored in this repository. Test-only
-loopback trust is branded and cannot be relabeled as production trust.
+source configuration pins the reviewed `release-key-2` public root and its
+fingerprint (`release-key-1` was retired on 2026-11-09 after its private key
+was lost; nothing had been published under it). Missing/substituted roots and
+invalid signed evidence fail closed; the private signing key is not stored in
+this repository. Test-only loopback trust is branded and cannot be relabeled as
+production trust.
 
 The bundled Skill bootstrap accepts only the fixed GitHub repository and the
 exact `skill-v<version>` release path. It follows a bounded set of HTTPS GitHub

@@ -70,7 +70,7 @@ export async function createSkillReceipt({ manifestPath, archivePath, version, p
     receiptVersion: 1,
     releaseTag: `skill-v${version}`,
     repository: { name: "harness-mrtool", owner: "chengcheng93" },
-    signingKeyId: "release-key-1",
+    signingKeyId: "release-key-2",
     signingSequence: 1,
     skillProtocol: manifest.skillProtocol,
     treeSha256: manifest.treeSha256,
@@ -81,7 +81,7 @@ export async function createSkillReceipt({ manifestPath, archivePath, version, p
     payload: payloadBytes.toString("base64url"),
     signatures: [{
       algorithm: "Ed25519",
-      keyId: "release-key-1",
+      keyId: "release-key-2",
       signature: sign(null, payloadBytes, createPrivateKey(await readFile(privateKeyPath))).toString("base64url"),
     }],
   };

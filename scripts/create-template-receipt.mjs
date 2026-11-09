@@ -1,7 +1,7 @@
 import { createHash, createPrivateKey, sign } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { lstat, open, readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { lstat, mkdir, open, readFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 import { canonicalize } from "json-canonicalize";
 
 // Offline companion of scripts/verify-template-publication.mjs: builds and signs
@@ -23,7 +23,7 @@ const PAYLOAD_PATHS = [
   "schema.json",
 ];
 const REPOSITORY = { name: "harness-mrtool", owner: "chengcheng93" };
-const SIGNING_KEY_ID = "release-key-1";
+const KEY_ID = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,126}[A-Za-z0-9])?$/u;
 
 function fail(message, cause) {
   throw new Error(`Template receipt generation failed: ${message}`, cause === undefined ? undefined : { cause });
@@ -37,6 +37,7 @@ function args(argv) {
   const fields = new Map([
     ["--directory", "directory"],
     ["--key", "privateKeyPath"],
+    ["--key-id", "signingKeyId"],
     ["--output", "outputPath"],
     ["--sequence", "signingSequence"],
   ]);
@@ -49,8 +50,8 @@ function args(argv) {
     }
     result[field] = value;
   }
-  for (const required of ["directory", "privateKeyPath", "outputPath"]) {
-    if (result[required] === undefined) fail("--directory, --key and --output are required");
+  for (const required of ["directory", "privateKeyPath", "signingKeyId", "outputPath"]) {
+    if (result[required] === undefined) fail("--directory, --key, --key-id and --output are required");
   }
   if (result.signingSequence !== undefined) {
     if (!/^[1-9][0-9]*$/u.test(result.signingSequence)) fail("--sequence must be a positive integer");
@@ -79,7 +80,8 @@ async function writeNoReplace(path, bytes) {
 }
 
 /** Builds the exact receipt payload for the bundle directory; no signing. */
-export async function buildTemplateReceiptPayload({ directory, signingSequence = 1 }) {
+export async function buildTemplateReceiptPayload({ directory, signingKeyId, signingSequence = 1 }) {
+  if (typeof signingKeyId !== "string" || !KEY_ID.test(signingKeyId)) fail("signing key id is invalid");
   if (!Number.isSafeInteger(signingSequence) || signingSequence < 1) fail("signing sequence is invalid");
   const manifestBytes = await regularFile(resolve(directory, "bundle-manifest.json"));
   const manifestText = manifestBytes.toString("utf8");
@@ -118,32 +120,34 @@ export async function buildTemplateReceiptPayload({ directory, signingSequence =
     receiptVersion: 1,
     releaseTag: `templates-v${manifest.version}`,
     repository: REPOSITORY,
-    signingKeyId: SIGNING_KEY_ID,
+    signingKeyId,
     signingSequence,
     skillProtocols: [1],
   };
   return { payload, payloadBytes: Buffer.from(`${canonicalize(payload)}\n`, "utf8") };
 }
 
-export async function createTemplateReceipt({ directory, privateKeyPath, outputPath, signingSequence = 1 }) {
-  const { payload, payloadBytes } = await buildTemplateReceiptPayload({ directory, signingSequence });
+export async function createTemplateReceipt({ directory, privateKeyPath, signingKeyId, outputPath, signingSequence = 1 }) {
+  const { payload, payloadBytes } = await buildTemplateReceiptPayload({ directory, signingKeyId, signingSequence });
   const privateKey = createPrivateKey(await readFile(privateKeyPath));
   if (privateKey.asymmetricKeyType !== "ed25519") fail("the release key must be an Ed25519 private key");
   const envelope = {
     payload: payloadBytes.toString("base64url"),
     signatures: [{
       algorithm: "Ed25519",
-      keyId: SIGNING_KEY_ID,
+      keyId: signingKeyId,
       signature: sign(null, payloadBytes, privateKey).toString("base64url"),
     }],
   };
   const envelopeBytes = Buffer.from(`${canonicalize(envelope)}\n`, "utf8");
+  await mkdir(dirname(resolve(outputPath)), { recursive: true });
   await writeNoReplace(outputPath, envelopeBytes);
   // The workflow secret is the standard base64 of the envelope bytes.
   await writeNoReplace(`${outputPath}.b64`, Buffer.from(envelopeBytes.toString("base64"), "utf8"));
   return {
     outputPath,
     secretPath: `${outputPath}.b64`,
+    signingKeyId,
     releaseTag: payload.releaseTag,
     bundleManifestHash: payload.bundleManifest.sha256,
     payloadSha256: sha256(payloadBytes),

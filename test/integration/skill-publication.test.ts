@@ -74,7 +74,7 @@ async function fixture(t: test.TestContext) {
   for (const path of [manifestName, "SKILL.md", "scripts/run.txt"]) entries.push({ name: path, bytes: await readFile(resolve(output, path)) });
   const archiveBytes = zipSync(Object.fromEntries(entries.map((entry) => [entry.name, entry.bytes])));
   // This key is generated for this test only; it is not the production release key.
-  const key = createSigningFixture("release-key-1");
+  const key = createSigningFixture("release-key-2");
   const repository = { owner: "chengcheng93", name: "harness-mrtool" };
   const trustConfig = createTestOnlyUpdateTrustConfig({ repository, pagesOrigin: "http://127.0.0.1:43123",
     bootstrapKeys: [{ keyId: key.keyId, publicKeySpki: key.publicKeySpki, activeFromSequence: 1, revokedAtSequence: null }] });

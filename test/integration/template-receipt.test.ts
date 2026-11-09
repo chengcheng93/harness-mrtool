@@ -36,7 +36,7 @@ test("the generated template receipt verifies through the publication verifier f
   const f = await fixture(t);
   const manifest = JSON.parse(await readFile(resolve(bundleDirectory, "bundle-manifest.json"), "utf8"));
   const receipt = resolve(f.work, "bundle-receipt.envelope.json");
-  const result = await createTemplateReceipt({ directory: bundleDirectory, privateKeyPath: f.privateKeyPath, outputPath: receipt });
+  const result = await createTemplateReceipt({ directory: bundleDirectory, privateKeyPath: f.privateKeyPath, signingKeyId: "release-key-1", outputPath: receipt });
   const tag = `templates-v${String(manifest.version)}`;
   assert.equal(result.releaseTag, tag);
   assert.equal(result.secretPath, `${receipt}.b64`);
@@ -52,7 +52,7 @@ test("the generated template receipt verifies through the publication verifier f
   assert.equal(verified.signingKeyId, f.key.keyId);
   assert.equal(verified.bundleManifestHash, hash(await readFile(resolve(bundleDirectory, "bundle-manifest.json"))));
   assert.equal(verified.bundleManifestHash, result.bundleManifestHash);
-  const { payload } = await buildTemplateReceiptPayload({ directory: bundleDirectory });
+  const { payload } = await buildTemplateReceiptPayload({ directory: bundleDirectory, signingKeyId: "release-key-1" });
   assert.equal(verified.payloadSha256, hash(canonicalPayload(payload)));
   assert.equal(verified.payloadSha256, result.payloadSha256);
 
@@ -65,15 +65,16 @@ test("the generated template receipt verifies through the publication verifier f
 test("the generator honours an explicit signing sequence and never overwrites an existing receipt", async (t) => {
   const f = await fixture(t);
   const receipt = resolve(f.work, "receipt.json");
-  await createTemplateReceipt({ directory: bundleDirectory, privateKeyPath: f.privateKeyPath, outputPath: receipt, signingSequence: 7 });
+  await createTemplateReceipt({ directory: bundleDirectory, privateKeyPath: f.privateKeyPath, signingKeyId: "release-key-1", outputPath: receipt, signingSequence: 7 });
   const tag = `templates-v${String(JSON.parse(await readFile(resolve(bundleDirectory, "bundle-manifest.json"), "utf8")).version)}`;
   const inputs = await readTemplatePublicationInputs({ directory: bundleDirectory, receipt, tag });
   assert.equal(verifyTemplatePublicationReceipt({ ...inputs, trustConfig: f.trustConfig }).receipt.signingSequence, 7);
   await assert.rejects(
-    createTemplateReceipt({ directory: bundleDirectory, privateKeyPath: f.privateKeyPath, outputPath: receipt }),
+    createTemplateReceipt({ directory: bundleDirectory, privateKeyPath: f.privateKeyPath, signingKeyId: "release-key-1", outputPath: receipt }),
     /could not write/u,
   );
-  await assert.rejects(buildTemplateReceiptPayload({ directory: bundleDirectory, signingSequence: 0 }), /signing sequence/u);
+  await assert.rejects(buildTemplateReceiptPayload({ directory: bundleDirectory, signingKeyId: "release-key-1", signingSequence: 0 }), /signing sequence/u);
+  await assert.rejects(buildTemplateReceiptPayload({ directory: bundleDirectory, signingKeyId: "bad key" }), /signing key id/u);
 });
 
 test("the generator refuses a bundle whose payload bytes drifted from its manifest", async (t) => {
@@ -82,7 +83,7 @@ test("the generator refuses a bundle whose payload bytes drifted from its manife
   await cp(bundleDirectory, tampered, { recursive: true });
   await writeFile(resolve(tampered, "policy.yml"), `${await readFile(resolve(tampered, "policy.yml"), "utf8")}# drift\n`);
   await assert.rejects(
-    createTemplateReceipt({ directory: tampered, privateKeyPath: f.privateKeyPath, outputPath: resolve(f.work, "drift.json") }),
+    createTemplateReceipt({ directory: tampered, privateKeyPath: f.privateKeyPath, signingKeyId: "release-key-1", outputPath: resolve(f.work, "drift.json") }),
     /policy\.yml does not match the manifest/u,
   );
 });
@@ -93,7 +94,7 @@ test("a receipt signed by a key other than the pinned root is rejected by the ve
   const otherKeyPath = resolve(f.work, "other-key.pem");
   await writeFile(otherKeyPath, other.privateKey.export({ format: "pem", type: "pkcs8" }), { mode: 0o600 });
   const receipt = resolve(f.work, "other-receipt.json");
-  await createTemplateReceipt({ directory: bundleDirectory, privateKeyPath: otherKeyPath, outputPath: receipt });
+  await createTemplateReceipt({ directory: bundleDirectory, privateKeyPath: otherKeyPath, signingKeyId: "release-key-1", outputPath: receipt });
   const tag = `templates-v${String(JSON.parse(await readFile(resolve(bundleDirectory, "bundle-manifest.json"), "utf8")).version)}`;
   const inputs = await readTemplatePublicationInputs({ directory: bundleDirectory, receipt, tag });
   assert.throws(() => verifyTemplatePublicationReceipt({ ...inputs, trustConfig: f.trustConfig }), /signature validation failed/u);

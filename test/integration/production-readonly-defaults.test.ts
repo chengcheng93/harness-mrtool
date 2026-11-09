@@ -293,7 +293,7 @@ test("production source validates pinned trust without eagerly accessing private
   // without --no-update or an injected preflight that bypasses production trust.
   const trust = createProductionUpdateTrustConfig();
   assert.equal(trust.testOnly, false);
-  assert.ok(trust.bootstrapKeys.some((key) => key.keyId === "release-key-1"));
+  assert.ok(trust.bootstrapKeys.some((key) => key.keyId === "release-key-2"));
   assert.throws(
     () => parseProductionUpdateTrustConfig({ ...trust, bootstrapKeys: [] }),
     (error: unknown) => isToolError(error, "UPDATE_SECURITY_ERROR"),

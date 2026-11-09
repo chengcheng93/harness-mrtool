@@ -47,18 +47,22 @@ export const PRODUCTION_UPDATE_PAGES_ORIGIN =
 export const PRODUCTION_UPDATE_CHANNEL_URL =
   "https://chengcheng93.github.io/harness-mrtool/stable.envelope.json";
 
-// The first production root is pinned in source; its private counterpart is
-// kept outside the repository and is used only by the protected release job.
+// The production root is pinned in source; its private counterpart is kept
+// outside the repository and is used only to sign release receipts.
+// release-key-2 (2026-11-09) replaced release-key-1, whose private key was
+// lost before any templates-v* release had been published with it. Clients
+// built with the old root do not trust releases signed by this key and must
+// be reinstalled from a build that carries this configuration.
 export const PRODUCTION_UPDATE_BOOTSTRAP_KEYS: readonly TrustedSigningKey[] =
   Object.freeze([{
-    keyId: "release-key-1",
-    publicKeySpki: "MCowBQYDK2VwAyEAAsvciZczfCepU2C8M5joYNOva8-3uNH-ZJ8jaDA1BVI",
+    keyId: "release-key-2",
+    publicKeySpki: "MCowBQYDK2VwAyEAQo1ijk0TBXo4bpj6kQjpx0TTh3wUfNP7A15mT-P5dH8",
     activeFromSequence: 1,
     revokedAtSequence: null,
   }]);
 export const PRODUCTION_UPDATE_BOOTSTRAP_KEY_FINGERPRINTS: readonly string[] =
   Object.freeze([
-    "75f4bca790273aa6079eead3bb071db7cc9ead8442f3d9cb112249bec15d0eaf",
+    "0fa7f1278ffe8aa1c5e922c9e2319f275b48784620ba0975656f66a87f2c81f1",
   ]);
 
 const REPOSITORY_PART = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$/u;
