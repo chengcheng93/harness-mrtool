@@ -51,4 +51,17 @@ node scripts/test.mjs --test-concurrency=1
   - `sea-smoke.test.ts` 3 项与 `native-readiness.test.ts`「actual packaged SEA authenticates…」：`dist/harness-mrtool.exe` 与收据是 2026-11-04 的旧产物，与变更后的源码输入集不匹配（"SEA build receipt input set mismatch"）。本机执行 `node scripts/build-sea.mjs` 重建成功后，两文件复跑 38 项中 37 项通过，剩余 1 项见下。
   - `production-channel.test.ts`「a 304 racing a newer accepted channel…」：全量满负载下失败（Missing expected rejection），空闲机器单独复跑 29 项全部通过，判定为负载相关抖动。
   - `native-readiness.test.ts`「readiness shares one deadline across all probes…」：全量与单独复跑均失败（`calls >= 2` 不成立）。该用例要求在 Windows 1500ms 共享截止时间内至少完成 2 次子进程探针，每次探针自带 350ms 延时；实测本机 `node` 子进程启动加 350ms 延时单次耗时 737–810ms，两次无法在窗口内完成。测试文件与被测 `src/update/native-readiness.ts` 均未被本次改动触及，判定为本机进程启动延迟导致，未在本机证明其通过。
-- 未执行：真实 GitLab 创建/更新 MR；`templates-v1.2.0` 签名模板包发布。其他机器要校验/更新用 1.2.0 创建的 MR，需先发布签名的 `templates-v1.2.0`。本地 SEA 重建产物未签名，仅用于本机测试。
+- 未执行：真实 GitLab 创建/更新 MR；`templates-v1.2.0` 签名模板包发布（见下节）。本地 SEA 重建产物未签名，仅用于本机测试。
+
+## 模板包发布（templates-v1.2.0）
+
+- 发布流程 `.github/workflows/release-template.yml` 在推送 `templates-v*` 标签时运行，要求仓库 Secret `TEMPLATE_BUNDLE_RECEIPT_B64`（或 `BUNDLE_RECEIPT_B64`）包含由 `release-key-1` 签名的模板包回执信封。源码只钉公钥（`src/update/trust-config.ts`），私钥保存在仓库之外，本机未找到。
+- 新增 `scripts/create-template-receipt.mjs`：读取 `template-bundle/`，按 `src/update/bundle-receipt.ts` 的精确结构生成回执载荷，用指定的 Ed25519 私钥签名，并同时输出 Secret 所需的 base64 文本。`test/integration/template-receipt.test.ts` 用一次性测试密钥验证其产物能通过 `scripts/verify-template-publication.mjs` 的完整校验，并验证篡改载荷、重复写出、非钉定密钥均被拒绝（4 项通过）。
+- 2026-11-08 核查 GitHub：不存在任何 `templates-v*` Release。`templates-v1.0.0` 与 `templates-v1.1.0` 只有标签；唯一一次模板发布工作流运行（2026-08-23，针对 1.0.0）失败。现有 `bundle-receipt.envelope.json` 只随 `cli-v0.1.x` Release 发布过。也就是说，跨机器加载历史模板包这一环节此前任何版本都未真正打通。
+- 待办（需要 `release-key-1` 私钥）：
+
+```text
+node scripts/create-template-receipt.mjs --directory template-bundle --key <私钥路径> --output <仓库外目录>/bundle-receipt.envelope.json
+```
+
+  把生成的 `.b64` 文件内容写入 Secret `TEMPLATE_BUNDLE_RECEIPT_B64`，再推送 `templates-v1.2.0` 标签触发发布。之后的 `cli-v*` 发布同样依赖这份 1.2.0 回执，因为 `release-cli.yml` 按当前模板版本校验 `BUNDLE_RECEIPT_B64`。
