@@ -134,7 +134,9 @@ for (const kind of ["issue", "mr"] as const) {
   const submit = (gitlab: GitLabClient) => kind === "issue" ? gitlab.createIssue(ISSUE) : gitlab.createMergeRequestSubmission(MR);
   for (const [status, outcome, reason] of [
     [400, "rejected", "validation"], [401, "rejected", "auth"], [403, "rejected", "auth"],
-    [404, "rejected", "validation"], [409, "rejected", "conflict"], [422, "rejected", "validation"],
+    [404, "rejected", "validation"], [405, "rejected", "validation"], [408, "rejected", "validation"],
+    [409, "rejected", "conflict"], [413, "rejected", "validation"], [422, "rejected", "validation"],
+    [429, "rejected", "validation"], [499, "rejected", "validation"],
     [500, "unknown", "server"], [503, "unknown", "server"],
   ] as const) {
     test(kind + " HTTP " + status + " is classified with a single attempt", async () => {

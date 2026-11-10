@@ -525,7 +525,7 @@ function submissionError(error: unknown): RemoteMutationError {
       : error.kind === "timeout" ? "timeout"
       : error.kind === "network" ? "network"
       : error.kind === "http" && error.status === 409 ? "conflict"
-      : error.kind === "http" && error.status !== null && [400, 404, 422].includes(error.status) ? "validation"
+      : error.kind === "http" && error.status !== null && error.status >= 400 && error.status < 500 ? "validation"
       : "server";
     return new RemoteMutationError(
       reason === "auth" || reason === "validation" || reason === "conflict" ? "rejected" : "unknown",
