@@ -112,3 +112,23 @@ test("uses Asia/Shanghai calendar dates across the UTC day boundary and passes t
   assert.ok(rendered.description.includes(`阶段日期：${date}`));
   assert.ok(rendered.description.includes(`计划日期：${date}`));
 });
+
+test("preserves fenced technical examples and neutralizes quick actions after matching fences close", async () => {
+  const base = await request();
+  const examples = [
+    "```sh\n## setup comment\n/health\n```",
+    "~~~sh\n## setup comment\n/close\n```\n/health\n~~~~",
+    "````sh\n## setup comment\n```\n/health\n````",
+  ];
+  for (const example of examples) {
+    const content = `${example}\n/close\n## outside heading`;
+    const value: Request = { ...base, changes: { ...base.changes, technicalChanges: [content] },
+      verification: { ...base.verification, acceptanceEvidence: [content], items: [{
+        id: "example", state: "checked", evidenceKind: "command-output", command: content, result: content, evidence: content,
+      }] },
+    };
+    const body = renderIssue({ ...inputs, request: value }).description;
+    assert.equal(body.split(`\n\n${example}\n`).length - 1, 5, `technical example changed: ${example}`);
+    assert.ok(body.includes("\n&#47;close\n\\## outside heading"));
+  }
+});

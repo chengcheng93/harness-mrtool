@@ -18,9 +18,23 @@ export function chinaDate(now: Date = new Date()): string {
 
 /** Keep supplied Markdown, but never emit a user-provided GitLab quick action. */
 function descriptiveText(value: string): string {
-  return value.replace(/\r\n?/gu, "\n")
-    .replace(/^(\s*)\/(?=[a-z][a-z_-]*(?:\s|$))/gimu, "$1&#47;")
-    .replace(/^( {0,3})##(?=\s|$)/gmu, "$1\\##");
+  let fence: { marker: string; length: number } | undefined;
+  return value.replace(/\r\n?/gu, "\n").split("\n").map((line) => {
+    const delimiter = /^ {0,3}(`{3,}|~{3,})(.*)$/u.exec(line);
+    if (fence !== undefined) {
+      if (delimiter !== null && delimiter[1]![0] === fence.marker &&
+          delimiter[1]!.length >= fence.length && /^[ \t]*$/u.test(delimiter[2]!)) {
+        fence = undefined;
+      }
+      return line;
+    }
+    if (delimiter !== null && (delimiter[1]![0] === "~" || !delimiter[2]!.includes("`"))) {
+      fence = { marker: delimiter[1]![0]!, length: delimiter[1]!.length };
+      return line;
+    }
+    return line.replace(/^([ \t]*)\/(?=[a-z][a-z_-]*(?:\s|$))/giu, "$1&#47;")
+      .replace(/^( {0,3})##(?=\s|$)/gu, "$1\\##");
+  }).join("\n");
 }
 
 function nonempty(values: readonly string[]): string[] {
@@ -41,9 +55,9 @@ function verificationRecord(item: VerificationItem): string {
   const marker = item.state === "checked" ? "[x]" : "[ ]";
   return [
     `- ${marker} ${descriptiveText(item.id)}（${states[item.state]}；${descriptiveText(item.evidenceKind)}）`,
-    item.command ? `命令：${descriptiveText(item.command)}` : "",
-    item.result ? `结果：${descriptiveText(item.result)}` : "",
-    item.evidence.trim() ? `证据 / 原因：${descriptiveText(item.evidence)}` : "",
+    item.command ? `命令：\n\n${descriptiveText(item.command)}` : "",
+    item.result ? `结果：\n\n${descriptiveText(item.result)}` : "",
+    item.evidence.trim() ? `证据 / 原因：\n\n${descriptiveText(item.evidence)}` : "",
   ].filter(Boolean).join("\n\n");
 }
 
@@ -56,7 +70,7 @@ export function renderIssue(inputs: RenderIssueInputs): { title: string; descrip
     ? `关联工作项：#${workItem.iid}（${workItem.relation}）`
     : "noIssueReason" in workItem ? details("工作项说明", [workItem.noIssueReason]) : "";
   const acceptance = nonempty(request.verification.acceptanceEvidence)
-    .map((value) => `- [ ] ${descriptiveText(value)}`).join("\n\n");
+    .map((value, index) => `- [ ] 验收依据 ${index + 1}\n\n${descriptiveText(value)}`).join("\n\n");
   const specialty = Object.keys(request.profileFields).sort().map((key) =>
     details(`专项说明：${key}`, request.profileFields[key] ?? [])).filter(Boolean);
   const description = [
