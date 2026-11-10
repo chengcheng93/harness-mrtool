@@ -16,7 +16,7 @@ test("Codex plugin packaging emits a bounded, self-contained archive", async (t)
     const result = await packagePlugin({
       inputDirectory: join(repositoryRoot, "plugins", "harness-mrtool"),
       outputDirectory: output,
-      version: "0.1.9",
+      version: "0.1.10",
     });
     const archive = await readFile(result.archivePath);
     const entries = unzipSync(archive);
@@ -45,7 +45,7 @@ test("Codex plugin packaging emits a bounded, self-contained archive", async (t)
     );
     const manifest = JSON.parse(Buffer.from(entries[".codex-plugin/plugin.json"]!).toString("utf8")) as Record<string, unknown>;
     assert.equal(manifest.name, "harness-mrtool");
-    assert.equal(manifest.version, "0.1.9");
+    assert.equal(manifest.version, "0.1.10");
     const sums = await readFile(result.sumsPath, "utf8");
     assert.match(sums, /^[a-f0-9]{64}  harness-mrtool-codex-plugin\.zip\n$/u);
     const readme = Buffer.from(entries["README.md"]!).toString("utf8").replace(/\s+/gu, " ");
@@ -61,7 +61,7 @@ test("Codex plugin packaging emits a bounded, self-contained archive", async (t)
     });
     await t.test("packaged README defaults to direct API MR creation with preview only on request", () => {
       assert.match(readme, /The default CLI and Skill flow uses the GitLab API/u);
-      assert.match(readme, /context --auth api -> structured Request -> create\/update -> verify -> MR URL/u);
+      assert.match(readme, /schema\/profiles -> context --auth api -> Request workItem:new -> create -> creation-response MR URL/u);
       assert.match(readme, /[Pp]review[^.]*only when explicitly requested/u);
       assert.doesNotMatch(readme, /structured Request -> preview -> user confirmation/u);
       assert.match(readme, /Missing credentials or API failures stop the flow; never automatically fall back to SSH or manual handoff/u);
@@ -79,7 +79,7 @@ test("Codex plugin packaging emits a bounded, self-contained archive", async (t)
       assert.match(readme, /Use `manual --auth ssh` only after an explicit human request for manual handoff/u);
       assert.match(readme, /Git may still use SSH to push the source branch before the API flow/u);
       assert.match(readme, /`manual --auth ssh --ssh-mr --push` is rejected with `LABEL_ERROR` before push planning or execution/u);
-      assert.match(readme, /Use the API flow for mandatory-label-verified MR creation/u);
+      assert.match(readme, /Use the API flow for Issue-first MR creation/u);
       assert.doesNotMatch(readme, /explicit opt-in basic Push Options request/u);
     });
   } finally {

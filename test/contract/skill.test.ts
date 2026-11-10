@@ -78,59 +78,37 @@ async function manager(paths: { readonly active: string; readonly staging: strin
 
 function assertApiDefaultInstructions(instructions: string): void {
   const normalized = instructions.replace(/\s+/gu, " ");
-  assert.match(normalized, /The default path is API/u);
+  const ordinary = instructions.split("## Historical")[0]!;
   const steps = [
     "harness-mrtool schema show",
     "harness-mrtool profiles list",
     "harness-mrtool context --auth api",
     "Build the Request only after API context succeeds",
     "harness-mrtool create --auth api",
-    "harness-mrtool update <iid> --auth api",
-    "harness-mrtool verify <iid> --auth api",
-    "harness-mrtool preview --auth api",
-    "harness-mrtool manual --auth ssh",
   ];
   let previousIndex = -1;
   for (const step of steps) {
-    const index = instructions.indexOf(step);
+    const index = ordinary.indexOf(step);
     assert.ok(index > previousIndex, `${step} must follow the preceding workflow step`);
     previousIndex = index;
   }
-  assert.match(normalized, /user request.*authorizes.*API write/u);
-  assert.match(normalized, /automatic checks.*directly to create\/update/u);
-  assert.match(normalized, /do not.*preview.*repeat human confirmation.*authorized submission/u);
+  assert.match(ordinary, /workItem.*relation.*new/u);
+  assert.match(ordinary, /Issue.*MR.*POST/u);
+  assert.match(ordinary, /creation.response/iu);
+  assert.doesNotMatch(ordinary, /harness-mrtool (verify|update)|--resume|--upsert/u);
   assert.match(normalized, /preview only when.*user explicitly requests/u);
-  assert.match(normalized, /return.*verified MR link/u);
-  assert.match(normalized, /verified success.*concise Markdown MR link/u);
-  assert.match(normalized, /raw JSON only when the user explicitly requests/u);
-  assert.match(normalized, /failure or partial write.*faithfully report.*ok.*code/u);
-  assert.doesNotMatch(normalized, /Report only the CLI JSON result|Report the single CLI JSON document/u);
-  assert.doesNotMatch(normalized, /Show the preview and obtain required confirmation before writing/u);
-  assert.doesNotMatch(instructions, /--confirm-label-type|--label-diff-digest|--confirm-migration/u);
-  assert.doesNotMatch(normalized, /obtain explicit user type confirmation|After confirmation, rerun|obtain confirmation before/u);
   assert.match(normalized, /API credentials are missing or API requests fail, stop and explain/u);
   assert.match(normalized, /Never automatically fall back to manual/u);
   assert.match(normalized, /Manual mode is disabled by default/u);
   assert.match(normalized, /only when the human explicitly requests/u);
   assert.match(normalized, /--ssh-mr`? is disabled/u);
   assert.match(normalized, /API mode may still use ordinary Git SSH transport/u);
-  assert.ok(!normalized.includes("SSH-first"));
-  assert.ok(!normalized.includes("opt-in basic Draft MR"));
-  assert.ok(!instructions.includes("status::"));
-  assert.ok(!instructions.includes("type::"));
+  assert.match(normalized, /activationRequired/u);
+  assert.match(normalized, /hostRefreshMayBeRequired/u);
+  assert.match(normalized, /raw JSON only when the user explicitly requests/u);
+  assert.doesNotMatch(instructions, /--confirm-label-type|--label-diff-digest|--confirm-migration/u);
+  assert.doesNotMatch(normalized, /After create\/update succeeds, verify/u);
   assert.ok(!instructions.includes("## 1. Changes"));
-  assert.ok(instructions.includes("--client codex-skill --client-version <skill-semver> --skill-protocol <protocol>"));
-  assert.ok(instructions.includes("activationRequired"));
-  assert.ok(instructions.includes("hostRefreshMayBeRequired"));
-  const verifyExample = instructions.split("\n").find((line) => line.startsWith("harness-mrtool verify "));
-  assert.ok(verifyExample, "Skill must provide an executable verify example");
-  const verifyArguments = verifyExample
-    .replaceAll("<iid>", "12")
-    .replaceAll("<skill-semver>", "1.1.0")
-    .replaceAll("<protocol>", "1")
-    .split(/\s+/u)
-    .slice(1);
-  assert.deepEqual(parseCliInvocation(verifyArguments).command, { kind: "verify", iid: 12, level: "structure" });
   for (const kind of ["create", "update", "preview"] as const) {
     const example = instructions.split("\n").find((line) => line.startsWith(`harness-mrtool ${kind} `));
     assert.ok(example, `Skill must provide an executable ${kind} example`);
@@ -141,13 +119,13 @@ function assertApiDefaultInstructions(instructions: string): void {
       .split(/\s+/u).slice(1));
     assert.equal(invocation.command.kind, kind);
     assert.equal(invocation.options.authMode, "api");
-    assert.equal(invocation.options.input, "-", "Requests must be streamed through stdin");
+    assert.equal(invocation.options.input, "-");
     assert.equal(invocation.options.output, "json");
-    assert.equal(invocation.options.dryRun, false, "Default write examples must perform the authorized submission");
+    assert.equal(invocation.options.dryRun, false);
   }
 }
 
-test("generated Skill instructions default to the complete API workflow and require human opt-in for SSH manual mode", () => {
+test("generated Skill instructions default to Issue-first API creation and require human opt-in for SSH manual mode", () => {
   assertApiDefaultInstructions(renderSkillInstructions({ skillVersion: "1.1.0", skillProtocol: 1 }));
 });
 
@@ -166,7 +144,7 @@ test("bundled and plugin Skills carry identical submission instructions", async 
 });
 
 for (const path of ["../../skill/harness-mr/SKILL.md", "../../plugins/harness-mrtool/skills/harness-mr/SKILL.md"]) {
-  test(`${path} provides executable pristine-resume validation and structure verification`, async () => {
+  test(`${path} retains executable historical resume validation and structure verification`, async () => {
     const instructions = await readFile(new URL(path, import.meta.url), "utf8");
     const commands = [...instructions.matchAll(/```text\r?\n([\s\S]*?)```/gu)]
       .map((match) => match[1]!.trim().split(/\r?\n/u))

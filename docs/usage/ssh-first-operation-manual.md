@@ -2,11 +2,13 @@
 
 ## 目标
 
-CLI/Plugin `0.1.8` 当前为待验收发布候选，不代表已有新 Release。
+CLI/Plugin `0.1.10` 当前为待验收发布候选，不代表已有新 Release。
 历史 `0.1.5` 的 SSH-first 行为不作为当前候选的默认流程。
 本文件保留原路径，便于已有链接继续访问。
 
-- 默认 API：`context -> create/update -> verify -> 返回 MR 链接`，用于自动标签、负责人、审核人、MR 写入和回读验证。
+- 默认 API：`schema/profiles -> context -> Request workItem:new -> create -> 创建响应 MR 链接`。
+- 当前快速提交以[仓库 README](../../README.md)为准：Issue POST → MR POST，首次 POST 后不 GET/PUT/GraphQL、回读、重试、查询恢复或回滚。失败立即报告已知 Issue URL 和 MR 失败/结果未知。
+- 仅历史受管 MR 和显式旧 workItem 模式保留强事务与验证；快速 marker 不支持 update/verify/upsert/resume。
 - 手工交接仅在人类明确要求时启用，命令必须显式使用 `manual --auth ssh`。
 - SSH MR 创建禁用：`manual --ssh-mr` 返回 `LABEL_ERROR`，在 push 规划或执行前停止。
 
@@ -64,13 +66,13 @@ harness-mrtool profiles list --output json
 harness-mrtool doctor --auth api --output json
 harness-mrtool context --auth api --output json
 harness-mrtool create --auth api --input /absolute/private/request.json --input-format json --output json
-harness-mrtool verify <iid> --auth api --level structure --output json
 ```
 
-用实际 MR IID 替换 `<iid>`。Skill 调用还会为命令附带当前
+默认 Request 使用 `workItem: { "relation": "new" }`；成功返回创建响应 MR 链接，描述为已创建。
+Skill 调用还会为命令附带当前
 `--client codex-skill --client-version <skill-semver> --skill-protocol <protocol>`。
 用户要求提交或更新即授权本次普通操作；校验后台完成，不再要求预览或重复确认。
-更新已有受管 MR 时先使用 `context --mr <iid>` 获取更新上下文，再直接执行
+仅更新历史受管 MR 时先使用 `context --mr <iid>` 获取更新上下文，再直接执行
 `update <iid>`，最后 `verify <iid>`，成功返回 MR 链接。
 
 API 标签规则见[标签选择策略](label-selection-policy.md)：Bundle `1.2.0` 固定
@@ -82,7 +84,7 @@ merge-base 的真实 canonical diff；注释/文档自动 doc，无法细分的�
 
 只有用户主动要求时才使用可选的 `preview` 或 API create/update `--dry-run`；
 它们无远端写入且不消费候选 context，
-但仍可进行实时读取。`create --upsert` 认证已有 MR 的 receipt；Bundle 不同
+但仍可进行实时读取。以下仅适用于历史强事务：`create --upsert` 认证已有 MR 的 receipt；Bundle 不同
 时使用 `context --mr <iid>` 后 `update <iid>` 或显式迁移，不静默回退当前
 Bundle。可信旧签名 policy 仍可读取，显式迁移需专用 context，程序自动校验
 准确 old:new 哈希绑定，不要求人确认；这些本地实现不代表已发布或完成真实 GitLab 验收。
@@ -131,8 +133,8 @@ Git 使用 SSH 时，需已有公钥和源项目推送权限，可用 `ssh -T gi
 | `AUTH_ERROR` | API 模式没有可用 Host-scoped Token | 停止并配置 API 凭据，不自动回退 manual/SSH |
 | API 请求失败 | 当前 API 操作失败或结果未证明 | 按输出安全下一步处理，不自动回退 manual/SSH |
 | `REPOSITORY_ERROR` | Remote、权限或分支不满足 | 检查 remote、分支权限和当前 Git 传输配置 |
-| `PARTIAL_WRITE` | MR 已创建且状态已回读，但事务未完成 | 按输出的 safeNextStep 用 `update <iid>` 或 `create --resume` 继续，不要重新 create |
-| `PARTIAL_REMOTE_STATE` | 远端写入结果无法证明 | 先读取远端/MR 状态，不要立即重试 |
+| `PARTIAL_WRITE` | 快速提交的 Issue/MR 部分结果，或历史事务未完成 | 快速提交报告已知 Issue URL 与 MR 结果后立即停止；历史事务才按 safeNextStep 恢复 |
+| `PARTIAL_REMOTE_STATE` | 远端写入结果未知 | 快速提交立即停止，不查询恢复或重试 |
 
 ## 验收清单
 
@@ -144,7 +146,7 @@ Git 使用 SSH 时，需已有公钥和源项目推送权限，可用 `ssh -T gi
 - [ ] `--ssh-mr`（含 `--push`）返回 `LABEL_ERROR`，未规划或执行 push。
 - [ ] 全局 `push.pushOption` 不会注入或覆盖工具生成的选项。
 - [ ] 标签、负责人和审核人不会被 SSH 模式猜测或自动创建。
-- [ ] 默认 API 模式可执行完整 `context -> create/update -> verify -> 返回 MR 链接`。
+- [ ] 默认 API 执行 Issue POST → MR POST，返回创建响应 MR 链接，不附加 verify。
 - [ ] 普通 manual handoff 或分支 push 不会报告为已验证 MR。
 - [ ] `--dry-run` 无远端写入且不消费 context；最终标签恰好三个且无 week/额外标签。
 

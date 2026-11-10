@@ -1,11 +1,12 @@
 # harness-mrtool
 
-一个根据 **Git 已提交的真实 diff** 准备、创建、更新和验证 **GitLab Merge Request** 的 CLI。
-AI/人负责填写变更说明，工具负责输入校验、自动标签、写前复核、写后回读和审计；
-不是 GitLab 服务端合并门禁，也不能限制绕过工具的网页或原始 Git/API 操作。
+一个根据 **Git 已提交的真实 diff** 创建 **GitLab Issue 和 Merge Request** 的 CLI。
+AI/人填写完整变更说明，工具负责输入校验、自动标签和 Issue → MR 两次创建。
+默认以创建响应返回 MR 链接，不回读验证；历史受管 MR 保留显式强事务流程。
+工具不是 GitLab 服务端合并门禁，也不能限制网页或原始 Git/API 操作。
 
 > **版本状态**：当前 main 已实现强制标签策略（Template Bundle **1.2.0**）。
-> CLI/Plugin **0.1.9** 是待验收发布候选，不代表已有可安装的新 Release。
+> CLI/Plugin **0.1.10** 是待验收发布候选，不代表已有可安装的新 Release。
 > 既有 [CLI 0.1.5](https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.5)
 > 和 [Plugin 0.1.5](https://github.com/chengcheng93/harness-mrtool/releases/tag/plugin-v0.1.5)
 > 不包含本次强制标签改造。新版尚未发布，完成发布后才更新正式下载链接。
@@ -15,13 +16,16 @@ AI/人负责填写变更说明，工具负责输入校验、自动标签、写�
 
 | 需求 | 路径 | 是否需要 GitLab API Token | 保证范围 |
 | --- | --- | --- | --- |
-| 默认：工具自动选择标签、创建/更新 MR、回读确认 | `context` → `create/update` → `verify` → 返回 MR 链接（默认 `--auth api`） | 是 | 经过强制标签和事务验证的 MR 操作 |
+| 默认：创建统一 Issue，再创建 MR | `schema/profiles` → `context` → Request workItem:new → `create` → 创建响应 MR 链接（默认 `--auth api`） | 是 | 写前校验，初始 POST 包含标签与人员 |
 | 看将要写入什么，不提交 | `preview` 或 API `create/update --dry-run` | API 路径需要 | 零远端写入，不消费候选上下文；仍可能读网络 |
 | 仅在人类明确要求手工交接时：生成标题/正文，自己在 GitLab 创建 MR | `manual --auth ssh` | 否 | 本地交接材料；可显式推送普通分支，**不保证网页创建的 MR 标签** |
 
-CLI 与 Skill 默认通过 API 完成自动 MR 流程。用户要求提交或更新 MR 即为本次操作授权：
-后台校验后直接 `create/update`、`verify`，成功返回 MR 链接，不再展示预览或重复确认。
-只有用户主动要求预览时才运行 `preview` 或 `--dry-run`；缺少必要信息、类型歧义或执行失败时才中断。
+CLI 与 Skill 默认通过 API 新建 Issue 后创建 MR。用户要求提交即为本次操作授权：
+后台校验后直接 `create`，以创建响应返回 MR 链接，描述为“已创建”。
+首次 POST 后不再 GET、PUT、GraphQL、回读验证、重试、查询恢复或回滚。
+失败立即停止，报告已知 Issue URL 和 MR 失败/结果未知，不能冒称成功。
+只有用户主动要求预览时才运行 `preview` 或 `--dry-run`；只为无法确定的必要事实或真实阻断中断。
+历史受管 MR 的更新/验证见第 7 节。
 未传 `--auth` 时使用 `api`；
 `--auth auto` 仅保留为 API 选择的兼容写法，不会回退 SSH。缺少 Token 或 API
 请求失败时停止并报告问题，不自动切换到 manual/SSH 交接；只有人类明确要求
@@ -36,7 +40,7 @@ CLI 与 Skill 默认通过 API 完成自动 MR 流程。用户要求提交或更
 macOS 本地进程锁还需要系统 Perl 的 `flock`。本地 Darwin 构建通过不代表已提供 macOS 正式安装包。
 
 ```sh
-git clone --branch release-candidate-0.1.0 git@github.com:chengcheng93/harness-mrtool.git
+git clone --branch main git@github.com:chengcheng93/harness-mrtool.git
 cd harness-mrtool
 node --version                         # 必须是 v24.16.0
 npm ci
@@ -180,17 +184,26 @@ hmr context --auth api --output json
 
 ### 5.2 填写 Request
 
-复制 [输入样例](examples/request.json) 到**业务仓库之外**的私有目录：
+默认使用 `workItem: { "relation": "new" }`，省略该字段也会新建 Issue。
+不查询/选择已有 Issue。AI/人将问题背景、复现或功能场景、方案、实现、测试、
+上线、回滚和验收细节填入现有 motivation/changes/verification/risk/profile 文本字段；
+CLI 渲染统一八节 Issue，无需选模板、额外 AI 调用或新增必填 Issue 字段。
+负责人为当前 API 用户，阶段日期/截止日期为 Asia/Shanghai 当日；milestone、TAPD 可不填。
+Issue 仅使用可用 type/priority 标签；MR 的三标签和人员都在首次 MR POST 提交。
+显式旧 `workItem`（closes/related/none）保留历史强事务，不会忽略调用者选择。
+
+复制 [输入样例](examples/submission.json) 到**业务仓库之外**的私有目录：
 
 ```sh
 mkdir -p /absolute/private/mr-input
-cp "$MRTOOL_HOME/examples/request.json" /absolute/private/mr-input/request.json
+cp "$MRTOOL_HOME/examples/submission.json" /absolute/private/mr-input/request.json
 ```
 
 样例仅提供结构，**不能不修改就提交**：
 
 | 字段 | 如何填写 |
 | --- | --- |
+| `workItem` | 默认 `{ "relation": "new" }`，创建统一 Issue |
 | `contextId` | 刚取得的 `data.contextId` |
 | `profileIds` | 根据 `profiles detect/list` 及实际变更填写；样例为 code |
 | `targetBranch` | 工具发现的目标项目默认分支 |
@@ -203,14 +216,16 @@ cp "$MRTOOL_HOME/examples/request.json" /absolute/private/mr-input/request.json
 输入文件可放在私有目录，避免把人员信息/说明误提交进仓库；它不影响基于已提交 `HEAD` 的 MR 流程。
 完整合同以当前 `schema show`、`profiles list` 和验证错误为准。
 
-### 5.3 直接创建 → 验证 → 返回链接
+### 5.3 直接创建 → 返回创建响应链接
 
 ```sh
 hmr create --auth api --input /absolute/private/mr-input/request.json --input-format json --output json
-hmr verify 88 --auth api --level structure --output json
 ```
 
-把 `88` 换成实际 MR IID。普通流程不要求额外确认，验证通过后返回真实 MR 链接。
+普通新建顺序为 Issue POST → MR POST，成功后返回创建响应中的真实 MR 链接。
+不再运行 verify 或回读；不要将“已创建”描述为“已验证”。
+若 MR 创建失败或结果未知，报告已知 Issue URL 与错误后立即停止，不查询恢复、重试或回滚。
+
 只有主动要求预览时才执行以下可选命令，它们不是创建前置步骤：
 
 ```sh
@@ -218,9 +233,14 @@ hmr preview --auth api --input /absolute/private/mr-input/request.json --input-f
 hmr create --auth api --input /absolute/private/mr-input/request.json --input-format json --dry-run --output json
 ```
 
-`preview` 和 dry-run 不写 GitLab、不 push、不消费候选；
-成功写入会消费相应上下文，重试/下一次更新请重新获取。
-`create --upsert` 可复用同分支已有 MR，但必须验证该 MR 的 receipt 和精确历史模板；
+`preview` 和 dry-run 不写 GitLab、不 push、不消费候选，仍可能读取实时数据。
+新 Issue 模式在写入前拒绝 upsert/resume。快速创建 MR 使用独立 marker，
+不支持历史 update、verify、upsert 或 resume。历史事务的恢复见下面小节。
+
+### 5.4 仅限历史强事务：upsert 与恢复
+
+以下仅适用于显式旧 workItem 模式和历史受管 MR，不适用于默认快速提交。
+`create --upsert` 可复用同分支已有历史 MR，但必须验证 receipt 和精确历史模板；
 若历史 Bundle 不同，按错误提示改走 `context --mr` + `update`，不能跳过认证。
 
 如果 `create` 已经创建了 MR，但在写入最终 description 前中断（返回 `PARTIAL_WRITE`），可以直接改用
@@ -272,7 +292,9 @@ hmr verify 157 --level structure --output json
 hmr create --auth api --input /absolute/private/mr-input/request.json --priority p1 --priority-reason '说明本次为何需要优先处理' --output json
 ```
 
-## 7. 更新、历史模板和显式迁移
+## 7. 仅限历史受管 MR：更新、历史模板和显式迁移
+
+本节不适用于快速创建 marker；默认新建 MR 不运行 update/verify。
 
 普通更新沿用 MR 的可信历史 Bundle；先取得 **update 专用 context**，更新 JSON 中的
 contextId/人员 token，然后直接更新并验证（不要拿 create 的 context 更新 MR）：
@@ -325,8 +347,8 @@ hmr manual --auth ssh --input /absolute/private/mr-input/request.json --push --o
 | `CONCURRENT_UPDATE` | 代码、引用、人员或标签已经漂移；重新读取 context 和计划，不复用旧授权 |
 | `MANUAL_DESCRIPTION_CHANGE` / `UNMANAGED_MR` | 核对正文所有权和历史 receipt；不要盲目强制覆盖 |
 | `UPDATE_SECURITY_ERROR` | 检查签名历史资产/信任状态；不得跳过校验、伪造回执或用新模板顶替旧模板 |
-| `PARTIAL_WRITE` | MR 已创建且状态已回读，但事务未完成；按输出的 audit 和 safeNextStep 用 `update <iid>` 或 `create --resume` 继续，不能盲重试创建 |
-| `PARTIAL_REMOTE_STATE` | 远端写入结果无法证明；先读取 MR 实际状态，不能盲重试创建 |
+| `PARTIAL_WRITE` | 快速提交立即报告已知 Issue URL 和 MR 结果后停止；仅历史强事务按 audit/safeNextStep 处理恢复 |
+| `PARTIAL_REMOTE_STATE` | 远端写入结果未知；快速提交立即停止，不查询恢复或盲重试 |
 | `Structured input is required` | 当前不是 TTY；提供 `--input` 和完整 JSON，或在真实终端运行向导 |
 
 自动化调用同时检查退出码、`ok`、`code`、`remoteWrite` 和审计结果。
@@ -365,7 +387,7 @@ npm test -- --test-concurrency=1
 
 默认生产入口是 `src/production-main.ts`，源码和构建产物使用同一组服务。
 生产信任根由源码固定；历史模板需要正确签名链，不能通过参数或 JSON 更换信任根。
-本次本地验收（含 README 命令/样例校验）为 **1399 项 / 1391 通过 / 0 失败 / 8 个 Windows 专属跳过**。
+历史强制标签验收记录见下方链接；不代表当前 Issue-first 流程已完成真实 GitLab 验收。
 Windows CI、正式签名发布、真实 GitLab 与真实插件宿主验收属于独立外部步骤。
 
 - [完整命令说明](docs/commands/reference.md)

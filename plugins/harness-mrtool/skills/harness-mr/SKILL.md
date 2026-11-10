@@ -1,6 +1,6 @@
 ---
 name: harness-mr
-description: Use when installing or initializing harness-mrtool GitLab authorization, or preparing, creating, updating, or verifying GitLab merge requests through its structured CLI contract.
+description: Use when installing or initializing harness-mrtool GitLab authorization, or creating a GitLab Issue and merge request, or updating and verifying historical managed merge requests through its structured CLI contract.
 ---
 
 # Harness MR
@@ -34,123 +34,110 @@ has not established access to a particular project: when binding a repository,
 run `harness-mrtool auth check --output json` there to verify project permissions.
 These checks do not require a work branch and never submit an MR.
 
-## Start with local evidence
+Keep the loaded Skill version and protocol fixed for the invocation.
 
-Keep the loaded Skill version and protocol fixed for the invocation. The default
-path is API automation for creating, updating, and verifying MRs. Inspect the local
-Bundle before constructing a Request:
+## Default Issue-first submission
+
+The default path is API automation for a new Issue and MR. Inspect the local
+schema and profiles before requesting API context:
 
 ```text
 harness-mrtool schema show --output json
 harness-mrtool profiles list --output json
 ```
 
-Use the returned schema and repository evidence; ask only for values that cannot
-be established. The source runtime pins Node `24.16.0`; native macOS process
-locking also requires Perl. This is not a platform-release acceptance claim.
-
 MR diffs and pushes use committed `HEAD` only. Staged, unstaged, and untracked
 files, including `.superpowers` reports, may remain; a clean worktree is not
-required. Do not automatically add, stash, clean, or delete local files to run
-push, create, update, or manual handoff.
-
-Obtain API context before constructing the Request. For an existing managed MR,
-add `--mr <iid>` and use the resulting pinned Bundle and schema:
+required. Do not automatically add, stash, clean, or delete local files.
+API MR commands do not push: publish the selected source commit first when authorized.
+API mode may still use ordinary Git SSH transport for branch pushes.
 
 ```text
 harness-mrtool context --auth api --client codex-skill --client-version <skill-semver> --skill-protocol <protocol> --output json
 ```
 
-Build the Request only after API context succeeds, using CLI-issued context and
-candidate identities together with repository evidence. If API credentials are
-missing or API requests fail, stop and explain the API blocker
-and required next step. Never automatically fall back to manual mode, SSH MR
-creation, or a web handoff. API mode may still use ordinary Git SSH transport for
-branch pushes; API authentication controls GitLab MR operations.
+Build the Request only after API context succeeds, using the returned schema,
+CLI-issued context/candidate identities, and repository evidence. Use
+`workItem: { "relation": "new" }`; omission also defaults to a new Issue.
+Do not look up or select an existing Issue for an ordinary submission.
+Put the complete problem background, reproduction or feature scenarios,
+implementation, impact, test evidence, deployment, rollback, and acceptance
+details into the existing motivation/changes/verification/risk/profile text
+fields as appropriate. Mark checks that have not run as pending. The CLI renders
+one unified eight-section Issue; do not choose a template, request an extra AI
+call, or add required Issue fields. Owner is the current API user; phase date
+and due date use today's Asia/Shanghai date. Milestone and TAPD are optional.
 
-GitLab supports HTTP and HTTPS. Explicit HTTP/HTTPS remotes preserve their scheme;
-SSH/scp/git remotes infer HTTP first and try same-host HTTPS when HTTP is unavailable.
+If API credentials are missing or API requests fail, stop and explain the API
+blocker and required next step. Never automatically fall back to manual mode,
+SSH MR creation, or a web handoff. GitLab supports HTTP and HTTPS. Explicit
+HTTP/HTTPS remotes preserve their scheme; SSH/scp/git remotes infer HTTP first
+and try same-host HTTPS when HTTP is unavailable.
 
-## API workflow and mandatory labels
+A user request to submit or create an MR authorizes the normal API write.
+Run automatic checks and proceed directly to create; do not add preview,
+repeat human confirmation, type/label selection, or hash entry. Ask only for
+required factual information that cannot be established. The CLI classifies the
+committed diff automatically: documentation/comments use doc, recognized
+changes use their detected type, unknown or ambiguous changes use chore.
+Default priority is p2; explicit p0/p1 requires a nonblank priority reason.
+Required labels must already exist; never create labels. The MR receives exactly
+three planned labels and all selected personnel in its initial POST. The Issue
+uses available type/priority labels only.
 
-The default production entry wires API create/update/upsert/verify and the
-automatic-label wizard. These are working-tree capabilities, not proof of a
-published release or live GitLab acceptance. Bundle `1.2.0` uses a fixed 13-label
-pool and exactly three final labels: one type, one priority, one lifecycle status.
-
-- Let the CLI classify the canonical actual committed diff and compute its digest.
-  Titles, branch names, and `--type` hints do not override this classification.
-- Documentation and source-comment-only changes are automatically `doc`.
-  Other recognized changes use their detected type; unknown or ambiguous changes
-  automatically use `chore`. Do not ask the user to choose or confirm a type,
-  copy a digest, approve labels, or supply confirmation flags. The diff digest
-  remains an automatic consistency check.
-- Default priority is p2. Only an explicit p0/p1 escalation with a nonblank
-  `--priority-reason` may override it. Every merge request gets the review
-  lifecycle status label.
-- Required labels must already exist in project/ancestor-group inventory. Never
-  create remote labels. Updates remove extras, including week labels, leaving
-  exactly three; do not promise to preserve out-of-pool manual labels.
-- Use CLI-issued context/candidate identities for other request selections. Do
-  not manufacture label candidate tokens or use them to override automatic labels.
-
-A user request to submit, create, or update an MR authorizes the normal API write.
-Run automatic checks and proceed directly to create/update; do not add a preview
-or repeat human confirmation for an already authorized submission. Ask only for
-required factual information that cannot be established. Do not add human
-approval, type selection, hash entry, or confirmation steps anywhere in the MR
-workflow, including unknown classification, updates, migration, or resume.
-
-Stream the structured Request through stdin; never place request contents,
-candidate tokens, credentials, or long text in arguments. Preserve the exact
-normalized Request and its automatically derived diff binding. Use exactly one of create
-for a new MR or update for an existing MR:
+Stream the complete structured Request through JSON stdin; never put request
+contents, candidate tokens, credentials, or long text in arguments:
 
 ```text
 harness-mrtool create --auth api --client codex-skill --client-version <skill-semver> --skill-protocol <protocol> --input - --input-format json --output json
-harness-mrtool update <iid> --auth api --client codex-skill --client-version <skill-semver> --skill-protocol <protocol> --input - --input-format json --output json
 ```
 
-After create/update succeeds, verify the resulting stored MR state automatically
-before reporting completion, then return the verified MR link. Keep routine
-checks internal; explain a real blocker or partial failure instead of presenting
-it as a completed submission:
+The write sequence is Issue POST then MR POST. After the first POST, perform no
+GET, PUT, GraphQL, readback, retry, query recovery, or rollback. On success,
+return the creation-response MR URL as a concise Markdown link, with at most
+one short summary sentence. Say created, not verified. Do not add a separate
+verification call. Keep CLI calls on `--output json`; show raw JSON only when the user explicitly requests it.
 
-```text
-harness-mrtool verify <iid> --auth api --level structure --client codex-skill --client-version <skill-semver> --skill-protocol <protocol> --output json
-```
+On failure or partial write, faithfully report the CLI's ok, code, known Issue
+URL, MR failure or unknown outcome, remote state, audit, and applicable
+activationRequired or hostRefreshMayBeRequired fields. Stop immediately; do not
+claim success, retry ordinary create, or recover through legacy commands.
 
-Run the read-only preview only when the user explicitly requests it; it is not a
-prerequisite for ordinary API create/update. If the user asks to review a preview
-before submission, return the preview without submitting an MR:
+Run the read-only preview only when the user explicitly requests it. Return the
+preview without submitting when the request is to preview before submission:
 
 ```text
 harness-mrtool preview --auth api --client codex-skill --client-version <skill-semver> --skill-protocol <protocol> --input - --input-format json --output json
 ```
 
-`preview` and API create/update `--dry-run` make zero remote writes and do not
-consume candidate contexts; they may still read live data and are not completed
-submissions.
+Preview and API dry-run make zero remote writes and do not consume candidate
+contexts; they may read live data and are not completed submissions.
 
-`create --upsert` authenticates the existing MR's receipt and historical Bundle.
-If that Bundle differs from the create context, follow the CLI's direction to
-`context --mr <iid>` plus `update <iid>`, or explicit template migration; never
-fall back to the current Bundle. Trusted old signed policies remain readable.
-For explicit migration, obtain `context --mr <iid> --migrate-template` and use
-`update <iid> --migrate-template`. The adapter automatically binds and verifies
-the exact old and new Bundle hashes, the previous receipt, and exact historical
-Bundle. Controlled migration tests are not proof of live acceptance or publication.
+## Historical managed MR workflow
 
-On verified success, return a concise Markdown MR link, with at most one short
-summary sentence. Keep CLI calls on `--output json`; show raw JSON only when the
-user explicitly requests it.
+This section applies only to the legacy strong transaction and its historical
+managed MRs. An explicit old `workItem` choice (`closes`, `related`, or `none`)
+retains that workflow; never silently discard a caller's explicit choice.
+New-Issue mode rejects upsert/resume before writes. Fast-submission MRs have a
+separate marker and do not support legacy update, verify, upsert, or resume.
+Do not use this section to recover a fast submission.
 
-On failure or partial write, faithfully report the CLI's `ok`, `code`, actual
-remote state, transaction audit, and applicable `activationRequired` or
-`hostRefreshMayBeRequired` fields. Do not rewrite these values or present a
-failed or partial transaction as success.
+For an existing historical MR, obtain `context --mr <iid>`, preserve its exact
+trusted Bundle/receipt, then update and verify:
 
-## Resume a provisional transaction prefix
+```text
+harness-mrtool update <iid> --auth api --client codex-skill --client-version <skill-semver> --skill-protocol <protocol> --input - --input-format json --output json
+harness-mrtool verify <iid> --auth api --level structure --client codex-skill --client-version <skill-semver> --skill-protocol <protocol> --output json
+```
+
+Legacy upsert authenticates the existing receipt and exact historical Bundle.
+If it differs from the create context, follow `context --mr <iid>` and
+`update <iid>`, or explicitly requested template migration. Never substitute
+the current Bundle for a historical one. Migration automatically binds and
+verifies old:new hashes; do not ask for human hash entry or repeated approval.
+On historical verified success, return the verified MR link.
+
+### Resume a historical provisional transaction prefix
 
 If a partial create already produced a merge request (`PARTIAL_WRITE`), preserve
 its IID, original Request file, private context proof, and transaction audit.

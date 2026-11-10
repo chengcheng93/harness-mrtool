@@ -8,8 +8,9 @@ import { parseCliInvocation } from "../../src/cli/program.ts";
 const root = resolve(import.meta.dirname, "../..");
 
 test("README example request is schema-valid, pending, carries no intent, and never contains fabricated candidate tokens", async () => {
-  const raw = JSON.parse(await readFile(resolve(root, "examples/request.json"), "utf8"));
+  const raw = JSON.parse(await readFile(resolve(root, "examples/submission.json"), "utf8"));
   assert.equal(Object.hasOwn(raw, "intent"), false);
+  assert.deepEqual(raw.workItem, { relation: "new" });
   const request = normalizeAndValidateRequest(raw);
   assert.match(request.contextId, /REPLACE_FROM_CONTEXT_OUTPUT/u);
   assert.deepEqual(request.mergeRequest.labelCandidateTokens, []);
@@ -43,7 +44,7 @@ test("README distinguishes unpublished source, real API writes, manual handoff a
   for (const phrase of ["尚未发布", "API MR 命令不自动 push", "恰好三个标签", "池外人工标签", "不自动复用", "HARNESS_MRTOOL_GITLAB_HOST", "HARNESS_MRTOOL_GITLAB_TOKEN"]) {
     assert.ok(readme.includes(phrase), phrase);
   }
-  assert.ok(readme.includes("[输入样例](examples/request.json)"));
+  assert.ok(readme.includes("[输入样例](examples/submission.json)"));
   assert.doesNotMatch(readme, /--confirm-label-type|--label-diff-digest|--confirm-migration/u);
   // The Draft stage was removed: the README must not describe a Draft-first flow or an intent field.
   assert.doesNotMatch(readme, /`intent`|Draft 输入样例|request\.draft\.json|PARTIAL_DRAFT/u);

@@ -1,4 +1,4 @@
 interface:
-  display_name: Harness MR
-  short_description: Create deterministic merge requests through the harness-mrtool CLI
-  default_prompt: "Use $harness-mr to run automatic checks, create or update my GitLab MR through the structured API workflow, verify it, and return its link; preview only when I ask."
+  display_name: "Harness MR"
+  short_description: "Create an Issue and MR through the harness-mrtool CLI"
+  default_prompt: "Use $harness-mr to run automatic checks, create a unified GitLab Issue and MR from my committed changes, and return the creation-response MR link; preview only when I ask."

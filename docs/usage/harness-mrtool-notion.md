@@ -2,18 +2,21 @@
 
 > 适合复制到 Notion 的项目说明文档
 >
-> 当前源码候选：CLI/Plugin `0.1.8`，Template Bundle `1.2.0`，默认 API 自动 MR；尚未发布。
+> 当前源码候选：CLI/Plugin `0.1.10`，Template Bundle `1.2.0`，默认 API 新建 Issue → MR；尚未发布。
+> 当前快速提交以[仓库 README](../../README.md)为准；本文第 4 节保留历史强事务实现说明，不适用于快速 marker。
+> 新流程：`workItem:new`，Issue POST → MR POST，按创建响应返回链接；首次 POST 后无 GET/PUT/GraphQL、回读、重试、查询恢复或回滚。失败报告已知 Issue URL 和 MR 失败/未知后立即停止。
+> 快速 marker 不支持历史 update/verify/upsert/resume；显式旧 workItem 模式保留历史事务。
 > 历史正式版本：`0.1.5`（当时为 SSH-first），不包含当前强制标签和默认流程改造。
 > GitHub 仓库：<https://github.com/chengcheng93/harness-mrtool>
 > 历史 Windows Release：<https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.5>
 
 ## 1. 一句话理解
 
-`harness-mrtool` 是一个确定性的 GitLab Merge Request CLI。它把“整理变更说明、选择标签和人员、创建或更新 MR、回读验证”编译成一条可审计的事务流程。
+`harness-mrtool` 是一个确定性的 GitLab Merge Request CLI。默认先创建统一八节 Issue，再创建含计划标签和人员的 MR；历史受管 MR 保留强事务更新和回读验证。
 
 它不是聊天机器人，也不是 GitLab 的合并门禁。它不会自动合并 MR，不创建项目标签定义，不强制 push，也不把自然语言直接拼进 GitLab 请求。当前标签策略要求 MR 最终恰好包含 type/priority/status 各一个；更新会移除旧 week 和额外标签关联。
 
-CLI 与 Skill 默认通过 GitLab API 完成 `context -> create/update -> verify -> 返回 MR 链接`。
+CLI 与 Skill 默认通过 GitLab API 完成 `schema/profiles -> context -> Request workItem:new -> create -> 创建响应 MR 链接`。
 缺少 Token 或 API 请求失败时停止，不自动回退到 manual/SSH；仅在人类明确要求
 手工交接时，才使用 `manual --auth ssh`。Git 本身仍可使用 SSH 推送源分支。
 
@@ -28,7 +31,7 @@ CLI 与 Skill 默认通过 GitLab API 完成 `context -> create/update -> verify
 - 更新程序、Skill 或模板被替换时，版本和内容不匹配；
 - GitLab Token 出现在命令行、日志或错误输出中。
 
-工具的核心目标是：只有当 GitLab 的最终状态、模板版本、验证证据和本地审计记录都符合合同，CLI 才返回成功。
+默认快速创建以创建响应报告结果；下面的最终状态回读、receipt 与恢复说明仅适用于历史强事务。
 
 ## 3. 总体实现原理
 
@@ -67,7 +70,7 @@ Private local state:
 
 领域层不直接依赖 HTTP、文件系统、进程或命令行。测试可以注入 fake Git/GitLab/文件系统，验证真实业务逻辑而不是只测 mock 包装层。
 
-## 4. 一次 create 的实现逻辑
+## 4. 历史强事务 create 的实现逻辑（非默认快速提交）
 
 ### 4.1 启动和更新预检查
 
@@ -111,7 +114,7 @@ bytes
 `preview` 只生成 WritePlan，不写 GitLab、不消耗候选 token。输出包含标题、Profile、标签计划、负责人/审核人计划、描述正文、验证证据和 source branch push 计划。
 
 这一步只在用户主动要求预览时执行，不是 `create/update` 的前置条件。
-用户要求提交或更新即授权本次普通操作，后台校验后直接创建/更新并验证，成功返回 MR 链接，不再重复确认。
+历史事务在后台校验后创建/更新并验证；默认快速创建不执行此回读流程。
 
 ### 4.5 create 的远端事务
 
@@ -193,8 +196,8 @@ Skill 每次默认调用：
 1. 固定当前 Skill version 和 protocol；
 2. 默认先执行本地 `schema show` 和 `profiles list`；
 3. 获取 API `context`，只使用 CLI 返回的 Schema、Profile、候选人员和真实 diff 证据生成结构化 Request；
-4. 校验后台完成，直接执行 `create/update` 并 `verify` 回读，成功返回 MR 链接；
-5. 只有用户主动要求预览时才执行 `preview`；仅缺必要信息、类型歧义或执行失败时中断；
+4. 填写丰富的既有文本字段及 `workItem:new`，直接 `create`，返回创建响应 MR 链接；
+5. 只有用户主动要求预览时才执行 `preview`；仅缺必要事实或真实阻断时中断；
 6. 缺少凭据或 API 失败时停止，按 CLI 的错误和安全下一步处理，不自动改走手工交接；
 7. 仅在人类明确要求手工交接时使用 `manual --auth ssh`，审查后可显式普通分支 push，再由用户创建网页 MR；`--ssh-mr` 已禁用，返回 `LABEL_ERROR` 并在 push 前停止。
 
@@ -205,7 +208,7 @@ Skill 更新先进入 CLI 管理的 staging 目录，只有用户显式执行 `s
 ### 7.1 历史 Windows 正式安装
 
 下面保留 `0.1.5` 的 Windows x64 安装示例，仅说明历史发布产物，不用于体验当前候选。
-当前 `0.1.8` 候选按[仓库 README](../../README.md)的精确 Node `24.16.0`
+当前 `0.1.10` 候选按[仓库 README](../../README.md)的精确 Node `24.16.0`
 说明源码构建，正式发布后再更新下载链接。历史安装脚本会下载固定 tag 的 portable zip，校验 SHA-256，拒绝危险归档路径，运行 `self-test`，然后原子发布到默认目录 `%LOCALAPPDATA%\HarnessMrTool`。
 
 PowerShell 示例：
@@ -250,8 +253,8 @@ codex plugin add harness-mrtool@harness-mrtool
 ```
 
 安装后新开一个 Codex task/thread。进入目标 Git 仓库后，可以直接说“提交当前
-分支的 merge request”；要求提交时 Plugin 默认使用 `context -> Request ->
-create/update -> verify -> 返回 MR 链接` 的 API 流程，不再要求预览确认。API MR 命令不自动 push，需先检查、提交
+分支的 merge request”；要求提交时 Plugin 默认使用 `schema/profiles -> context -> Request workItem:new ->
+create -> 创建响应 MR 链接` 的 API 流程，不再要求预览确认。API MR 命令不自动 push，需先检查、提交
 并发布源分支；Git remote 可以继续使用 SSH。
 
 只有人类明确要求手工交接时，才改用 `manual --auth ssh` 生成本地材料。
@@ -297,7 +300,7 @@ harness-mrtool context --auth api --output json
 ```
 
 根据本次 `context` 填写 Request，再按下面的文件/stdin 流程执行
-`create -> verify -> 返回 MR 链接`。MR diff 和推送只使用已提交的 `HEAD`；staged、
+`create -> 创建响应 MR 链接`。MR diff 和推送只使用已提交的 `HEAD`；staged、
 unstaged、untracked 文件（包括 `.superpowers` 报告）可以保留，不要求工作区干净。
 工具不自动 add、stash、clean 或删除本地文件；输入文件可放在私有目录。
 Git push 与 API MR 创建使用各自的认证，原有 SSH remote 不影响 API 流程。
@@ -322,10 +325,9 @@ Get-Content -LiteralPath $requestPath -Raw |
     --non-interactive `
     --output json
 
-harness-mrtool verify 123 --auth api --level structure --output json
 ```
 
-把 `123` 换成创建结果中的 MR IID。Request 的 `contextId`、
+Request 使用 `workItem: { "relation": "new" }`。Request 的 `contextId`、
 `assigneeCandidateToken` 和 `reviewerCandidateTokens` 必须来自同一次 `context`
 输出，不能手工编造 GitLab ID；`labelCandidateTokens` 保持 `[]`，CLI 根据真实
 diff 自动选择 type/priority/status。完整字段以当前 Bundle 为准，可用下面的命令查看：
@@ -336,7 +338,7 @@ harness-mrtool profiles list --output json
 harness-mrtool template export --profile general --destination .\MR-template.md --output json
 ```
 
-### 7.5 更新和验证 MR
+### 7.5 仅限历史受管 MR：更新和验证
 
 ```powershell
 harness-mrtool context --mr 123 --auth api --output json
@@ -378,9 +380,9 @@ harness-mrtool manual --auth ssh --input C:\private\mr-input\request.json --push
 | `context` | 生成当前上下文和候选 token | 否 |
 | `preview` | 生成确定性写入计划 | 否 |
 | `manual --auth ssh` | 仅在人类明确要求时，无 Token 生成本地交接材料和普通分支推送计划 | 仅显式 `--push` 时写 Git 远端 |
-| `create` | 创建或按 `--upsert` 更新 MR | 是 |
-| `update <iid>` | 更新已有受管 MR | 是 |
-| `verify <iid>` | 验证 MR 状态 | 否 |
+| `create` | 默认新建 Issue 和 MR；upsert 仅历史模式 | 是 |
+| `update <iid>` | 仅更新历史受管 MR | 是 |
+| `verify <iid>` | 仅验证历史受管 MR 状态 | 否 |
 | `profiles detect` | 根据 committed diff 检测 Profile | 否 |
 | `labels list` | 读取实时标签候选 | 否 |
 | `template show/export` | 查看或导出 Bundle 模板 | 否 |
@@ -404,7 +406,7 @@ harness-mrtool manual --auth ssh --input C:\private\mr-input\request.json --push
 | `6` | 已发生但无法完全证明的远端部分状态 |
 | `7` | 内部错误 |
 
-出现 `PARTIAL_WRITE` 时，MR 已创建且状态已回读，按输出的 safeNextStep 用 `update <iid>` 或 `create --resume` 继续。出现 `PARTIAL_REMOTE_STATE` 时不要立即重复执行 create。先运行 `context`、读取 MR 实际状态或使用 `verify`，确认远端结果后再决定下一步。
+快速提交失败立即报告已知 Issue URL 和 MR 失败/未知，不查询恢复或重试。仅历史事务：出现 `PARTIAL_WRITE` 时，MR 已创建且状态已回读，按输出的 safeNextStep 用 `update <iid>` 或 `create --resume` 继续。出现 `PARTIAL_REMOTE_STATE` 时不要立即重复执行 create。先运行 `context`、读取 MR 实际状态或使用 `verify`，确认远端结果后再决定下一步。
 
 ## 10. 安全边界
 
@@ -414,13 +416,13 @@ harness-mrtool manual --auth ssh --input C:\private\mr-input\request.json --push
 - 归档下载限制大小、重定向 Host、路径、设备名、符号链接和文件数量；
 - Bundle、Skill 和更新必须经过大小、哈希、签名、兼容性和归档验证；
 - 本地 context、journal、receipt 和 Skill 状态放在用户私有目录，并使用原子写入和恢复流程；
-- 业务成功必须经过 GitLab 独立回读，不以 mutation 请求返回作为唯一成功依据；
+- 历史事务成功经过独立回读；默认快速提交仅依据创建响应，不冒称已验证；
 - 工具不会创建标签、合并 MR、force push 或接管没有合法 marker 的 MR。
 
 ## 11. 当前版本的范围和未完成项
 
 当前 CLI 支持 `--auth auto|ssh|api`，默认值为 `api`；Plugin 普通流程使用
-`context -> create/update -> verify -> 返回 MR 链接` 的 API 链路。`auto` 只兼容
+`schema/profiles -> context -> Request workItem:new -> create -> 创建响应 MR 链接` 的 API 链路。`auto` 只兼容
 选择 API，不自动回退 SSH。只有人类明确要求手工交接后，才显式运行
 `manual --auth ssh`；该路径不读取 GitLab Token。API 失败先停止并处理错误。
 
@@ -438,7 +440,7 @@ harness-mrtool manual --auth ssh --input C:\private\mr-input\request.json --push
 ```text
 源码构建当前候选，或安装未来匹配的正式 Release
   -> 配置当前 GitLab Host 的 API Token -> 检查/提交并发布源分支
-  -> doctor -> context -> Request -> create/update -> verify -> 返回 MR 链接
+  -> schema/profiles -> context -> Request workItem:new -> create -> 创建响应 MR 链接
   -> 缺少 Token 或 API 失败：停止，按错误和 safeNextStep 处理
 
 仅在人类明确要求手工交接后：
@@ -448,6 +450,6 @@ harness-mrtool manual --auth ssh --input C:\private\mr-input\request.json --push
 
 最重要的使用原则只有三条：
 
-1. 默认后台校验后直接创建/更新，验证成功返回 MR 链接；只有主动要求时才预览，不再重复确认；
+1. 默认后台校验后新建 Issue 和 MR，以创建响应返回 MR 链接；只有主动要求时才预览，不再重复确认；
 2. 人员只回传 CLI 发放的 candidate token，标签由 CLI 自动选择，不手填标签名或 GitLab ID；
 3. 看到 API 错误、`PARTIAL_REMOTE_STATE` 或 `UPDATE_SECURITY_ERROR` 时停止，先按输出中的安全下一步处理，不自动回退 manual/SSH。

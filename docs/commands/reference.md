@@ -11,20 +11,20 @@ installation-path material.
 | `context` | Resolve real project/group label candidates from the fixed pool; default priority is p2. Existing-MR context requires a trusted exact Bundle. |
 | `preview` | Produce a deterministic write plan without consuming candidates or mutating GitLab. |
 | `manual --auth ssh` | Render a local handoff and ordinary branch push plan only after an explicit human request. `--ssh-mr` is rejected with LABEL_ERROR; no unverified MR creation is allowed. |
-| `create` | Create or upsert a merge request through the verified transaction path: an ordinary MR with a provisional description, then labels, managed fields, the final description, and readback. |
-| `create --resume <iid> --resume-from <original-request>` | Finish a verified provisional transaction prefix using original private proof and an equivalent fresh `--input` request. Never creates another MR. |
-| `update <iid>` | Update an existing merge request with readback and journal evidence. |
-| `verify <iid> --level structure` | Verify stored merge-request state and historical Bundle evidence; `ready` and `merge` request additional checks. |
+| `create` | Default: create a unified Issue then an MR with all fields in the initial POST; return the creation-response MR URL. Explicit legacy workItem modes retain the strong transaction. |
+| `create --resume <iid> --resume-from <original-request>` | Historical strong transactions only: finish a verified provisional transaction prefix using original private proof and an equivalent fresh `--input` request. Never creates another MR. |
+| `update <iid>` | Historical managed MRs only: update an existing merge request with readback and journal evidence. |
+| `verify <iid> --level structure` | Historical managed MRs only: verify stored merge-request state and historical Bundle evidence; `ready` and `merge` request additional checks. |
 | `profiles detect` | Detect profiles from the local committed-diff baseline. |
 | `labels list` | Read the live label inventory. |
 | `self-update check/status` | Check or inspect a verified release set. |
 | `skill install/activate/status` | Stage, explicitly activate, or inspect a standalone Skill. |
 
 `--auth auto|ssh|api` selects the authentication path. `api` is the default for
-the CLI and Codex Skill: `context -> create/update -> verify -> MR URL` uses
-GitLab credentials and verified readback. A submission request authorizes the
-normal create/update; validation runs in the background without another
-confirmation, and success returns the MR URL. Preview and dry-run are optional
+the CLI and Codex Skill:
+`schema/profiles -> context -> Request workItem:new -> create -> creation-response MR URL`.
+A submission request authorizes the normal write; validation runs in the
+background without another confirmation. Preview and dry-run are optional
 and run only when explicitly requested. `--auth auto` remains a compatibility
 selection of API without SSH fallback. Missing credentials or API errors stop
 the flow; they do not authorize automatic manual handoff.
@@ -43,6 +43,31 @@ fallback when HTTP is unavailable during project discovery.
 `--offline` uses only verified local state. `--no-update` skips network update
 work but does not bypass command or trust validation. Tokens and update URLs
 are never accepted as command-line options.
+
+## Default Issue-first creation
+
+Local schema/profiles -> API context (no Issue lookup) -> rich Request
+`workItem: { "relation": "new" }` -> create -> creation-response MR URL.
+Omitting workItem also selects new. Explicit old closes/related/none choices
+retain the legacy strong transaction; never silently ignore them.
+
+Use existing motivation/changes/verification/risk/profile text for complete
+problem, reproduction or feature scenarios, implementation, test, deployment,
+rollback, and acceptance details. The CLI renders one unified eight-section Issue
+without a template choice, extra AI call, or new required Issue fields.
+Issue owner is the current API user; phase/due dates are today's Asia/Shanghai
+date. Milestone and TAPD are optional. Pending evidence remains pending.
+
+All validation and context resolution precede writes. Then Issue POST is followed
+by MR POST; the initial MR POST includes exactly three planned labels and selected
+personnel. The Issue uses available type/priority labels only. After the first
+POST there are no GET, PUT, GraphQL, readback, retry, query recovery, or rollback
+calls. Success means created from the creation response, not verified.
+Failure stops immediately and reports any known Issue URL and MR failure or
+unknown outcome. Do not blindly retry or run legacy recovery.
+
+New-Issue mode rejects upsert/resume before writes. Fast-submission MRs use a
+separate marker and do not support legacy update, verify, upsert, or resume.
 
 ## GitLab initialization
 
@@ -76,7 +101,10 @@ required. The diff digest remains an automatic consistency binding. The ordinary
 `--type` title hint cannot override automatic labels. Omitting `--priority` selects
 `p2`; `--priority p0|p1` requires a nonblank `--priority-reason`.
 
-## Preview, dry-run, and existing MRs
+## Preview, dry-run, and historical MRs
+
+The legacy recovery/update bullets below apply only to historical managed MRs
+and explicit old workItem modes, never fast-submission markers.
 
 - `preview` and API `create`/`update --dry-run` make zero remote writes: no push
   or GitLab mutation, and no candidate-context consumption. They still validate
@@ -119,8 +147,9 @@ required. The diff digest remains an automatic consistency binding. The ordinary
   or human approval.
   Controlled integration coverage does not replace live GitLab acceptance.
 
-The label guarantee belongs to mrtool's verified transaction path; it does not
-constrain raw Git/API calls or manual GitLab UI operations.
+The initial POST label plan and historical verification guarantees belong to
+mrtool's respective workflows; they do not constrain raw Git/API calls or
+manual GitLab UI operations.
 
 ## Runtime prerequisites
 

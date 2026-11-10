@@ -6,7 +6,7 @@ profiles, rendering, labels, writes, and verification.
 
 ## Prerequisites
 
-CLI/Plugin 0.1.9 is a release candidate, not yet published. Build the CLI from
+CLI/Plugin 0.1.10 is a release candidate, not yet published. Build the CLI from
 current `main` source using the pinned-runtime instructions in the repository's
 root README; the plugin does not include a CLI binary. New release download links
 will be added only after publication.
@@ -17,7 +17,7 @@ not include the mandatory-label changes:
 <https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.5>
 
 The historical published CLI supports Windows x64. The default CLI and Skill
-flow uses the GitLab API to create or update an MR and read back its final state.
+flow uses the GitLab API to create a unified Issue and then an MR.
 Configure a GitLab token in the host-scoped environment
 variables documented by the CLI. Never put a GitLab token in a command line,
 plugin file, or prompt.
@@ -76,16 +76,31 @@ for commands and platform boundaries.
 The default invocation follows this order (`--auth api` is the CLI default):
 
 ```text
-context --auth api -> structured Request -> create/update -> verify -> MR URL
+schema/profiles -> context --auth api -> Request workItem:new -> create -> creation-response MR URL
 ```
 
-A user request to submit or update an MR authorizes the normal write. Validate in
-the background, submit directly, verify the stored result, and return the MR URL
-without another confirmation. Run preview only when explicitly requested; it is
-not a prerequisite for create/update. Ask only for required information that
-cannot be established, ambiguous diff classification, or a real blocker.
+A user request to submit an MR authorizes the normal write. Validate in the
+background, build a rich Request with `workItem: { "relation": "new" }`, and
+submit directly. The CLI creates one unified eight-section Issue then the MR,
+with labels and personnel in the initial MR POST. After the first POST, there
+are no GET, PUT, GraphQL, readback, retry, recovery query, or rollback calls.
+Return the creation-response MR URL and describe it as created.
 
-Preview runs only when explicitly requested.
+The host AI fills existing motivation/changes/verification/risk/profile text
+with the actual problem, scenarios, implementation, test, deployment, rollback,
+and acceptance details; no extra template choice or AI call is required.
+Issue owner is the API user; phase/due dates use today's Asia/Shanghai date.
+Milestone and TAPD are optional. Pending checks stay pending.
+
+Run preview only when explicitly requested. Ask only for required factual
+information that cannot be established or a real blocker. On failure, stop
+immediately and report any known Issue URL and MR failure or unknown outcome;
+do not report success or blindly retry.
+
+Historical managed MRs retain their receipt/Bundle-based update and verification
+flow only when explicitly selected. Old Request workItem choices retain the
+legacy strong transaction. New-Issue mode rejects upsert/resume before writes;
+fast-submission markers do not support legacy update, verify, upsert, or resume.
 
 Missing credentials or API failures stop the flow; never automatically fall back
 to SSH or manual handoff. `--auth auto` remains a compatibility alias for API
@@ -107,10 +122,10 @@ schema/profiles -> structured Request -> manual --auth ssh --push (when the user
 The manual path does not claim a remote MR was created and does not choose live
 labels, assignee, or reviewers. `manual --auth ssh --ssh-mr --push` is rejected
 with `LABEL_ERROR` before push planning or execution. Use the API flow for
-mandatory-label-verified MR creation. An ordinary branch push followed by a
+Issue-first MR creation. An ordinary branch push followed by a
 user-created web MR remains outside the tool's label-verification guarantees.
 
-The Skill sends the exact normalized Request over JSON stdin. On verified
+The Skill sends the exact normalized Request over JSON stdin. On creation-response
 success, it returns a concise Markdown MR link with at most one short summary
 sentence; raw JSON is shown only on request. On failure or partial writes, it
 faithfully reports the CLI status, error code, actual remote state, and relevant
