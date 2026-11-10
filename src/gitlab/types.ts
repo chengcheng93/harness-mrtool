@@ -117,3 +117,34 @@ export type GitLabUpdateMergeRequestInput =
       readonly removeSourceBranch: boolean;
     }
   | { readonly kind: "description"; readonly description: string };
+
+export interface GitLabCreateIssueInput {
+  readonly projectId: number;
+  readonly projectPath: string;
+  readonly title: string;
+  readonly description: string;
+  readonly assigneeIds: readonly number[];
+  readonly dueDate: string;
+  readonly labelNames?: readonly string[];
+}
+
+export interface GitLabCreatedIssue {
+  readonly id: number;
+  readonly iid: number;
+  readonly projectId: number;
+  readonly webUrl: string;
+}
+
+export interface GitLabCreateMergeRequestSubmissionInput extends GitLabCreateMergeRequestInput {
+  readonly targetProjectPath: string;
+  readonly labelNames: readonly string[];
+  readonly assigneeIds: readonly number[];
+  readonly reviewerIds: readonly number[];
+}
+
+export interface GitLabSubmittedMergeRequest {
+  readonly iid: number;
+  readonly webUrl: string;
+  readonly sourceProjectId: number;
+  readonly targetProjectId: number;
+}

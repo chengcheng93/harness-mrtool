@@ -1,3 +1,4 @@
+import { RemoteMutationError, isRemoteMutationError } from "../app/remote-outcome.ts";
 import { isToolError, ToolError } from "../contracts/errors.ts";
 import type { JsonObject, JsonValue } from "../contracts/jcs.ts";
 import { normalizeGitLabDescription } from "./description.ts";
@@ -10,6 +11,10 @@ import type {
   GitLabIssue,
   GitLabLabel,
   GitLabCreateMergeRequestInput,
+  GitLabCreateIssueInput,
+  GitLabCreatedIssue,
+  GitLabCreateMergeRequestSubmissionInput,
+  GitLabSubmittedMergeRequest,
   GitLabMergeRequest,
   GitLabMutationReceipt,
   GitLabProject,
@@ -481,6 +486,58 @@ function validateMutationIdentity(
   return record;
 }
 
+function positiveResponseId(value: JsonValue | undefined, subject: string): number {
+  const result = integer(value, subject);
+  if (result < 1) throw apiError(subject, "expected positive GitLab ID");
+  return result;
+}
+
+function assertPositiveInputId(value: number): void {
+  if (!Number.isSafeInteger(value) || value < 1) throw new TypeError("GitLab IDs must be positive safe integers");
+}
+
+function assertSubmissionPath(path: string): void {
+  if (path === "" || path !== path.trim() || /[\s\\%?#\u0000]/u.test(path) ||
+      path.split("/").some((segment) => segment === "" || segment === "." || segment === "..")) {
+    throw new TypeError("GitLab project path must be canonical");
+  }
+}
+
+function submissionWebUrl(
+  value: JsonValue | undefined,
+  origin: string,
+  projectPath: string,
+  resource: "issues" | "merge_requests",
+  iid: number,
+): string {
+  const webUrl = string(value, "submission.web_url");
+  const expected = new URL(origin + "/" + projectPath + "/-/" + resource + "/" + String(iid));
+  // Exact canonical binding excludes credentials, query strings, fragments, and other projects.
+  if (webUrl !== expected.href) throw apiError("submission", "untrusted resource URL");
+  return webUrl;
+}
+
+function submissionError(error: unknown): RemoteMutationError {
+  if (isRemoteMutationError(error)) return error;
+  if (isGitLabResponseValidationError(error)) return new RemoteMutationError("unknown", "server", error.requestId);
+  if (isGitLabRequestError(error)) {
+    const reason = error.kind === "auth" ? "auth"
+      : error.kind === "timeout" ? "timeout"
+      : error.kind === "network" ? "network"
+      : error.kind === "http" && error.status === 409 ? "conflict"
+      : error.kind === "http" && error.status !== null && [400, 404, 422].includes(error.status) ? "validation"
+      : "server";
+    return new RemoteMutationError(
+      reason === "auth" || reason === "validation" || reason === "conflict" ? "rejected" : "unknown",
+      reason,
+      error.requestId,
+    );
+  }
+  if (isToolError(error, "AUTH_ERROR")) return new RemoteMutationError("rejected", "auth");
+  if (error instanceof TypeError) return new RemoteMutationError("rejected", "validation");
+  return new RemoteMutationError("unknown", "server");
+}
+
 export class GitLabClient {
   readonly origin: string;
   private readonly http: GitLabHttpClient;
@@ -849,6 +906,86 @@ export class GitLabClient {
       page += 1;
     }
     throw apiError("pagination", "page limit exceeded");
+  }
+
+  async createIssue(input: GitLabCreateIssueInput): Promise<GitLabValueReceipt<GitLabCreatedIssue>> {
+    try {
+      assertPositiveInputId(input.projectId);
+      assertSubmissionPath(input.projectPath);
+      if (input.assigneeIds.length !== 1 || !DATE.test(input.dueDate)) {
+        throw new TypeError("Issue submission requires one assignee and a due date");
+      }
+      input.assigneeIds.forEach(assertPositiveInputId);
+      const response = await this.mutate("POST", "/api/v4/projects/" + String(input.projectId) + "/issues", {
+        title: input.title,
+        description: input.description,
+        issue_type: "issue",
+        assignee_ids: [...input.assigneeIds],
+        due_date: input.dueDate,
+        ...(input.labelNames !== undefined && input.labelNames.length > 0 ? { labels: input.labelNames.join(",") } : {}),
+      });
+      const value = validateResponse(response, (data) => {
+        const record = object(data, "created issue");
+        const id = positiveResponseId(record.id, "created issue.id");
+        const iid = positiveResponseId(record.iid, "created issue.iid");
+        const projectId = positiveResponseId(record.project_id, "created issue.project_id");
+        if (projectId !== input.projectId) throw apiError("created issue", "project identity mismatch");
+        return Object.freeze({
+          id, iid, projectId,
+          webUrl: submissionWebUrl(record.web_url, this.origin, input.projectPath, "issues", iid),
+        });
+      });
+      return Object.freeze({ value, requestId: response.requestId });
+    } catch (error) {
+      throw submissionError(error);
+    }
+  }
+
+  async createMergeRequestSubmission(
+    input: GitLabCreateMergeRequestSubmissionInput,
+  ): Promise<GitLabValueReceipt<GitLabSubmittedMergeRequest>> {
+    try {
+      assertPositiveInputId(input.sourceProjectId);
+      assertPositiveInputId(input.targetProjectId);
+      assertSubmissionPath(input.targetProjectPath);
+      input.assigneeIds.forEach(assertPositiveInputId);
+      input.reviewerIds.forEach(assertPositiveInputId);
+      const response = await this.mutate(
+        "POST", "/api/v4/projects/" + String(input.sourceProjectId) + "/merge_requests", {
+          target_project_id: input.targetProjectId,
+          source_branch: input.sourceBranch,
+          target_branch: input.targetBranch,
+          title: input.title,
+          description: input.description,
+          squash: input.squash,
+          remove_source_branch: input.removeSourceBranch,
+          labels: input.labelNames.join(","),
+          assignee_ids: [...input.assigneeIds],
+          reviewer_ids: [...input.reviewerIds],
+        },
+      );
+      const value = validateResponse(response, (data) => {
+        const record = object(data, "submitted merge request");
+        positiveResponseId(record.id, "submitted merge request.id");
+        const iid = positiveResponseId(record.iid, "submitted merge request.iid");
+        const projectId = positiveResponseId(record.project_id, "submitted merge request.project_id");
+        const sourceProjectId = positiveResponseId(record.source_project_id, "submitted merge request.source_project_id");
+        const targetProjectId = positiveResponseId(record.target_project_id, "submitted merge request.target_project_id");
+        if (projectId !== input.targetProjectId || targetProjectId !== input.targetProjectId ||
+            sourceProjectId !== input.sourceProjectId ||
+            string(record.source_branch, "submitted merge request.source_branch") !== input.sourceBranch ||
+            string(record.target_branch, "submitted merge request.target_branch") !== input.targetBranch) {
+          throw apiError("submitted merge request", "project or branch identity mismatch");
+        }
+        return Object.freeze({
+          iid, sourceProjectId, targetProjectId,
+          webUrl: submissionWebUrl(record.web_url, this.origin, input.targetProjectPath, "merge_requests", iid),
+        });
+      });
+      return Object.freeze({ value, requestId: response.requestId });
+    } catch (error) {
+      throw submissionError(error);
+    }
   }
 
   async createMergeRequest(
