@@ -235,7 +235,7 @@ export const defaultReadOnlyRepository: ProductionReadOnlyRepositoryRuntime = Ob
 });
 
 function requestIssueIid(request: Request | null): number | null {
-  return request === null || request.workItem.relation === "none"
+  return request === null || (request.workItem.relation === "none" || request.workItem.relation === "new")
     ? null
     : request.workItem.iid;
 }

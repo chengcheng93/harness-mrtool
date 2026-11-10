@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {chmod,lstat,mkdtemp,readdir,realpath,rm} from 'node:fs/promises';
+import {chmod,lstat,mkdtemp,readFile,readdir,realpath,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {resolve} from 'node:path';
 import test from 'node:test';
@@ -13,6 +13,7 @@ async function cleanup(root:string){
  }await rm(root,{recursive:true,force:true});
 }
 test('default status authenticates its configured cache without claiming the cached binary is installed or executed',async(t)=>{
+ const currentVersion=JSON.parse(await readFile(new URL('../../package.json',import.meta.url),'utf8')).version;
  const root=await mkdtemp(resolve(await realpath(tmpdir()),'production-status-'));t.after(()=>cleanup(root));
  const stateDirectory=resolve(root,'selected');const f=await nativeReleaseFixture('darwin-arm64');
  const newer={...f.payload,components:{...f.payload.components,cli:{...f.payload.components.cli,version:'0.1.7',tag:'cli-v0.1.7'}},
@@ -30,7 +31,8 @@ test('default status authenticates its configured cache without claiming the cac
   assert.equal(code,0,stdout+stderr);const result=JSON.parse(stdout);
   assert.equal(result.data.releaseSetId,snapshot.record.releaseSetId);
   assert.equal(result.data.cliVersion,snapshot.record.cliVersion);
-  assert.equal(result.update.executedVersion,'0.1.7');
+  assert.equal(result.update.executedVersion,currentVersion);
+  assert.notEqual(result.update.executedVersion,result.data.cliVersion,'executed source version must remain distinct from the cached fixture');
   assert.equal(result.update.installedVersion,'unknown','signed cache data alone is not a native installation receipt');
   assert.equal(result.data.installationConfirmed,false);
   assert.equal(result.update.latestVersionConfirmed,false);assert.equal(requests,0);assert.equal(stderr,'');

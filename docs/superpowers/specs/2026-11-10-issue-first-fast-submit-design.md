@@ -1,6 +1,6 @@
 # Issue First Fast Submission Design
 
-日期：2026-11-10　版本：CLI / Plugin 0.1.10　状态：依据用户已确认方案实施
+日期：2026-11-10　版本：CLI / Plugin 0.1.10　状态：已实现并通过相关验证
 
 ## 1. 目标与边界
 
@@ -12,7 +12,7 @@
 
 - Request schema 1 增加 workItem: { relation: "new" }；省略 workItem 时规范化为 new。普通 wizard、Skill和首选样例使用 new。
 - 显式旧 closes / related / none 输入保留既有语义和旧事务，避免静默丢弃调用者指定的 Issue。旧 MR 的 update / verify / upsert / resume 继续可用。
-- new 不支持 upsert/resume；在任何远端写入前给明确 INPUT_ERROR。
+- new 不支持 upsert/resume/manual；在任何远端写入前给明确 INPUT_ERROR。默认 schema show / 新建 context 返回 CLI 扩展合同，历史 MR 入口仍返回原 Bundle Schema。
 - 快 MR 使用独立 submission marker，表示创建响应已收到，而非旧 final/verified receipt。旧 verify/update遇到这种 marker 明确报告模式不支持，不当作损坏的历史 MR；新 MR 分支后续普通 Git push 仍由 GitLab正常跟踪。
 - 不新增数据库、响应记录仓库、自动恢复 journal、远端模板选择或第二次 AI调用。旧 Template Bundle 1.2.0及历史 receipt 不改写。
 

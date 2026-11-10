@@ -359,6 +359,9 @@ harness-mrtool verify 123 --auth api --level merge --output json
 
 ### 7.6 仅在人类明确要求时使用手工交接
 
+手工输入使用 `examples/request.json` 的显式旧 workItem（closes/related/none），
+填入真实 iid 或无 Issue 理由。manual 不支持 new 或省略 workItem；自动新建 Issue 走 API create。
+
 该路径默认关闭，不作为 API 失败或缺少 Token 的后备方案。只有人类明确要求后，
 才用本地 Schema/Profile 填写 Request，执行：
 

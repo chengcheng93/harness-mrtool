@@ -35,8 +35,8 @@ export class RealGitLabelTransport implements GitLabHttpTransport {
     const path = decodeURIComponent(url.pathname);
     const body = request.body === null ? {} : JSON.parse(Buffer.from(request.body).toString("utf8")) as WireObject;
     this.requests.push({ method: request.method, url: request.url, path, body });
-    const respond = (value: unknown): GitLabHttpResponse => ({
-      status: 200, headers: { "x-request-id": `real-git-http-${++this.sequence}`, "x-next-page": "" },
+    const respond = (value: unknown, status = 200): GitLabHttpResponse => ({
+      status, headers: { "x-request-id": `real-git-http-${++this.sequence}`, "x-next-page": "" },
       body: Buffer.from(JSON.stringify(value)),
     });
     if (request.method === "GET") {
@@ -90,17 +90,26 @@ export class RealGitLabelTransport implements GitLabHttpTransport {
         } } } });
       }
     }
+    if (request.method === "POST" && path === "/api/v4/projects/7/issues") {
+      this.writes.push("issue:create");
+      return respond({ ...body, id: 555, iid: 51, project_id: 7,
+        web_url: `${this.project.webUrl}/-/issues/51` }, 201);
+    }
     if (request.method === "POST" && path === "/api/v4/projects/7/merge_requests") {
       this.writes.push("create");
       this.mr = { ...body, id: 888, project_id: 7, iid: 88, web_url: `${this.project.webUrl}/-/merge_requests/88`,
         source_project_id: 7, target_project_id: 7, sha: this.sourceSha, state: "opened",
         draft: String(body.title).startsWith("Draft:"),
-        author, assignees: [], reviewers: [], labels: [], detailed_merge_status: "mergeable",
+        author,
+        assignees: [author, reviewer].filter((user) => Array.isArray(body.assignee_ids) && body.assignee_ids.includes(user.id)),
+        reviewers: [author, reviewer].filter((user) => Array.isArray(body.reviewer_ids) && body.reviewer_ids.includes(user.id)),
+        labels: typeof body.labels === "string" ? this.labels.filter((label) => (body.labels as string).split(",").includes(label.name)) : [],
+        detailed_merge_status: "mergeable",
         should_remove_source_branch: body.remove_source_branch,
         head_pipeline: { sha: this.sourceSha, status: "success" },
       };
       assert.equal(body.source_branch, this.sourceBranch);
-      return respond(this.mr);
+      return respond(this.mr, 201);
     }
     if (request.method === "PUT" && path === "/api/v4/projects/7/merge_requests/88") {
       this.writes.push("update");

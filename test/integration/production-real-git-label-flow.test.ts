@@ -212,3 +212,67 @@ test(`${origin} real default Git create, update and stored verify preserve stage
   assert.deepEqual(await localState(), before);
 });
 }
+
+for (const workItem of ["new", "omitted"] as const) {
+  test(`real default Git ${workItem} workItem creates Issue then MR in two HTTP writes and preserves local work`, async (t) => {
+    const f = await setup(t);
+    if (workItem === "new") f.raw.workItem = { relation: "new" };
+    else delete f.raw.workItem;
+    await f.git.write("src/boundary.ts", "local staged work\n");
+    await f.git.git(["add", "src/boundary.ts"]);
+    await f.git.write("src/boundary.ts", "local unstaged work\n");
+    await f.git.write(".superpowers/progress.md", "untracked local report\n");
+    const localState = async () => ({
+      status: await f.git.git(["status", "--porcelain"]),
+      staged: await f.git.git(["diff", "--cached", "--binary"]),
+      unstaged: await f.git.git(["diff", "--binary"]),
+      report: await f.git.read(".superpowers/progress.md"),
+      head: await f.git.head(),
+      target: await f.git.targetHead(),
+      remoteRefs: await f.git.git(["--git-dir", f.git.remotePath, "show-ref"]),
+    });
+    const before = await localState();
+    await f.issue();
+    const requestStart = f.transport.requests.length;
+    const result = await f.run(["create"]);
+    assert.equal(result.code, 0, result.stdout + result.stderr);
+    const requests = f.transport.requests.slice(requestStart);
+    const issueIndex = requests.findIndex(({ method, path }) => method === "POST" && path.endsWith("/issues"));
+    assert.ok(issueIndex >= 0, "new submissions must create an Issue");
+    assert.deepEqual(requests.slice(issueIndex).map(({ method, path }) => [method, path]), [
+      ["POST", "/api/v4/projects/7/issues"], ["POST", "/api/v4/projects/7/merge_requests"],
+    ], "after the first write there must be no readback, PUT, GraphQL or extra POST");
+    assert.ok(requests.slice(0, issueIndex).every(({ method, path, body }) => method === "GET" ||
+      (method === "POST" && path === "/api/graphql" && /^query\s/u.test(String(body.query)))),
+    "requests before Issue creation must be read-only preflight");
+    assert.deepEqual(f.transport.writes, ["issue:create", "create"]);
+    const issue = requests[issueIndex]!.body;
+    const mr = requests[issueIndex + 1]!.body;
+    assert.equal(issue.issue_type, "issue");
+    assert.deepEqual(issue.assignee_ids, [42]);
+    assert.deepEqual(String(issue.labels).split(",").sort(), ["priority::p2", "type::bug"]);
+    assert.match(String(issue.description), new RegExp(`阶段日期：${String(issue.due_date)}`));
+    assert.match(String(issue.description), new RegExp(`计划日期：${String(issue.due_date)}`));
+    assert.equal(mr.source_branch, sourceBranch);
+    assert.equal(mr.target_branch, "main");
+    assert.equal(mr.target_project_id, 7);
+    assert.deepEqual(String(mr.labels).split(",").sort(), ["priority::p2", "status::review", "type::bug"]);
+    assert.deepEqual(mr.assignee_ids, [42]);
+    assert.deepEqual(mr.reviewer_ids, [43]);
+    assert.equal(mr.squash, f.raw.mergeRequest.squash);
+    assert.equal(mr.remove_source_branch, f.raw.mergeRequest.removeSourceBranch);
+    assert.match(String(mr.description), /Closes #51/u);
+    const marker = /<!-- harness-mrtool:submission:v1 ([A-Za-z0-9_-]+) -->/u.exec(String(mr.description));
+    assert.ok(marker);
+    const identity = JSON.parse(Buffer.from(marker[1]!, "base64url").toString("utf8"));
+    assert.equal(identity.sourceHeadSha, before.head);
+    assert.equal(identity.issueIid, 51);
+    assert.equal(identity.targetProjectPath, f.transport.project.fullPath);
+    assert.ok(f.commands.some((args) => args[0] === "cat-file" && args[1] === "blob"));
+    assert.ok(f.commands.some((args) => args[0] === "ls-remote"));
+    assert.equal(result.json.data.verification, "creation-response");
+    assert.equal(result.json.data.webUrl, `${f.transport.project.webUrl}/-/merge_requests/88`);
+    assert.equal(result.json.data.issue.webUrl, `${f.transport.project.webUrl}/-/issues/51`);
+    assert.deepEqual(await localState(), before);
+  });
+}

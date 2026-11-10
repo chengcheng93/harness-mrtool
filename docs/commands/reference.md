@@ -29,6 +29,10 @@ and run only when explicitly requested. `--auth auto` remains a compatibility
 selection of API without SSH fallback. Missing credentials or API errors stop
 the flow; they do not authorize automatic manual handoff.
 
+Manual input must use an explicit legacy workItem (closes/related/none), as in
+`examples/request.json`. Manual rejects new or omitted workItem; automatic Issue
+creation uses API create.
+
 Use `manual --auth ssh` only after an explicit human request for manual handoff;
 omitting `--auth ssh` does not enable this path. SSH mode rejects API-only
 commands. `manual --ssh-mr` is rejected with `LABEL_ERROR` before push planning or

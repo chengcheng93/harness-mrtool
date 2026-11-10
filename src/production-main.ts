@@ -438,6 +438,12 @@ function textCommandOutput(command: string, value: unknown): string {
         copied.command !== command) {
       throw new TypeError("Command output is invalid");
     }
+    if (command === "create" && copied.mode === "issue-first") {
+      if (typeof copied.webUrl !== "string" || copied.verification !== "creation-response") {
+        throw new TypeError("Submission output is invalid");
+      }
+      return `MR: ${copied.webUrl}\n`;
+    }
   }
   return `Command: ${command}\nStatus: completed\n`;
 }

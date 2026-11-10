@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import test from "node:test";
 import { setImmediate as nextEventLoopTurn } from "node:timers/promises";
 import packageMetadata from "../../package.json" with { type: "json" };
+import { RemoteMutationError } from "../../src/app/remote-outcome.ts";
 import { getContext } from "../../src/app/get-context.ts";
 import { DEFAULT_LABEL_POOL } from "../../src/app/label-defaults.ts";
 import { loadTemplateBundle } from "../../src/bundle/load.ts";
@@ -37,8 +38,8 @@ async function setup(t: test.TestContext) {
   const project = { id: "7", fullPath: "group/project", defaultBranch: "develop", webUrl: "https://gitlab.example.test/group/project" };
   const labels = DEFAULT_LABEL_POOL.map((name, index) => ({ restId: index + 1, globalId: `gid://gitlab/ProjectLabel/${index + 1}`, name,
     description: name, color: "#123456", archived: false, scopeKind: "project" as const, scopeId: "7", scopePath: project.fullPath }));
-  const state: { mr: GitLabMergeRequest | null; writes: string[]; drift: boolean; omitP2: boolean; wrongReadback: boolean; driftOnFind: boolean; driftAfterCreate: boolean; renameAfterFind: boolean; sourceMissing: boolean; sourceMissingOnFind: boolean; dirtyOnFind: boolean; driftAfterConsume: boolean; driftAfterLabels: boolean; duplicateAfterFields: boolean } = {
-    mr: null, writes: [], drift: false, omitP2: false, wrongReadback: false, driftOnFind: false, driftAfterCreate: false, renameAfterFind: false, sourceMissing: false, sourceMissingOnFind: false, dirtyOnFind: false, driftAfterConsume: false, driftAfterLabels: false, duplicateAfterFields: false,
+  const state: { mr: GitLabMergeRequest | null; writes: string[]; drift: boolean; omitP2: boolean; wrongReadback: boolean; driftOnFind: boolean; driftAfterCreate: boolean; renameAfterFind: boolean; sourceMissing: boolean; sourceMissingOnFind: boolean; dirtyOnFind: boolean; fastIssueReject: boolean; fastMrReject: boolean; fastStarted: boolean; driftAfterConsume: boolean; driftAfterLabels: boolean; duplicateAfterFields: boolean } = {
+    mr: null, writes: [], drift: false, omitP2: false, wrongReadback: false, driftOnFind: false, driftAfterCreate: false, renameAfterFind: false, sourceMissing: false, sourceMissingOnFind: false, dirtyOnFind: false, fastIssueReject: false, fastMrReject: false, fastStarted: false, driftAfterConsume: false, driftAfterLabels: false, duplicateAfterFields: false,
   };
   const calls = { mergeRequest: 0, mergeRequestReceipt: 0, inventory: 0, users: 0, review: 0, projects: 0, discover: 0, pushPlans: 0, diff: 0 };
   const guardConcurrency = { armed: false, rejectPush: false, diffSettled: false,
@@ -63,6 +64,21 @@ async function setup(t: test.TestContext) {
       if (state.dirtyOnFind) (repo.worktree as { clean: boolean }).clean = false;
       if (state.renameAfterFind) labels.find((label) => label.name === "priority::p2")!.name = "priority::p1";
       return receipt(state.mr === null ? [] : [structuredClone(state.mr)]);
+    },
+    createIssue: async (input: { projectId: number; assigneeIds: readonly number[]; dueDate: string }) => {
+      state.fastStarted = true; state.writes.push("issue.create");
+      assert.deepEqual(input.assigneeIds, [42]);
+      assert.match(input.dueDate, /^\d{4}-\d{2}-\d{2}$/u);
+      if (state.fastIssueReject) throw new RemoteMutationError("rejected", "validation");
+      return receipt({ id: 1001, iid: 41, projectId: 7, webUrl: project.webUrl + "/-/issues/41" });
+    },
+    createMergeRequestSubmission: async (input: GitLabCreateMergeRequestInput & { labelNames: readonly string[]; assigneeIds: readonly number[]; reviewerIds: readonly number[] }) => {
+      state.writes.push("merge-request.create");
+      if (state.fastMrReject) throw new RemoteMutationError("rejected", "validation");
+      assert.match(input.description, /Closes #41/u);
+      assert.equal(input.labelNames.length, 3);
+      assert.deepEqual(input.assigneeIds, [42]); assert.deepEqual(input.reviewerIds, [43]);
+      return receipt({ iid: 88, webUrl: project.webUrl + "/-/merge_requests/88", sourceProjectId: 7, targetProjectId: 7 });
     },
     createMergeRequest: async (_target: unknown, input: GitLabCreateMergeRequestInput) => {
       state.writes.push("create");
@@ -93,6 +109,13 @@ async function setup(t: test.TestContext) {
       return receipt(structuredClone(state.mr));
     },
   } as unknown as GitLabClient;
+  for (const method of ["getProject", "getBranchHead", "getCurrentUser", "listUsers", "labelInventory", "getReviewState", "getMergeRequest", "getMergeRequestReceipt", "listOpenMergeRequestReceipts"] as const) {
+    const port = client[method] as (...args: unknown[]) => Promise<unknown>;
+    (client as unknown as Record<string, unknown>)[method] = async (...args: unknown[]) => {
+      assert.equal(state.fastStarted, false, "fast submission must not read GitLab after its first POST: " + method);
+      return port(...args);
+    };
+  }
   const repo = { gitlabHost: "gitlab.example.test", sourceBranch: "feature/labels", sourceHeadSha: sourceSha, sourceProject: { host: "gitlab.example.test", path: project.fullPath },
     targetProject: { host: "gitlab.example.test", path: project.fullPath }, targetBranch: "develop", sourceRemote: "origin", sourceRemoteRef: "refs/heads/feature/labels",
     targetRemote: "origin", targetRef: "refs/remotes/origin/develop", targetRefSha: targetSha,
@@ -274,4 +297,48 @@ test("default write guard drains the concurrent diff read before reporting a rej
   assert.notEqual(result!.code, 0, result!.stdout);
   assert.match(result!.stdout, /CONCURRENT_UPDATE/);
   assert.deepEqual(f.state.writes.slice(before), []);
+});
+
+
+test("new default submission sends only Issue and MR POSTs without readback", async (t) => {
+ const f = await setup(t); await f.issue(); f.raw.workItem = { relation: "new" }; f.resetCalls();
+ const result = await f.run(["create"]); assert.equal(result.code, 0, result.stdout + result.stderr);
+ const out = JSON.parse(result.stdout); assert.equal(out.ok, true); assert.equal(out.data.verification, "creation-response");
+ assert.equal(out.data.webUrl, "https://gitlab.example.test/group/project/-/merge_requests/88");
+ assert.equal(out.data.issue.iid, 41); assert.deepEqual(f.state.writes, ["issue.create", "merge-request.create"]);
+ assert.equal(f.calls.mergeRequestReceipt, 0); assert.equal(f.calls.mergeRequest, 0);
+ t.diagnostic(JSON.stringify({ preWriteReads:f.calls }));
+ assert.equal(f.calls.inventory, 1, "new submit must not reload labels twice");
+ assert.equal(f.calls.users, 1, "new submit must not reload members twice");
+});
+test("fast submission stops on Issue rejection without sending MR", async (t) => {
+ const f = await setup(t); await f.issue(); f.raw.workItem = { relation: "new" }; f.state.fastIssueReject = true;
+ const result = await f.run(["create"]); assert.notEqual(result.code, 0); const out = JSON.parse(result.stdout);
+ assert.equal(out.ok, false); assert.deepEqual(f.state.writes, ["issue.create"]); assert.equal(out.remoteWrite.state, "not-written");
+});
+test("fast submission reports known Issue when MR fails and never retries", async (t) => {
+ const f = await setup(t); await f.issue(); f.raw.workItem = { relation: "new" }; f.state.fastMrReject = true;
+ const result = await f.run(["create"]); assert.equal(result.code, 6); const out = JSON.parse(result.stdout);
+ assert.equal(out.code, "PARTIAL_WRITE"); assert.equal(out.data.issue.iid, 41);
+ assert.equal(out.data.issue.webUrl, "https://gitlab.example.test/group/project/-/issues/41");
+ assert.deepEqual(f.state.writes, ["issue.create", "merge-request.create"]); assert.equal(out.remoteWrite.state, "written");
+});
+test("fast dry-run creates neither Issue nor MR", async (t) => {
+ const f = await setup(t); await f.issue(); f.raw.workItem = { relation: "new" };
+ const result = await f.run(["create", "--dry-run"]); assert.equal(result.code, 0, result.stdout); assert.deepEqual(f.state.writes, []);
+});
+
+for (const [name, args] of [["upsert", ["create", "--upsert"]], ["resume", ["create", "--resume", "88", "--resume-from", "original.json"]]] as const) {
+ test("new Issue mode rejects " + name + " before remote writes", async (t) => {
+  const f=await setup(t); await f.issue(); f.raw.workItem={relation:"new"};
+  const result=await f.run([...args]); assert.notEqual(result.code,0); assert.equal(JSON.parse(result.stdout).code,"INPUT_ERROR"); assert.deepEqual(f.state.writes,[]);
+ });
+}
+test("fast submission rejects candidate-consumption drift before Issue creation", async (t) => {
+ const f=await setup(t); await f.issue(); f.raw.workItem={relation:"new"}; f.state.driftAfterConsume=true;
+ const result=await f.run(["create"]); assert.notEqual(result.code,0); assert.equal(JSON.parse(result.stdout).code,"CONCURRENT_UPDATE"); assert.deepEqual(f.state.writes,[]);
+});
+test("fast submission requires the selected source SHA to be published before Issue creation", async (t) => {
+ const f=await setup(t); await f.issue(); f.raw.workItem={relation:"new"}; f.state.sourceMissing=true;
+ const result=await f.run(["create"]); assert.notEqual(result.code,0); assert.equal(JSON.parse(result.stdout).code,"REPOSITORY_ERROR"); assert.deepEqual(f.state.writes,[]);
 });

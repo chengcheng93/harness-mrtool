@@ -1,3 +1,4 @@
+import { createSubmission } from "../app/create-submission.ts";
 import { loadMrBundle } from "../app/load-mr-bundle.ts";
 import { resolveRequestCandidates } from "../app/resolve-candidates.ts";
 import { validateUpdateMigration, type UpdateMergeRequestMigration } from "../app/update-mr.ts";
@@ -71,6 +72,12 @@ export function createDefaultWriteServices(
     });
     const request = command.kind === "verify" ? null
       : normalizeAndValidateRequest(await readOnly.requestSource.read(invocation));
+    if (request?.workItem.relation === "new" && (command.kind !== "create" || command.upsert || command.resumeIid !== undefined)) {
+      throw new ToolError("INPUT_ERROR", "Issue-first submission supports a new create only", {
+        field: "workItem", expected: "new create without upsert or resume", actual: command.kind,
+        safeNextStep: "Use a fresh create for a new Issue; use an explicit legacy workItem only for historical MR operations.",
+      });
+    }
     let resume: Parameters<ReturnType<typeof createMergeRequestCommandAdapter>["create"]>[0]["resume"];
     if (command.kind === "create" && command.resumeIid !== undefined) {
       if (command.resumeFrom === undefined || readOnly.contextStore.loadRecoveryProof === undefined) {
@@ -99,7 +106,7 @@ export function createDefaultWriteServices(
       cliVersion: options.cliVersion, command: "context", currentBundle, cwd: options.cwd,
       invocation: contextInvocation, request,
       allowManualDescriptionDrift: command.kind === "update" && (command.forceReplaceDescription || command.migrateTemplate),
-      contextIssueIid: request === null ? options.contextIssueIid : request.workItem.relation === "none" ? null : request.workItem.iid,
+      contextIssueIid: request === null ? options.contextIssueIid : (request.workItem.relation === "none" || request.workItem.relation === "new") ? null : request.workItem.iid,
     });
     const confirmed = updateConfirmationsForProductionInvocation(invocation);
     if (confirmed !== null && canonicalizeJson(confirmed) !== canonicalizeJson(planned.updateConfirmations ?? null)) throw changed();
@@ -113,7 +120,7 @@ export function createDefaultWriteServices(
 
     let mutationStarted = false;
     // Re-discover immediately before writing, rather than trusting a captured SHA tuple.
-    async function fresh() {
+    async function fresh(refreshMetadata = true) {
       const git = planned.options.git;
       const url = new URL(planned.options.gitlabOrigin);
       const repo = await repository.discover({ cwd: options.cwd,
@@ -146,6 +153,8 @@ export function createDefaultWriteServices(
         // transaction writes are protected by the transaction's own readback checks.
         if (!mutationStarted && sha256Utf8(mr.description) !== confirmed.descriptionDigest) throw changed();
       }
+      // The fast path already read live metadata once; recheck Git without repeating inventory/member reads.
+      if (!refreshMetadata) return live;
       const value = await reader.read(planned.options);
       const current = validateExternalContextSnapshot(value.snapshot);
       planned.assertNoCredentialExposure(current);
@@ -202,6 +211,35 @@ export function createDefaultWriteServices(
         field: "pushPlan", expected: "the remote source branch at the selected source SHA", actual: planned.pushPlan.kind,
         safeNextStep: "Push the branch with the displayed ordinary Git push command, then refresh context and retry; API MR commands do not push implicitly.",
       });
+    }
+    if (command.kind === "create" && request?.workItem.relation === "new") {
+      const resolved = await resolveRequestCandidates({ request, expectedBinding: live.binding,
+        store: readOnly.contextStore, consume: true });
+      if (canonicalizeJson(resolved.snapshot) !== canonicalizeJson(snapshot)) throw changed();
+      const plan = buildWritePlan({ request, snapshot, resolvedCandidates: resolved.candidates,
+        bundle: planned.selection.bundle, labelDiff: planned.labelDiff,
+        labelOptions: labelOptionsForProductionInvocation(invocation) });
+      // One final Git preflight before either POST; metadata was read once above.
+      const current = await fresh(false);
+      if (canonicalizeJson(current.binding) !== canonicalizeJson(live.binding) ||
+          !candidatesMatch(validateExternalContextSnapshot(current.snapshot), resolved.candidates)) throw changed();
+      const result = await createSubmission({ request, snapshot, plan,
+        bundle: planned.selection.bundle, releaseTag: planned.selection.releaseTag,
+        cliVersion: options.cliVersion, sourceBranch: planned.options.git.sourceBranch,
+        targetBranch: planned.options.git.targetBranch, remote: planned.options.gitlab,
+        assertNoCredentialExposure: planned.assertNoCredentialExposure });
+      const output = {
+        context: { versions: { templateVersion: planned.selection.bundle.manifest.version,
+          bundleHash: planned.selection.bundleManifestHash, releaseSetId: currentBundle.releaseSetId,
+          inputSchema: planned.selection.bundle.manifest.inputSchema, policySchema: planned.selection.bundle.manifest.policySchema },
+          remoteWrite: { state: "written" as const, operations: [...result.operations] } },
+        output: { message: "Issue and merge request created from API responses",
+          data: copyJsonValue({ command: "create", mode: "issue-first", verification: result.verification,
+            iid: result.mergeRequest.iid, webUrl: result.mergeRequest.webUrl,
+            issue: result.issue, mergeRequest: result.mergeRequest }) as JsonObject },
+      };
+      planned.assertNoCredentialExposure(output);
+      return output;
     }
     const rawRemote = new GitLabMergeRequestRemote({
       gitlab: planned.options.gitlab,

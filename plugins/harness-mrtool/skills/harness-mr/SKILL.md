@@ -123,7 +123,8 @@ separate marker and do not support legacy update, verify, upsert, or resume.
 Do not use this section to recover a fast submission.
 
 For an existing historical MR, obtain `context --mr <iid>`, preserve its exact
-trusted Bundle/receipt, then update and verify:
+trusted Bundle/receipt and original explicit workItem (`closes`, `related`, or
+`none`), then update and verify. Do not reuse a new-Issue Request for updates:
 
 ```text
 harness-mrtool update <iid> --auth api --client codex-skill --client-version <skill-semver> --skill-protocol <protocol> --input - --input-format json --output json
@@ -177,6 +178,12 @@ harness-mrtool verify <iid> --auth api --level structure --client codex-skill --
 ```
 
 ## Explicitly requested SSH manual handoff
+
+Manual does not support `workItem: { "relation": "new" }` or an omitted
+workItem (which defaults to new). Use API create for automatic Issue creation.
+For manual handoff, start from `examples/request.json` and keep an explicit
+legacy workItem (`closes`, `related`, or `none`), with its real Issue IID or
+no-Issue reason. Do not reuse the default new-Issue submission sample.
 
 Manual mode is disabled by default. Use it only when the human explicitly requests
 an SSH manual handoff, with explicit `--auth ssh`:

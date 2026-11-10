@@ -330,3 +330,34 @@ test("manual SSH mode requires structured input before any wizard or GitLab acce
   assert.equal(output.ok, false);
   assert.equal(output.code, "INPUT_ERROR");
 });
+
+for (const omitted of [false, true]) {
+  test(`manual rejects ${omitted ? "omitted" : "new"} Issue mode before repository access`, async () => {
+    const bundle = await loadTemplateBundle(resolve(repositoryRoot, "template-bundle"));
+    const raw = JSON.parse(await readFile(resolve(repositoryRoot, "examples/submission.json"), "utf8"));
+    if (omitted) delete raw.workItem;
+    let touched = false;
+    const services = createManualCommandServices({
+      cliVersion: "0.1.10-test", cwd: repositoryRoot,
+      currentBundle: { bundle, bundleManifestHash: sha256Utf8(`${canonicalizeJson(bundle.manifest)}\n`),
+        releaseSetId: "release-set:test", releaseTag: "templates-v1.2.0" },
+      requestSource: { read: async () => raw },
+      repository: {
+        discover: async () => { touched = true; throw new Error("must not discover repository"); },
+        mergeBase: async () => { throw new Error("must not calculate merge base"); },
+        planPush: async () => { throw new Error("must not plan push"); },
+        executePush: async () => { throw new Error("must not execute push"); },
+      },
+    });
+    const chunks: string[] = [];
+    const result = await executeCliJson(["manual", "--auth", "ssh", "--input", "-", "--input-format", "json", "--output", "json"], {
+      cliVersion: "0.1.10-test", handlers: services,
+      stdout: { write(chunk, callback) { chunks.push(chunk); callback(); return true; } },
+    });
+    const output = JSON.parse(chunks[0]!);
+    assert.equal(result.exitCode, 2);
+    assert.equal(output.code, "INPUT_ERROR");
+    assert.match(JSON.stringify(output), /API create/u);
+    assert.equal(touched, false);
+  });
+}

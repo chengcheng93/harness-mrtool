@@ -173,7 +173,8 @@ export async function createSubmission(input: CreateSubmissionInputs): Promise<C
     const outcome = unknown ? "unknown" : rejected ? "rejected" : "not-attempted";
     const failure = new ToolError(code, unknown ? "Issue-first submission stopped with unknown remote state" : "Issue-first submission stopped", {
       field: failedOperation, expected: "successful creation responses for the Issue and merge request",
-      actual: outcome, safeNextStep: "Submission stopped; no automatic retry was performed. Inspect GitLab manually before deciding whether to create another submission.",
+      actual: outcome, safeNextStep: (issue === null ? "" : `Issue created: ${issue.webUrl}. `) +
+        "Submission stopped; no automatic retry was performed. Inspect GitLab manually before deciding whether to create another submission.",
     });
     const data: JsonObject = { command: "create", mode: "issue-first", failedOperation, issue: issue === null ? null : { ...issue }, outcome };
     failures.set(failure, { remoteWrite: { state, operations: [...operations] }, data });

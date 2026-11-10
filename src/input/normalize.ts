@@ -182,6 +182,7 @@ function normalizeRequestShape(value: JsonValue): JsonValue {
     defaultArray(motivation, field);
   }
 
+  if (!Object.hasOwn(root, "workItem")) root.workItem = { relation: "new" };
   const workItem = asObject(root.workItem);
   trimScalar(workItem, "relation");
 

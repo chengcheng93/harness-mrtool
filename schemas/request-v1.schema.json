@@ -12,7 +12,6 @@
     "title",
     "changes",
     "motivation",
-    "workItem",
     "impact",
     "verification",
     "documentation",
@@ -29,7 +28,7 @@
     "title": { "$ref": "#/definitions/title" },
     "changes": { "$ref": "#/definitions/changes" },
     "motivation": { "$ref": "#/definitions/motivation" },
-    "workItem": { "$ref": "#/definitions/workItem" },
+    "workItem": { "$ref": "#/definitions/workItem", "default": { "relation": "new" } },
     "impact": { "$ref": "#/definitions/impact" },
     "verification": { "$ref": "#/definitions/verification" },
     "documentation": { "$ref": "#/definitions/documentation" },
@@ -102,6 +101,12 @@
     },
     "workItem": {
       "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["relation"],
+          "properties": { "relation": { "const": "new" } }
+        },
         {
           "type": "object",
           "additionalProperties": false,

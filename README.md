@@ -295,13 +295,16 @@ hmr create --auth api --input /absolute/private/mr-input/request.json --priority
 ## 7. 仅限历史受管 MR：更新、历史模板和显式迁移
 
 本节不适用于快速创建 marker；默认新建 MR 不运行 update/verify。
+沿用该历史 MR 的原始显式 `workItem`（closes/related/none，以及实际 iid 或无 Issue 理由），
+只按更新 context 修改候选数据；不要直接复用默认 `workItem:new` 的输入文件。
+以下 `legacy-request.json` 指保留原关系的历史 Request。
 
 普通更新沿用 MR 的可信历史 Bundle；先取得 **update 专用 context**，更新 JSON 中的
 contextId/人员 token，然后直接更新并验证（不要拿 create 的 context 更新 MR）：
 
 ```sh
 hmr context --mr 88 --auth api --output json
-hmr update 88 --auth api --input /absolute/private/mr-input/request.json --output json
+hmr update 88 --auth api --input /absolute/private/mr-input/legacy-request.json --output json
 hmr verify 88 --auth api --level structure --output json
 ```
 
@@ -315,7 +318,7 @@ MR 执行一次 `update`，会按 `[type][module] 摘要` 重写标题并打上 
 
 ```sh
 hmr context --mr 88 --migrate-template --auth api --output json
-hmr update 88 --migrate-template --auth api --input /absolute/private/mr-input/request.json --output json
+hmr update 88 --migrate-template --auth api --input /absolute/private/mr-input/legacy-request.json --output json
 ```
 
 先更新 Request 中的迁移 contextId/人员 token。交互与非交互迁移都由程序校验
@@ -324,13 +327,16 @@ hmr update 88 --migrate-template --auth api --input /absolute/private/mr-input/r
 
 ## 8. 仅在人类明确要求时使用手工 SSH 交接
 
-默认不启用此路径。只有人类明确要求手工交接后，才准备符合 Schema 的 JSON 并执行
+默认不启用此路径。只有人类明确要求手工交接后，才从[历史/手工输入样例](examples/request.json)
+准备 JSON，显式保留 closes/related/none 及实际 iid 或无 Issue 理由。
+manual 不支持 `workItem:new`，省略 workItem 也会默认 new 而被拒绝；自动新建 Issue 应走 API create。
+以下 `legacy-request.json` 使用该显式旧模式，不能复用默认提交样例。执行
 `manual --auth ssh`；`manual` 省略认证选项时不会自动选择 SSH：
 
 ```sh
-hmr manual --auth ssh --input /absolute/private/mr-input/request.json --output json
+hmr manual --auth ssh --input /absolute/private/mr-input/legacy-request.json --output json
 # 审查生成的 title、description、targetBranch、sourceHeadSha、pushPlan 后再推送普通分支：
-hmr manual --auth ssh --input /absolute/private/mr-input/request.json --push --output json
+hmr manual --auth ssh --input /absolute/private/mr-input/legacy-request.json --push --output json
 ```
 
 输出供用户在 GitLab 网页创建 MR；它不是已验证的 MR。SSH handoff 不需要 API context

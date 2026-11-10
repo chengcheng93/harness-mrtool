@@ -1,3 +1,4 @@
+import { isSubmissionDescription } from "../render/submission.ts";
 import { canonicalizeJson, sha256CanonicalJson, sha256Utf8, type JsonValue } from "../contracts/jcs.ts";
 import { isToolError, ToolError } from "../contracts/errors.ts";
 import { validateTemplateBundle } from "../bundle/validate.ts";
@@ -211,6 +212,13 @@ export async function loadMrBundle(inputs: LoadMrBundleInputs): Promise<LoadedMr
     throw securityFailure("historical Bundle source is unavailable");
   }
 
+  if (isSubmissionDescription(current.description)) {
+    throw new ToolError("INPUT_ERROR", "Response-only submission does not use historical MR verification operations", {
+      field: "mergeRequest.mode", expected: "a historical final/receipt MR for this operation",
+      actual: "issue-first submission recorded from creation responses",
+      safeNextStep: "Inspect this submitted MR in GitLab. Legacy update, verify, upsert and resume do not apply to response-only submissions.",
+    });
+  }
   let marker: DiagnosticMarkerMetadata;
   try {
     marker = source.allowManualDescriptionDrift === true

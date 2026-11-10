@@ -507,8 +507,9 @@ export function deriveReviewStates(
     : snapshot.mergeRequest.reviewerUserIds.filter((id) => qualified.has(id)).length;
   // Informational only: reviewers are never required to open a merge request.
   const minimumReviewers = policy.readyMinimumReviewers;
-  if ((request.workItem.relation === "none" && snapshot.issue.kind !== "none") ||
-      (request.workItem.relation !== "none" &&
+  const linkedWorkItem = request.workItem.relation === "closes" || request.workItem.relation === "related";
+  if ((!linkedWorkItem && snapshot.issue.kind !== "none") ||
+      ((request.workItem.relation === "closes" || request.workItem.relation === "related") &&
         (snapshot.issue.kind !== "linked" || snapshot.issue.iid !== request.workItem.iid))) {
     throw renderError("work item Request and external Issue snapshot do not match");
   }
@@ -517,7 +518,7 @@ export function deriveReviewStates(
     ? { state: "checked", reason: null }
     : { state: "pending", reason: "The linked Issue snapshot is unavailable." };
   const existingMr = snapshot.mergeRequest.iid !== null && snapshot.mergeRequest.lifecycle !== "new";
-  const issueMetadataAvailable = request.workItem.relation === "none" ||
+  const issueMetadataAvailable = !linkedWorkItem ||
     (snapshot.issue.kind === "linked" && snapshot.issue.readStatus === "available");
   const metadataState: DerivedCheckboxState = !existingMr
     ? { state: "pending", reason: "Merge request metadata is unavailable before the merge request exists." }
@@ -722,6 +723,12 @@ function renderIssue(inputs: PreparedInputs, labels: readonly SnapshotLabel[]): 
   const mergeRequestLabels = labels.length === 0
     ? "None."
     : labels.map((label) => safeText(label.name)).join(", ");
+  if (inputs.request.workItem.relation === "new") {
+    if (inputs.snapshot.issue.kind !== "none") throw renderError("new Issue is not created during preview");
+    return { relationLines: "- Relation: New Issue (created automatically on submission)",
+      milestone: "Not assigned", assignees: "Current GitLab user", dueDate: "Submission date",
+      issueLabels: "Selected automatically", mergeRequestLabels };
+  }
   if (inputs.request.workItem.relation === "none") {
     if (inputs.snapshot.issue.kind !== "none") {
       throw renderError("work item Request and external Issue snapshot do not match");

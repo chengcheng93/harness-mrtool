@@ -99,6 +99,9 @@ Remove-Item Env:HARNESS_MRTOOL_GITLAB_HOST
 
 ## 仅在人类明确要求时使用手工 SSH 交接
 
+手工输入使用 `examples/request.json` 的显式旧 workItem（closes/related/none），
+填入真实 iid 或无 Issue 理由。manual 不支持 new 或省略 workItem；自动新建 Issue 走 API create。
+
 此路径默认关闭，不作为缺少 Token 或 API 失败时的后备方案。
 只有人类明确要求手工交接后，才使用本地 Schema/Profile 准备 Request：
 

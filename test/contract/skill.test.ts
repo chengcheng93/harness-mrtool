@@ -100,6 +100,9 @@ function assertApiDefaultInstructions(instructions: string): void {
   assert.match(normalized, /API credentials are missing or API requests fail, stop and explain/u);
   assert.match(normalized, /Never automatically fall back to manual/u);
   assert.match(normalized, /Manual mode is disabled by default/u);
+  const manual = instructions.slice(instructions.indexOf("## Explicitly requested SSH manual handoff"));
+  assert.match(manual.replace(/\s+/gu, " "), /Manual does not support.*workItem.*new/u);
+  assert.match(manual, /examples\/request\.json/u);
   assert.match(normalized, /only when the human explicitly requests/u);
   assert.match(normalized, /--ssh-mr`? is disabled/u);
   assert.match(normalized, /API mode may still use ordinary Git SSH transport/u);

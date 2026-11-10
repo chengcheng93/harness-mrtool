@@ -28,7 +28,7 @@ const catalog: WizardCatalog = {
     inventory: ["type::bug", "priority::p2", "status::review", "status::doing"].map((name, index) => ({ id: String(index + 1), name })),
   },
   contextId: "context:wizard-fixture",
-  issueIid: 51,
+  issueIid: null,
   targetBranch: "develop",
   profiles: [
     { id: "code", label: "Code" },
@@ -127,9 +127,11 @@ function consoleFixture(options: {
   readonly confirmationCalls?: string[];
   readonly relationIndex?: number;
   readonly workItemIid?: string;
+  readonly workItemPrompts?: string[];
 } = {}): WizardConsole {
   return {
     selectOne: async ({ id, choices }) => {
+      if (id.startsWith("workItem.")) options.workItemPrompts?.push(id);
       const selected: Readonly<Record<string, number>> = {
         "workItem.relation": options.relationIndex ?? 1,
         "impact.nature": 1,
@@ -155,6 +157,7 @@ function consoleFixture(options: {
       return indexes!;
     },
     text: async ({ id }) => {
+      if (id.startsWith("workItem.")) options.workItemPrompts?.push(id);
       const confirmation = options.confirmationValues?.[id];
       if (confirmation !== undefined) {
         options.confirmationCalls?.push(id);
@@ -176,6 +179,7 @@ test("TTY wizard derives candidate values only from enumerated choices and keeps
   let stdinReads = 0;
   let editorCalls = 0;
   const catalogIssueIids: Array<number | null | undefined> = [];
+  const workItemPrompts: string[] = [];
   const stdin: InputIo["stdin"] = {
     [Symbol.asyncIterator]() {
       stdinReads += 1;
@@ -206,7 +210,7 @@ test("TTY wizard derives candidate values only from enumerated choices and keeps
         return catalog;
       },
     },
-    console: consoleFixture(),
+    console: consoleFixture({ workItemPrompts }),
     editor,
   });
   const source = createProductionRequestSource({
@@ -223,8 +227,9 @@ test("TTY wizard derives candidate values only from enumerated choices and keeps
 
   assert.equal(stdinReads, 0);
   assert.equal(editorCalls, 1);
-  assert.deepEqual(catalogIssueIids, [51]);
-  assert.deepEqual(request.workItem, { relation: "related", iid: 51 });
+  assert.deepEqual(catalogIssueIids, [null]);
+  assert.deepEqual(request.workItem, { relation: "new" });
+  assert.deepEqual(workItemPrompts, []);
   assert.deepEqual(request.profileIds, ["code", "docs"]);
   assert.deepEqual(request.impact.areaIds, ["app"]);
   assert.deepEqual(request.verification.items.map((item) => item.id), [
@@ -241,7 +246,8 @@ test("TTY wizard derives candidate values only from enumerated choices and keeps
 });
 
 test("TTY create derives default labels and digest without routine confirmation, tokens, or legacy choices", async () => {
-  const baseConsole = consoleFixture();
+  const workItemPrompts: string[] = [];
+  const baseConsole = consoleFixture({ workItemPrompts });
   const prompts: string[] = [];
   const emptyDescriptionCatalog: WizardCatalog = {
     ...catalog,
@@ -269,9 +275,34 @@ test("TTY create derives default labels and digest without routine confirmation,
 
   assert.deepEqual(labels.names, ["type::bug", "priority::p2", "status::review"]);
   assert.equal(labels.diffDigest, labelDiffDigest(catalog.automaticLabels!.diff));
+  assert.deepEqual(request.workItem, { relation: "new" });
+  assert.deepEqual(workItemPrompts, []);
   assert.equal(prompts.some((prompt) => prompt.includes(secretTokens[0])), false);
   assert.deepEqual(request.mergeRequest.labelCandidateTokens, []);
 });
+
+for (const [relationIndex, relation] of [[1, "related"], [2, "closes"]] as const) {
+  test(`TTY explicit historical create preserves the selected ${relation} Issue`, async () => {
+    const catalogIssueIids: Array<number | null> = [];
+    const workItemPrompts: string[] = [];
+    const wizard = createInteractiveRequestWizard({
+      catalogSource: {
+        load: async ({ issueIid }) => {
+          catalogIssueIids.push(issueIid);
+          return { ...catalog, issueIid };
+        },
+      },
+      console: consoleFixture({ relationIndex, workItemPrompts }),
+      editor: { edit: async () => Buffer.from(JSON.stringify(longForm), "utf8") },
+    });
+    const request = await createProductionRequestSource({ stdinIsTerminal: () => true, wizard })
+      .read(parseCliInvocation(["create", "--upsert"]));
+
+    assert.deepEqual(request.workItem, { relation, iid: 51 });
+    assert.deepEqual(catalogIssueIids, [51]);
+    assert.deepEqual(workItemPrompts, ["workItem.relation", "workItem.iid"]);
+  });
+}
 
 for (const kind of ["accessor", "unknown-key"] as const) {
   test(`TTY catalog rejects ${kind} fields before invoking accessors or the editor`, async () => {
@@ -400,7 +431,7 @@ test("TTY wizard binds none to a null catalog issue and rejects catalog issue dr
   const request = await createProductionRequestSource({
     stdinIsTerminal: () => true,
     wizard: noneWizard,
-  }).read(parseCliInvocation(["preview"]));
+  }).read(parseCliInvocation(["create", "--upsert"]));
 
   assert.deepEqual(noneIssueIids, [null]);
   assert.deepEqual(request.workItem, {
@@ -421,7 +452,7 @@ test("TTY wizard binds none to a null catalog issue and rejects catalog issue dr
   });
   await assert.rejects(
     createProductionRequestSource({ stdinIsTerminal: () => true, wizard: driftedWizard })
-      .read(parseCliInvocation(["preview"])),
+      .read(parseCliInvocation(["create", "--upsert"])),
     (error: unknown) => isToolError(error, "INPUT_ERROR") &&
       error.message === "Interactive request input is invalid",
   );
@@ -455,7 +486,7 @@ test("TTY wizard rejects invalid work item IID syntax and range before catalog o
 
     await assert.rejects(
       createProductionRequestSource({ stdinIsTerminal: () => true, wizard })
-        .read(parseCliInvocation(["preview"])),
+        .read(parseCliInvocation(["create", "--upsert"])),
       (error: unknown) => isToolError(error, "INPUT_ERROR") &&
         error.message === "Interactive request input is invalid",
       workItemIid,
@@ -494,7 +525,7 @@ test("TTY update binds replacement and migration evidence without approval promp
   const calls: string[] = [];
   const invocation = parseCliInvocation(["update", "123", "--migrate-template", "--force-replace-description"]);
   const wizard = createInteractiveRequestWizard({
-    catalogSource: { load: async () => ({ ...catalog, confirmations }) },
+    catalogSource: { load: async () => ({ ...catalog, issueIid: 51, confirmations }) },
     console: { ...consoleFixture(), text: async input => { assert.doesNotMatch(input.id, /confirm|digest/u); calls.push(input.id); return consoleFixture().text(input); } },
     editor: { edit: async () => Buffer.from(JSON.stringify(longForm), "utf8") },
   });
@@ -509,7 +540,7 @@ test("TTY ordinary update binds verified context digests without asking the user
   const confirmations = { updateMarkerDigest: "1".repeat(64), descriptionDigest: "2".repeat(64) };
   let editorCalls = 0;
   const wizard = createInteractiveRequestWizard({
-    catalogSource: { load: async () => ({ ...catalog, confirmations }) },
+    catalogSource: { load: async () => ({ ...catalog, issueIid: 51, confirmations }) },
     console: consoleFixture(),
     editor: { edit: async () => {
       editorCalls += 1;

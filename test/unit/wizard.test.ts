@@ -29,9 +29,10 @@ const longForm = {
   profileFieldValues: [], review: { reviewerFocus: [], additionalNotes: [] },
 };
 
-function journey(options: { catalog?: WizardCatalog; args?: string[]; editorFails?: boolean; editorInvalid?: boolean } = {}) {
+function journey(options: { catalog?: WizardCatalog; args?: string[]; editorFails?: boolean; editorInvalid?: boolean; editorOmitsReason?: boolean } = {}) {
   const shown: Array<{ id: string; prompt: string }> = [];
   let editorCalls = 0;
+  let initialForm = "";
   let closes = 0;
   const console: WizardConsole = {
     selectOne: async (input) => { shown.push(input); return 0; },
@@ -43,14 +44,17 @@ function journey(options: { catalog?: WizardCatalog; args?: string[]; editorFail
   Object.freeze(invocation.options);
   const wizard = createInteractiveRequestWizard({
     catalogSource: { load: async () => options.catalog ?? catalog }, console,
-    editor: { edit: async () => {
+    editor: { edit: async ({ initialBytes }) => {
+      initialForm = Buffer.from(initialBytes).toString("utf8");
       editorCalls += 1;
       if (options.editorFails) throw new Error("editor failed");
-      return Buffer.from(JSON.stringify(options.editorInvalid ? { ...longForm, labelOptions: {} } : longForm));
+      const form = { ...longForm } as Record<string, unknown>;
+      if (options.editorOmitsReason) delete form.noIssueReason;
+      return Buffer.from(JSON.stringify(options.editorInvalid ? { ...form, labelOptions: {} } : form));
     } },
   });
   return { invocation, shown, wizard, read: () => createProductionRequestSource({ stdinIsTerminal: () => true, wizard }).read(invocation),
-    editorCalls: () => editorCalls, closes: () => closes };
+    editorCalls: () => editorCalls, closes: () => closes, initialForm: () => initialForm };
 }
 
 function assertNoApprovalPrompts(shown: readonly { id: string; prompt: string }[]): void {
@@ -61,6 +65,8 @@ test("wizard create derives bug/p2/review and merge defaults without approval pr
   const run = journey({ args: ["create", "--type", "feat"] });
   const request = await run.read();
   assert.equal(request.title.type, "fix");
+  assert.deepEqual(request.workItem, { relation: "new" });
+  assert.equal(run.shown.some(({ id }) => id.startsWith("workItem.")), false);
   assert.equal(Object.hasOwn(request, "intent"), false);
   assert.deepEqual(request.mergeRequest.labelCandidateTokens, []);
   assert.equal(request.mergeRequest.removeSourceBranch, true);
@@ -140,7 +146,7 @@ test("failed editor collection never publishes label decisions", async () => {
 
 test("numeric terminal journey gathers request data without type, hash, or yes/no approval", async () => {
   const answers: Array<[string, string]> = [
-    ["Select work item relation", "1"], ["Select request profiles", "1"],
+    ["Select request profiles", "1"],
     ["Enter title module", "boundary"], ["Enter title summary", "Add boundary handler"],
     ["Select impact areas", "1"], ["Select impact nature", "1"], ["Select verification items", "-"],
     ["Select documentation items", "-"], ["Select risk level", "1"], ["Select assignee", "1"], ["Select reviewers", "-"],
@@ -206,4 +212,11 @@ test("explicit priority escalation still requires request data before the wizard
   for (const args of [["create", "--priority", "p1"], ["create", "--priority", "p0", "--priority-reason", "  "]]) {
     assert.throws(() => journey({ args }), error => isToolError(error, "INPUT_ERROR"));
   }
+});
+
+test("new Issue wizard omits the irrelevant no-Issue reason from its editor", async () => {
+  const run = journey({ args: ["create"], editorOmitsReason: true });
+  const request = await run.read();
+  assert.deepEqual(request.workItem, { relation: "new" });
+  assert.equal(run.initialForm().includes("noIssueReason"), false);
 });

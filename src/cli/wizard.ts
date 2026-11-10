@@ -160,6 +160,7 @@ function scalar(value: unknown): value is string {
 function exactObject(
   value: unknown,
   keys: readonly string[],
+  optional: readonly string[] = [],
 ): Record<string, unknown> {
   if (
     value === null || typeof value !== "object" || Array.isArray(value) ||
@@ -171,7 +172,8 @@ function exactObject(
   const descriptors = Object.getOwnPropertyDescriptors(value);
   const actual = Object.keys(descriptors);
   if (
-    actual.length !== keys.length || keys.some((key) => !actual.includes(key)) ||
+    keys.some((key) => !actual.includes(key)) ||
+    actual.some((key) => !keys.includes(key) && !optional.includes(key)) ||
     Object.values(descriptors).some((descriptor) => !descriptor.enumerable || "get" in descriptor || "set" in descriptor)
   ) {
     throw wizardError("long-form document fields do not match the wizard contract");
@@ -412,11 +414,11 @@ async function chooseMany<T>(
   return indexes.map((index) => values[index]!);
 }
 
-function emptyLongForm(selectedVerificationCount: number, selectedProfileFieldCount: number): JsonObject {
+function emptyLongForm(selectedVerificationCount: number, selectedProfileFieldCount: number, includeNoIssueReason: boolean): JsonObject {
   return {
     changes: { summary: [], technicalChanges: [], outOfScope: [] },
     motivation: { background: [], whyNeeded: [] },
-    noIssueReason: null,
+    ...(includeNoIssueReason ? { noIssueReason: null } : {}),
     impact: { details: [] },
     verification: {
       items: Array.from({ length: selectedVerificationCount }, () => ({
@@ -453,13 +455,13 @@ function parseLongForm(bytes: Uint8Array, format: InputFormat = "yaml"): ParsedL
     throw wizardError("editor output is not a bounded byte sequence");
   }
   const root = exactObject(decodeInputBytes(bytes, format), [
-    "changes", "motivation", "noIssueReason", "impact", "verification",
+    "changes", "motivation", "impact", "verification",
     "documentation", "risk", "profileFieldValues", "review",
-  ]);
+  ], ["noIssueReason"]);
   return {
     changes: exactObject(root.changes, ["summary", "technicalChanges", "outOfScope"]),
     motivation: exactObject(root.motivation, ["background", "whyNeeded"]),
-    noIssueReason: root.noIssueReason,
+    noIssueReason: root.noIssueReason ?? null,
     impact: exactObject(root.impact, ["details"]),
     verification: exactObject(root.verification, ["items", "acceptanceEvidence", "knownGaps"]),
     documentation: exactObject(root.documentation, ["details"]),
@@ -524,7 +526,7 @@ async function explicitOrSelectedProfiles(
 }
 
 interface WorkItemSelection {
-  readonly relation: "none" | "related" | "closes";
+  readonly relation: "new" | "none" | "related" | "closes";
   readonly iid: number | null;
 }
 
@@ -649,13 +651,14 @@ async function collectRequest(
   const squash = true;
   const selectedProfileFields = catalog.profileFields.filter((field) => profileIds.includes(field.profileId));
   const initial = Buffer.from(stringifyYaml(
-    emptyLongForm(selectedVerification.length, selectedProfileFields.length),
+    emptyLongForm(selectedVerification.length, selectedProfileFields.length, workItemSelection.relation === "none"),
     { lineWidth: 0 },
   ), "utf8");
   const parsed = parseLongForm(await editor.edit({ initialBytes: initial }));
-  const workItem = workItemSelection.relation === "none"
-    ? { relation: workItemSelection.relation, noIssueReason: parsed.noIssueReason }
-    : { relation: workItemSelection.relation, iid: workItemSelection.iid };
+  const workItem = workItemSelection.relation === "new" ? { relation: "new" }
+    : workItemSelection.relation === "none"
+      ? { relation: workItemSelection.relation, noIssueReason: parsed.noIssueReason }
+      : { relation: workItemSelection.relation, iid: workItemSelection.iid };
   const request = {
     schemaVersion: 1,
     contextId: catalog.contextId,
@@ -715,7 +718,10 @@ export function createInteractiveRequestWizard(
       recordWizardUpdateConfirmations(invocation, null);
       let collected: CollectedRequest;
       try {
-        const workItem = await collectWorkItem(console);
+        const newSubmission = invocation.command.kind === "preview" ||
+          (invocation.command.kind === "create" && !invocation.command.upsert && invocation.command.resumeIid === undefined);
+        const workItem: WorkItemSelection = newSubmission
+          ? { relation: "new", iid: null } : await collectWorkItem(console);
         collected = await collectRequest(
           invocation,
           await callWizardPort("catalog", async () =>

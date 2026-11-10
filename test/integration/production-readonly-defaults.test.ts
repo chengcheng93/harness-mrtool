@@ -4,7 +4,9 @@ import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import test from "node:test";
+import { Ajv } from "ajv";
 
+import { createReadOnlyCommandServices } from "../../src/cli/commands/readonly.ts";
 import type { LoadedMrBundle } from "../../src/app/load-mr-bundle.ts";
 import { loadTemplateBundle } from "../../src/bundle/load.ts";
 import { validateTemplateBundle } from "../../src/bundle/validate.ts";
@@ -57,14 +59,14 @@ async function currentSelection(): Promise<TrustedBundleSelection> {
   };
 }
 
-async function linkedRequest() {
+async function linkedRequest(relation: "new" | "related" = "related") {
   const raw = JSON.parse(await readFile(
     resolve(repositoryRoot, "test/golden/fixtures/code-docs-request.json"),
     "utf8",
   )) as Record<string, unknown>;
   return normalizeAndValidateRequest({
     ...raw,
-    workItem: { relation: "related", iid: 37 },
+    workItem: relation === "new" ? { relation: "new" } : { relation: "related", iid: 37 },
   });
 }
 
@@ -102,7 +104,7 @@ test("default production request source returns one normalized immutable Request
 });
 
 test("default production request source starts one TTY wizard without pre-reading stdin", async () => {
-  const [currentBundle, expected] = await Promise.all([currentSelection(), linkedRequest()]);
+  const [currentBundle, expected] = await Promise.all([currentSelection(), linkedRequest("new")]);
   let wizardCalls = 0;
   let ioCalls = 0;
   const defaults = createProductionReadOnlyDefaults({
@@ -140,9 +142,10 @@ test("default production request source starts one TTY wizard without pre-readin
   assert.equal(ioCalls, 0);
 });
 
-test("default TTY wizard issues one context through the same readonly planner with the selected issue", async () => {
-  const [currentBundle, expected] = await Promise.all([currentSelection(), linkedRequest()]);
+test("default TTY wizard issues one context through the same readonly planner without looking up an Issue", async () => {
+  const [currentBundle, expected] = await Promise.all([currentSelection(), linkedRequest("new")]);
   const repositoryCalls: string[] = [];
+  let issueLookups = 0;
   const sessionFixture = fixtureSession({
     getBranchHead: async () => targetSha,
     listUsers: async () => [
@@ -161,13 +164,10 @@ test("default TTY wizard issues one context through the same readonly planner wi
         accessLevel: 40,
       },
     ],
-    getIssue: async (_project: string, iid: number) => ({
-      iid,
-      milestone: null,
-      assignees: [],
-      dueDate: null,
-      labels: [],
-    }),
+    getIssue: async () => {
+      issueLookups += 1;
+      throw new Error("default wizard must not look up an existing Issue");
+    },
   });
   let issueCalls = 0;
   let issuedInput: IssueContextInput | undefined;
@@ -190,7 +190,6 @@ test("default TTY wizard issues one context through the same readonly planner wi
     resolve: async (): Promise<never> => { throw new Error("resolve must remain lazy"); },
   };
   const selected: Readonly<Record<string, number>> = {
-    "workItem.relation": 1,
     "labels.priority": 2,
     "impact.nature": 1,
     "risk.level": 1,
@@ -217,13 +216,18 @@ test("default TTY wizard issues one context through the same readonly planner wi
     targetSessionResolver: { resolve: async () => sessionFixture.session },
     stdinIsTerminal: () => true,
     wizardConsole: {
-      selectOne: async ({ id }) => selected[id]!,
+      selectOne: async ({ id }) => {
+        assert.equal(id.startsWith("workItem."), false);
+        return selected[id]!;
+      },
       selectMany: async ({ id }) => selectedMany[id]!,
-      text: async ({ id }) => ({
-        "workItem.iid": "37",
-        "title.module": expected.title.module,
-        "title.titleSummary": expected.title.titleSummary,
-      } as const)[id]!,
+      text: async ({ id }) => {
+        assert.equal(id.startsWith("workItem."), false);
+        return ({
+          "title.module": expected.title.module,
+          "title.titleSummary": expected.title.titleSummary,
+        } as const)[id]!;
+      },
     },
     wizardEditor: {
       edit: async () => {
@@ -263,8 +267,9 @@ test("default TTY wizard issues one context through the same readonly planner wi
 
   assert.equal(issueCalls, 1);
   assert.equal(editorCalls, 1);
-  assert.equal((issuedInput?.snapshot as { readonly issue?: { readonly iid?: number } }).issue?.iid, 37);
-  assert.deepEqual((request as typeof expected).workItem, { relation: "related", iid: 37 });
+  assert.deepEqual((issuedInput?.snapshot as { readonly issue?: unknown }).issue, { kind: "none" });
+  assert.equal(issueLookups, 0);
+  assert.deepEqual((request as typeof expected).workItem, { relation: "new" });
   assert.deepEqual(repositoryCalls.map((entry) => entry.split(":", 1)[0]), [
     "discover",
     "change-set",
@@ -760,6 +765,59 @@ test("default planner fails closed when an injected target session lacks credent
     contextIssueIid: null,
   }), (error: unknown) => isToolError(error, "INTERNAL_ERROR"));
   assert.deepEqual(repositoryCalls, []);
+});
+
+test("context publishes the new-Issue schema while historical MR context keeps its Bundle schema", async () => {
+  const currentBundle = await currentSelection();
+  const historical = await historicalBundle(currentBundle);
+  const request = normalizeAndValidateRequest({ ...await linkedRequest(), workItem: { relation: "new" } });
+  const sessionFixture = fixtureSession({
+    getBranchHead: async () => targetSha,
+    getReviewState: async () => ({ approvedUserIds: [], unresolvedDiscussions: 0 }),
+  });
+  const contextStore = {
+    issue: async (input: IssueContextInput): Promise<IssuedContext> => ({
+      contextId: `hmrx1_${"x".repeat(43)}`,
+      createdAtMs: 1_000,
+      expiresAtMs: 1_001,
+      externalSnapshotDigest: sha256CanonicalJson(input.snapshot),
+      candidates: input.candidates.map((metadata, index) => ({
+        kind: metadata.kind,
+        token: `hmrc1_${String(index).padStart(43, "0")}`,
+        metadata,
+      })),
+    }),
+    resolve: async (): Promise<never> => { throw new Error("resolve must remain lazy"); },
+  };
+  const defaults = createProductionReadOnlyDefaults({
+    cliVersion: "0.1.0-test",
+    cwd: "C:\\fixture",
+    currentBundle,
+    contextIssueIid: null,
+    contextStore,
+    targetSessionResolver: { resolve: async () => sessionFixture.session },
+    repository: repositoryPort([]),
+    historicalMrBundleLoader: { loadVerifiedExact: async () => historical },
+  });
+  const services = createReadOnlyCommandServices({
+    cliVersion: "0.1.0-test", currentBundle, cwd: "C:\\fixture", ...defaults,
+  });
+  const created = await services.context!(parseCliInvocation(["context", "--output", "json"]));
+  assert.ok(created.output?.data);
+  const schema = created.output.data.inputSchema;
+  const validate = new Ajv({ allErrors: true, strict: true }).compile(schema as object);
+  assert.equal(validate(request), true, JSON.stringify(validate.errors));
+  const { workItem: omitted, ...withoutWorkItem } = request;
+  assert.deepEqual(omitted, { relation: "new" });
+  assert.equal(validate(withoutWorkItem), true, JSON.stringify(validate.errors));
+
+  const existing = await services.context!(parseCliInvocation(["context", "--mr", "88", "--output", "json"]));
+  assert.ok(existing.output?.data);
+  assert.deepEqual(existing.output.data.inputSchema, historical.bundle.schema);
+  const validateHistorical = new Ajv({ allErrors: true, strict: true })
+    .compile(existing.output.data.inputSchema as object);
+  assert.equal(validateHistorical(request), false, "historical Bundle does not acquire new-Issue mode");
+  assert.equal(validateHistorical(withoutWorkItem), false, "historical workItem remains required");
 });
 
 test("context MR uses only the injected exact historical loader and migration records both Bundles", async () => {

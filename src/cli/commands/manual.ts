@@ -202,7 +202,7 @@ function manualSnapshot(
   labels: readonly SnapshotLabel[],
   mergeBaseSha: string,
 ): ExternalContextSnapshot {
-  const issue = request.workItem.relation === "none"
+  const issue = (request.workItem.relation === "none" || request.workItem.relation === "new")
     ? { kind: "none" as const }
     : { kind: "linked" as const, iid: request.workItem.iid, readStatus: "unavailable" as const };
   return Object.freeze({
@@ -346,7 +346,7 @@ export function createManualCommandServices(
           "LABEL_ERROR",
           "SSH-only MR creation cannot enforce and verify mandatory labels",
           "labels",
-          "API creation with fixed-pool selection and label readback",
+          "API creation with fixed-pool labels in the initial MR POST",
           "SSH push options have no verified label inventory/readback",
           "Use the API create flow; manual remains a local handoff and cannot create an unlabeled MR.",
         );
@@ -373,6 +373,11 @@ export function createManualCommandServices(
       }
       const selection = verifySelection(dependencies.currentBundle);
       const request = manualRequest(await dependencies.requestSource.read(invocation));
+      if (request.workItem.relation === "new") {
+        throw manualError("INPUT_ERROR", "Automatic Issue creation requires API create",
+          "workItem", "explicit legacy closes, related, or none in manual mode", "new",
+          "Use API create for a new Issue and linked MR; use an explicit legacy workItem for manual handoff.");
+      }
       const repository = await repositoryRuntime.discover({
         cwd: dependencies.cwd,
         targetBranch: request.targetBranch,

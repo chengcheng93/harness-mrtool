@@ -758,7 +758,7 @@ test("normalizes only declared semantic empties and preserves prose whitespace a
   assert.equal(normalized.verification.items[0]?.command, null);
   assert.equal(normalized.verification.items[0]?.result, "  result passed  ");
 
-  for (const requiredField of ["targetBranch", "workItem", "risk", "mergeRequest"]) {
+  for (const requiredField of ["targetBranch", "risk", "mergeRequest"]) {
     const missing = validRequest();
     delete missing[requiredField];
     assertInvalidRequest(missing);

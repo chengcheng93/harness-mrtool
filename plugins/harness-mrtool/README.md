@@ -113,6 +113,10 @@ MR diffs and pushes use committed `HEAD` only. Staged, unstaged, and untracked
 files, including `.superpowers` reports, may remain in the worktree. The tool
 does not automatically add, stash, clean, or delete them.
 
+Manual input must use an explicit legacy workItem (closes/related/none), as in
+`examples/request.json`. Manual rejects new or omitted workItem; automatic Issue
+creation uses API create.
+
 Use `manual --auth ssh` only after an explicit human request for manual handoff:
 
 ```text

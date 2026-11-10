@@ -47,6 +47,7 @@ export type VerificationItem =
     });
 
 export type WorkItem =
+  | { readonly relation: "new" }
   | { readonly relation: "closes" | "related"; readonly iid: number }
   | { readonly relation: "none"; readonly noIssueReason: string };
 

@@ -1,3 +1,4 @@
+import { getSubmissionFailure } from "../app/create-submission.ts";
 import {
   createFailureOutput,
   createSuccessOutput,
@@ -126,6 +127,8 @@ function transactionData(error: unknown): {
   readonly failureReceipt?: NonNullable<ReturnType<typeof getTransactionFailureReceipt>>;
   readonly data?: JsonObject;
 } {
+  const submission = getSubmissionFailure(error);
+  if (submission !== null) return { remoteWrite: submission.remoteWrite, data: submission.data };
   const transaction = getTransactionAudit(error);
   const failureReceipt = getTransactionFailureReceipt(error);
   if (transaction === null && failureReceipt === null) return {};

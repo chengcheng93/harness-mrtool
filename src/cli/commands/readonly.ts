@@ -1,3 +1,4 @@
+import requestSchema from "../../../schemas/request-v1.schema.json" with { type: "json" };
 import { labelOptionsForProductionInvocation } from "../production-invocation.ts";
 import type { CanonicalLabelChangeSet } from "../../git/change-set.ts";
 import { selectMandatoryLabels } from "../../app/mandatory-labels.ts";
@@ -270,7 +271,7 @@ function positiveIid(value: unknown): value is number {
 }
 
 function requestIssueIid(request: Request | null): number | null {
-  if (request === null || request.workItem.relation === "none") return null;
+  if (request === null || (request.workItem.relation === "none" || request.workItem.relation === "new")) return null;
   return request.workItem.iid;
 }
 
@@ -1172,7 +1173,8 @@ function contextExecution(
         expiresAtMs: discovered.expiresAtMs,
         releaseTag: prepared.selection.releaseTag,
         bundleId: prepared.selection.bundle.manifest.bundleId,
-        inputSchema: copyJsonValue(prepared.selection.bundle.schema),
+        inputSchema: copyJsonValue(discovered.snapshot.mergeRequest.iid === null
+          ? requestSchema : prepared.selection.bundle.schema),
         profiles: profiles(prepared.selection),
         ...planData(prepared),
         binding: copyJsonValue(discovered.binding as unknown as JsonObject),

@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { resolve } from "node:path";
+import { readFile } from "node:fs/promises";
+import { Ajv } from "ajv";
 import test from "node:test";
 
 import { loadTemplateBundle } from "../../src/bundle/load.ts";
@@ -199,4 +201,19 @@ test("local handlers revalidate a supplied Bundle before exposing it", async () 
   );
   assert.equal(result.exitCode, 2);
   assert.equal(result.output.code, "TEMPLATE_ERROR");
+});
+
+test("default schema accepts new and omitted Issue modes without changing the Bundle", async () => {
+  const bundle = await loadTemplateBundle(bundleDirectory);
+  const original = copyJsonValue(bundle.schema);
+  const result = await run(["schema", "show", "--output", "json"],
+    createLocalCommandHandlers({ cliVersion: "0.1.10-test", current: selection(bundle) }));
+  assert.equal(result.exitCode, 0);
+  const schema = (result.output.data as Record<string, unknown>).schema;
+  const validate = new Ajv({ allErrors: true, strict: true }).compile(schema as object);
+  const raw = JSON.parse(await readFile(resolve(repositoryRoot, "examples/submission.json"), "utf8"));
+  assert.equal(validate(raw), true, JSON.stringify(validate.errors));
+  delete raw.workItem;
+  assert.equal(validate(raw), true, JSON.stringify(validate.errors));
+  assert.deepEqual(bundle.schema, original);
 });

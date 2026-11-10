@@ -1,3 +1,4 @@
+import requestSchema from "../../../schemas/request-v1.schema.json" with { type: "json" };
 import type { LoadedTemplateBundle } from "../../bundle/load.ts";
 import { validateTemplateBundle } from "../../bundle/validate.ts";
 import { isToolError, ToolError } from "../../contracts/errors.ts";
@@ -142,7 +143,7 @@ export function createLocalCommandHandlers(
       }
       return bundleData("schema.show", selected, {
         fromMrIid,
-        schema: copyJsonValue(selected.bundle.schema),
+        schema: copyJsonValue(fromMrIid === null ? requestSchema : selected.bundle.schema),
       });
     },
     "template.show": () => {

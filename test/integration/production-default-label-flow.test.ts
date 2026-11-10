@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { RemoteMutationError } from "../../src/app/remote-outcome.ts";
 import { mkdtemp, readFile, rm, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
@@ -12,7 +13,7 @@ import { parseCliInvocation } from "../../src/cli/program.ts";
 import { canonicalizeJson, sha256Utf8 } from "../../src/contracts/jcs.ts";
 import { CandidateContextStore } from "../../src/context/store.ts";
 import type { GitLabClient } from "../../src/gitlab/client.ts";
-import type { GitLabMergeRequest, GitLabUpdateMergeRequestInput, GitLabCreateMergeRequestInput } from "../../src/gitlab/types.ts";
+import type { GitLabMergeRequest, GitLabUpdateMergeRequestInput, GitLabCreateMergeRequestInput, GitLabCreateIssueInput, GitLabCreateMergeRequestSubmissionInput } from "../../src/gitlab/types.ts";
 import type { RepositorySnapshot } from "../../src/git/repository.ts";
 import { runProductionMain } from "../../src/production-main.ts";
 
@@ -30,8 +31,8 @@ async function setup(t: test.TestContext) {
   const project = { id: "7", fullPath: "group/project", defaultBranch: "develop", webUrl: "https://gitlab.example.test/group/project" };
   const labels = DEFAULT_LABEL_POOL.map((name, index) => ({ restId: index + 1, globalId: `gid://gitlab/ProjectLabel/${index + 1}`, name,
     description: name, color: "#123456", archived: false, scopeKind: "project" as const, scopeId: "7", scopePath: project.fullPath }));
-  const state: { mr: GitLabMergeRequest | null; writes: string[]; drift: boolean; omitP2: boolean; wrongReadback: boolean; driftOnFind: boolean; driftAfterCreate: boolean; renameAfterFind: boolean; sourceMissing: boolean; sourceMissingOnFind: boolean; dirtyOnFind: boolean } = {
-    mr: null, writes: [], drift: false, omitP2: false, wrongReadback: false, driftOnFind: false, driftAfterCreate: false, renameAfterFind: false, sourceMissing: false, sourceMissingOnFind: false, dirtyOnFind: false,
+  const state: { mr: GitLabMergeRequest | null; writes: string[]; drift: boolean; omitP2: boolean; wrongReadback: boolean; driftOnFind: boolean; driftAfterCreate: boolean; renameAfterFind: boolean; sourceMissing: boolean; sourceMissingOnFind: boolean; dirtyOnFind: boolean; fastMrReject: boolean } = {
+    mr: null, writes: [], drift: false, omitP2: false, wrongReadback: false, driftOnFind: false, driftAfterCreate: false, renameAfterFind: false, sourceMissing: false, sourceMissingOnFind: false, dirtyOnFind: false, fastMrReject: false,
   };
   let receiptSequence = 0;
   const receipt = <T>(value: T) => ({ value, requestId: `request-${++receiptSequence}` });
@@ -39,6 +40,9 @@ async function setup(t: test.TestContext) {
     const label = labels.find((value) => value.globalId === id)!;
     return { restId: label.restId, name: label.name, archived: false };
   });
+  const makeMr = (input: GitLabCreateMergeRequestInput): GitLabMergeRequest => ({ iid: 88, webUrl: `${project.webUrl}/-/merge_requests/88`, title: input.title, description: input.description,
+        draft: input.title.startsWith("Draft:"), state: "opened", sourceProjectId: "7", sourceBranch: "feature/labels", targetProjectId: "7", targetBranch: "develop",
+        sha: sourceSha, author: user, assignees: [], reviewers: [], labels: [], squash: true, shouldRemoveSourceBranch: true, pipelineStatus: "passed" });
   const client = {
     origin: "https://gitlab.example.test", audit: () => ({ requestIds: ["request-test"] }),
     getProject: async () => project, getBranchHead: async () => targetSha,
@@ -54,11 +58,24 @@ async function setup(t: test.TestContext) {
       if (state.renameAfterFind) labels.find((label) => label.name === "priority::p2")!.name = "priority::p1";
       return receipt(state.mr === null ? [] : [structuredClone(state.mr)]);
     },
+    createIssue: async (input: GitLabCreateIssueInput) => {
+      state.writes.push("issue.create");
+      assert.deepEqual(input.assigneeIds, [42]);
+      return receipt({ id: 100, iid: 41, projectId: 7, webUrl: project.webUrl + "/-/issues/41" });
+    },
+    createMergeRequestSubmission: async (input: GitLabCreateMergeRequestSubmissionInput) => {
+      state.writes.push("merge-request.create");
+      if (state.fastMrReject) throw new RemoteMutationError("rejected", "validation");
+      assert.match(input.description, /Closes #41/u);
+      state.mr = { ...makeMr(input), labels: labels.filter((label) => input.labelNames.includes(label.name))
+        .map((label) => ({ restId: label.restId, name: label.name, archived: false })),
+        assignees: input.assigneeIds.map((id) => id === 42 ? user : reviewer),
+        reviewers: input.reviewerIds.map((id) => id === 42 ? user : reviewer) };
+      return receipt({ iid: 88, webUrl: state.mr.webUrl, sourceProjectId: 7, targetProjectId: 7 });
+    },
     createMergeRequest: async (_target: unknown, input: GitLabCreateMergeRequestInput) => {
       state.writes.push("create");
-      state.mr = { iid: 88, webUrl: `${project.webUrl}/-/merge_requests/88`, title: input.title, description: input.description,
-        draft: input.title.startsWith("Draft:"), state: "opened", sourceProjectId: "7", sourceBranch: "feature/labels", targetProjectId: "7", targetBranch: "develop",
-        sha: sourceSha, author: user, assignees: [], reviewers: [], labels: [], squash: true, shouldRemoveSourceBranch: true, pipelineStatus: "passed" };
+      state.mr = makeMr(input);
       if (state.driftAfterCreate) state.drift = true;
       return receipt({ iid: 88 });
     },
@@ -113,10 +130,10 @@ async function setup(t: test.TestContext) {
     });
     return { code, stdout, stderr };
   }
-  async function runInteractive(args: string[], driftDuringCollection = false) {
+  async function runInteractive(args: string[], driftDuringCollection = false, json = true) {
     let stdout = "", stderr = "";
     const prompts: string[] = [];
-    const code = await runProductionMain([...args, "--output", "json"], {
+    const code = await runProductionMain([...args, ...(json ? ["--output", "json"] : [])], {
       cwd: root, loadCurrentBundle: async () => currentBundle,
       readOnlyDefaults: { ...overrides, stdinIsTerminal: () => true,
         wizardConsole: {
@@ -291,9 +308,9 @@ test("explicit force replacement permits body edits but still authenticates mark
   assert.equal(f.state.mr!.description.startsWith("Manual note."), false);
 });
 
-test("actual TTY create and update complete without routine approval and return the stored MR URL", async (t) => {
+test("actual TTY legacy upsert and update complete without routine approval and return the stored MR URL", async (t) => {
   const f = await setup(t);
-  const created = await f.runInteractive(["create"]);
+  const created = await f.runInteractive(["create", "--upsert"]);
   assert.equal(created.code, 0, created.stdout + created.stderr);
   assert.equal(created.prompts.some((id) => id.startsWith("labels.") || id.startsWith("confirmation.")), false);
   assert.deepEqual(f.state.mr!.labels.map((label) => label.name).sort(), ["priority::p2", "status::review", "type::bug"]);
@@ -368,3 +385,27 @@ test("production allows local worktree changes after preflight for create and up
   const verified = await f.run(["verify", "88", "--level", "structure"]);
   assert.equal(verified.code, 0, verified.stdout + verified.stderr);
 });
+
+test("actual TTY default creates a fresh Issue and linked MR directly", async (t) => {
+  const f = await setup(t);
+  const result = await f.runInteractive(["create"]);
+  assert.equal(result.code, 0, result.stdout + result.stderr);
+  const data = JSON.parse(result.stdout).data;
+  assert.equal(data.verification, "creation-response");
+  assert.equal(data.issue.iid, 41);
+  assert.equal(data.webUrl, "https://gitlab.example.test/group/project/-/merge_requests/88");
+  assert.deepEqual(f.state.writes, ["issue.create", "merge-request.create"]);
+  assert.equal(result.prompts.some((id) => id.startsWith("workItem.")), false);
+});
+
+for (const rejectMr of [false, true]) {
+  test(`default text submission returns the ${rejectMr ? "known Issue on failure" : "created MR link"}`, async (t) => {
+    const f = await setup(t); f.state.fastMrReject = rejectMr;
+    const result = await f.runInteractive(["create"], false, false);
+    assert.equal(result.code, rejectMr ? 6 : 0, result.stdout + result.stderr);
+    assert.match(rejectMr ? result.stderr : result.stdout,
+      rejectMr ? /https:\/\/gitlab\.example\.test\/group\/project\/-\/issues\/41/u
+        : /https:\/\/gitlab\.example\.test\/group\/project\/-\/merge_requests\/88/u);
+    assert.deepEqual(f.state.writes, ["issue.create", "merge-request.create"]);
+  });
+}
