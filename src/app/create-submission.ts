@@ -112,9 +112,21 @@ export async function createSubmission(input: CreateSubmissionInputs): Promise<C
     request, snapshot: renderSnapshot, writePlan: desired, bundle: input.bundle,
     releaseTag: input.releaseTag, cliVersion: input.cliVersion, renderPhase: "preview",
   });
+  const mrFields = {
+    title: desired.title, sourceProjectId, sourceBranch: input.sourceBranch,
+    targetProjectId, targetProjectPath: snapshot.targetProject.path, targetBranch: input.targetBranch,
+    squash: desired.squash, removeSourceBranch: desired.removeSourceBranch, labelNames, assigneeIds, reviewerIds,
+  };
+  const markerContext = {
+    cliVersion: input.cliVersion, targetProjectPath: snapshot.targetProject.path, sourceHeadSha: snapshot.sourceHeadSha,
+  };
   // Check the whole renderer before writing, without pretending an Issue IID exists.
   const previewBody = renderMr({ ...input.request, workItem: { relation: "none", noIssueReason: "A new Issue will be created by this submission." } }, { ...snapshot, issue: { kind: "none" } });
-  assertSafe({ title: desired.title, description: previewBody.replace(/<!-- harness-mrtool:v1 [A-Za-z0-9_-]+ -->\n?$/u, "") });
+  assertSafe({
+    ...mrFields,
+    description: previewBody.replace(/<!-- harness-mrtool:v1 [A-Za-z0-9_-]+ -->\n?$/u, ""),
+    submissionMarker: markerContext,
+  });
   const issueInput = {
     projectId: targetProjectId, projectPath: snapshot.targetProject.path, ...issueBody,
     assigneeIds: [authorId], labelNames: labelNames.filter((name) => /^(?:type|priority)::/u.test(name)),
@@ -137,13 +149,9 @@ export async function createSubmission(input: CreateSubmissionInputs): Promise<C
       ...snapshot, issue: { kind: "linked", iid: issue.iid, readStatus: "unavailable" },
     }).replace(/<!-- harness-mrtool:v1 [A-Za-z0-9_-]+ -->\n?$/u, "");
     const description = appendSubmissionMarker(body, {
-      cliVersion: input.cliVersion, issueIid: issue.iid, targetProjectPath: snapshot.targetProject.path, sourceHeadSha: snapshot.sourceHeadSha,
+      ...markerContext, issueIid: issue.iid,
     });
-    const mrInput = {
-      title: desired.title, description, sourceProjectId, sourceBranch: input.sourceBranch,
-      targetProjectId, targetProjectPath: snapshot.targetProject.path, targetBranch: input.targetBranch,
-      squash: desired.squash, removeSourceBranch: desired.removeSourceBranch, labelNames, assigneeIds, reviewerIds,
-    };
+    const mrInput = { ...mrFields, description };
     assertSafe(mrInput);
     failedOperation = "merge-request.create";
     operations.push("merge-request.create");

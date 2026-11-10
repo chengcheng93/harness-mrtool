@@ -162,3 +162,52 @@ test("invalid submission marker context is rejected before creating an Issue", a
   await assert.rejects(service.createSubmission({ ...f, cliVersion: "invalid version" }));
   assert.deepEqual(f.calls, []);
 });
+
+for (const field of ["sourceBranch", "cliVersion"] as const) {
+  test("unsafe known " + field + " is rejected before the first POST", async () => {
+    const f = await fixture();
+    await assert.rejects(service.createSubmission({
+      ...f,
+      [field]: field === "sourceBranch" ? "feature/glpat-NEVER_EXPOSE_SECRET" : "glpat-NEVER_EXPOSE_SECRET",
+      assertNoCredentialExposure: value => {
+        if (JSON.stringify(value).includes("glpat-NEVER_EXPOSE_SECRET")) throw new Error("unsafe known outbound value");
+      },
+    }));
+    assert.deepEqual(f.calls, []);
+  });
+}
+
+test("preflights the full static MR payload and marker context without an invented Issue IID", async () => {
+  const f = await fixture();
+  const preflight: unknown[] = [];
+  await service.createSubmission({
+    ...f,
+    assertNoCredentialExposure: value => {
+      if (f.calls.length === 0) preflight.push(value);
+    },
+  });
+  const checked = preflight.find((value): value is Record<string, unknown> =>
+    value !== null && typeof value === "object" && "sourceBranch" in value);
+  assert.ok(checked, "the complete known MR payload must be guarded before Issue creation");
+  assert.deepEqual(checked, {
+    title: f.plan.desired.title,
+    description: checked.description,
+    sourceProjectId: 101,
+    sourceBranch: "feature/fast",
+    targetProjectId: 100,
+    targetProjectPath: "luban/luban-studio",
+    targetBranch: "develop",
+    squash: f.plan.desired.squash,
+    removeSourceBranch: f.plan.desired.removeSourceBranch,
+    labelNames: f.mrInput!.labelNames,
+    assigneeIds: [10],
+    reviewerIds: [20],
+    submissionMarker: {
+      cliVersion: "1.2.3",
+      targetProjectPath: "luban/luban-studio",
+      sourceHeadSha: f.snapshot.sourceHeadSha,
+    },
+  });
+  assert.equal(typeof checked.description, "string");
+  assert.equal(JSON.stringify(checked).includes("issueIid"), false);
+});
