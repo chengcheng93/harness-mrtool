@@ -98,6 +98,8 @@ export interface ProductionReadOnlyDefaultOverrides {
    * and external transports for controlled embeddings and integration tests. */
   readonly historicalBundleDefaults?: Pick<DefaultHistoricalBundleLoaderOptions,
     "trustConfig" | "channelTransport" | "channelUrl" | "releaseAssets" | "windowsAclVerifier">;
+  /** In-process clock injection; frozen once before a new Issue submission preflight. */
+  readonly now?: () => Date;
   readonly contextStore?: DefaultContextStore;
   readonly historicalMrBundleLoader?: ProductionHistoricalMrBundleLoader;
   readonly inputIo?: InputIo;

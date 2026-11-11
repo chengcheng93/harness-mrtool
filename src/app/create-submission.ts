@@ -4,12 +4,13 @@ import type { RemoteWrite } from "../contracts/exit-codes.ts";
 import { copyJsonValue, type JsonObject } from "../contracts/jcs.ts";
 import type { Request } from "../contracts/request.ts";
 import type { GitLabClient } from "../gitlab/client.ts";
-import type { GitLabCreatedIssue, GitLabSubmittedMergeRequest } from "../gitlab/types.ts";
+import type { GitLabCreatedIssue, GitLabSubmittedMergeRequest, GitLabMilestone } from "../gitlab/types.ts";
 import { renderIssue, chinaDate } from "../render/issue.ts";
 import { renderDescription } from "../render/markdown.ts";
 import { validateExternalContextSnapshot, type ExternalContextSnapshot } from "../render/marker.ts";
 import { appendSubmissionMarker } from "../render/submission.ts";
 import { isRemoteMutationError } from "./remote-outcome.ts";
+import { selectSubmissionMilestone, type SubmissionMilestoneSelection } from "./select-submission-milestone.ts";
 import type { MergeRequestWritePlan } from "./write-plan.ts";
 
 export interface CreateSubmissionInputs {
@@ -23,6 +24,7 @@ export interface CreateSubmissionInputs {
   readonly targetBranch: string;
   readonly remote: Pick<GitLabClient, "createIssue" | "createMergeRequestSubmission">;
   readonly now?: Date;
+  readonly milestones?: readonly GitLabMilestone[];
   readonly assertNoCredentialExposure?: (value: unknown) => void;
 }
 
@@ -30,6 +32,7 @@ export interface CreateSubmissionResult {
   readonly issue: GitLabCreatedIssue;
   readonly mergeRequest: GitLabSubmittedMergeRequest;
   readonly verification: "creation-response";
+  readonly milestoneSelection: SubmissionMilestoneSelection;
   readonly operations: readonly string[];
 }
 
@@ -106,8 +109,12 @@ export async function createSubmission(input: CreateSubmissionInputs): Promise<C
   const assigneeIds = desired.assigneeUserId === null ? [] : [numericId(desired.assigneeUserId)];
   const reviewerIds = desired.reviewerUserIds.map(numericId);
   const date = chinaDate(input.now);
+  const milestoneSelection = selectSubmissionMilestone(input.milestones ?? [], date);
+  const milestoneFields = milestoneSelection.milestone === null ? {} : { milestoneId: milestoneSelection.milestone.id };
+  if (milestoneSelection.milestone !== null && !positive(milestoneSelection.milestone.id)) throw invalidInput();
   const issueBody = renderIssue({ request: input.request, projectPath: snapshot.targetProject.path, authorUserId: snapshot.mergeRequest.authorUserId, date });
   const assertSafe = input.assertNoCredentialExposure ?? (() => {});
+  assertSafe(milestoneSelection);
   const renderMr = (request: Request, renderSnapshot: ExternalContextSnapshot): string => renderDescription({
     request, snapshot: renderSnapshot, writePlan: desired, bundle: input.bundle,
     releaseTag: input.releaseTag, cliVersion: input.cliVersion, renderPhase: "preview",
@@ -115,7 +122,7 @@ export async function createSubmission(input: CreateSubmissionInputs): Promise<C
   const mrFields = {
     title: desired.title, sourceProjectId, sourceBranch: input.sourceBranch,
     targetProjectId, targetProjectPath: snapshot.targetProject.path, targetBranch: input.targetBranch,
-    squash: desired.squash, removeSourceBranch: desired.removeSourceBranch, labelNames, assigneeIds, reviewerIds,
+    ...milestoneFields, squash: desired.squash, removeSourceBranch: desired.removeSourceBranch, labelNames, assigneeIds, reviewerIds,
   };
   const markerContext = {
     cliVersion: input.cliVersion, targetProjectPath: snapshot.targetProject.path, sourceHeadSha: snapshot.sourceHeadSha,
@@ -129,7 +136,7 @@ export async function createSubmission(input: CreateSubmissionInputs): Promise<C
   });
   const issueInput = {
     projectId: targetProjectId, projectPath: snapshot.targetProject.path, ...issueBody,
-    assigneeIds: [authorId], labelNames: labelNames.filter((name) => /^(?:type|priority)::/u.test(name)),
+    ...milestoneFields, assigneeIds: [authorId], labelNames: labelNames.filter((name) => /^(?:type|priority)::/u.test(name)),
   };
   assertSafe(issueInput);
   const operations: string[] = [];
@@ -161,7 +168,7 @@ export async function createSubmission(input: CreateSubmissionInputs): Promise<C
     assertSafe(mergeRequest);
     mutationInFlight = false;
     failedOperation = "submission.result";
-    const result: CreateSubmissionResult = { issue, mergeRequest, verification: "creation-response", operations: [...operations] };
+    const result: CreateSubmissionResult = { issue, mergeRequest, milestoneSelection, verification: "creation-response", operations: [...operations] };
     assertSafe(result);
     return result;
   } catch (error) {

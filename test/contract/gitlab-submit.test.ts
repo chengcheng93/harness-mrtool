@@ -198,3 +198,16 @@ for (const labelNames of [[], ["type::fix", "priority::normal"]]) {
     });
   });
 }
+
+
+test("selected milestone is sent by both initial POSTs without a lookup",async()=>{
+ const {fake,attempts,gitlab}=setup();fake.enqueue("POST",ISSUE_ENDPOINT,{body:issueBody()});fake.enqueue("POST",MR_ENDPOINT,{body:mrBody()});
+ await gitlab.createIssue({...ISSUE,milestoneId:901});await gitlab.createMergeRequestSubmission({...MR,milestoneId:901});
+ assert.deepEqual(attempts.map(r=>r.method),["POST","POST"]);
+ assert.equal((fake.requests[0]!.body as Record<string,unknown>).milestone_id,901);
+ assert.equal((fake.requests[1]!.body as Record<string,unknown>).milestone_id,901);
+});
+for (const milestoneId of [0,-1,1.5,Number.MAX_SAFE_INTEGER+1,NaN]) test("invalid milestone ID fails before transport: "+milestoneId,async()=>{
+ const {attempts,gitlab}=setup();await assert.rejects(gitlab.createIssue({...ISSUE,milestoneId}),failure("rejected","validation",null));
+ await assert.rejects(gitlab.createMergeRequestSubmission({...MR,milestoneId}),failure("rejected","validation",null));assert.equal(attempts.length,0);
+});

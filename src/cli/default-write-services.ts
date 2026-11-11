@@ -78,6 +78,9 @@ export function createDefaultWriteServices(
         safeNextStep: "Use a fresh create for a new Issue; use an explicit legacy workItem only for historical MR operations.",
       });
     }
+    // Freeze the instant before any live preflight; clone injected Dates to avoid mutable clock state.
+    const submissionNow = command.kind === "create" && request?.workItem.relation === "new" && !invocation.options.dryRun
+      ? new Date((options.now?.() ?? new Date()).getTime()) : undefined;
     let resume: Parameters<ReturnType<typeof createMergeRequestCommandAdapter>["create"]>[0]["resume"];
     if (command.kind === "create" && command.resumeIid !== undefined) {
       if (command.resumeFrom === undefined || readOnly.contextStore.loadRecoveryProof === undefined) {
@@ -213,6 +216,8 @@ export function createDefaultWriteServices(
       });
     }
     if (command.kind === "create" && request?.workItem.relation === "new") {
+      // All pages must succeed before consuming the capability tickets or starting either POST.
+      const milestones = await planned.options.gitlab.listProjectMilestones(snapshot.targetProject.id);
       const resolved = await resolveRequestCandidates({ request, expectedBinding: live.binding,
         store: readOnly.contextStore, consume: true });
       if (canonicalizeJson(resolved.snapshot) !== canonicalizeJson(snapshot)) throw changed();
@@ -227,6 +232,7 @@ export function createDefaultWriteServices(
         bundle: planned.selection.bundle, releaseTag: planned.selection.releaseTag,
         cliVersion: options.cliVersion, sourceBranch: planned.options.git.sourceBranch,
         targetBranch: planned.options.git.targetBranch, remote: planned.options.gitlab,
+        milestones, now: submissionNow!,
         assertNoCredentialExposure: planned.assertNoCredentialExposure });
       const output = {
         context: { versions: { templateVersion: planned.selection.bundle.manifest.version,
@@ -236,7 +242,7 @@ export function createDefaultWriteServices(
         output: { message: "Issue and merge request created from API responses",
           data: copyJsonValue({ command: "create", mode: "issue-first", verification: result.verification,
             iid: result.mergeRequest.iid, webUrl: result.mergeRequest.webUrl,
-            issue: result.issue, mergeRequest: result.mergeRequest }) as JsonObject },
+            issue: result.issue, mergeRequest: result.mergeRequest, milestoneSelection: result.milestoneSelection }) as JsonObject },
       };
       planned.assertNoCredentialExposure(output);
       return output;

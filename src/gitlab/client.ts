@@ -8,6 +8,7 @@ import type {
   GitLabCapabilities,
   GitLabAppliedLabel,
   GitLabGroup,
+  GitLabMilestone,
   GitLabIssue,
   GitLabLabel,
   GitLabCreateMergeRequestInput,
@@ -636,6 +637,26 @@ export class GitLabClient {
     throw apiError("pagination", "page limit exceeded");
   }
 
+  async listProjectMilestones(project: string): Promise<readonly GitLabMilestone[]> {
+    const values = await this.restPages(query(`/api/v4/projects/${encodeId(project)}/milestones`, {
+      include_ancestors: "true", state: "active",
+    }));
+    const milestones = new Map<number, GitLabMilestone>();
+    for (const value of values) {
+      const record = object(value, "milestone");
+      const id = positiveResponseId(record.id, "milestone.id");
+      const state = string(record.state, "milestone.state");
+      if (state !== "active" && state !== "closed") throw apiError("milestone.state");
+      const milestone: GitLabMilestone = Object.freeze({ id, title: string(record.title, "milestone.title"),
+        state, dueDate: nullableString(record.due_date, "milestone.due_date") });
+      const previous = milestones.get(id);
+      if (previous !== undefined && (previous.title !== milestone.title || previous.state !== milestone.state ||
+          previous.dueDate !== milestone.dueDate)) throw apiError("milestone", "conflicting duplicate milestone ID");
+      milestones.set(id, milestone);
+    }
+    return Object.freeze([...milestones.values()]);
+  }
+
   async getProject(project: string): Promise<GitLabProject> {
     const response = await this.get(`/api/v4/projects/${encodeId(project)}`);
     const record = object(response.data, "project");
@@ -916,12 +937,14 @@ export class GitLabClient {
         throw new TypeError("Issue submission requires one assignee and a due date");
       }
       input.assigneeIds.forEach(assertPositiveInputId);
+      if (input.milestoneId !== undefined) assertPositiveInputId(input.milestoneId);
       const response = await this.mutate("POST", "/api/v4/projects/" + String(input.projectId) + "/issues", {
         title: input.title,
         description: input.description,
         issue_type: "issue",
         assignee_ids: [...input.assigneeIds],
         due_date: input.dueDate,
+        ...(input.milestoneId === undefined ? {} : { milestone_id: input.milestoneId }),
         ...(input.labelNames !== undefined && input.labelNames.length > 0 ? { labels: input.labelNames.join(",") } : {}),
       });
       const value = validateResponse(response, (data) => {
@@ -950,6 +973,7 @@ export class GitLabClient {
       assertSubmissionPath(input.targetProjectPath);
       input.assigneeIds.forEach(assertPositiveInputId);
       input.reviewerIds.forEach(assertPositiveInputId);
+      if (input.milestoneId !== undefined) assertPositiveInputId(input.milestoneId);
       const response = await this.mutate(
         "POST", "/api/v4/projects/" + String(input.sourceProjectId) + "/merge_requests", {
           target_project_id: input.targetProjectId,
@@ -962,6 +986,7 @@ export class GitLabClient {
           labels: input.labelNames.join(","),
           assignee_ids: [...input.assigneeIds],
           reviewer_ids: [...input.reviewerIds],
+          ...(input.milestoneId === undefined ? {} : { milestone_id: input.milestoneId }),
         },
       );
       const value = validateResponse(response, (data) => {

@@ -36,6 +36,13 @@ export interface GitLabAppliedLabel {
   readonly archived: boolean;
 }
 
+export interface GitLabMilestone {
+  readonly id: number;
+  readonly title: string;
+  readonly state: "active" | "closed";
+  readonly dueDate: string | null;
+}
+
 export interface GitLabIssue {
   readonly iid: number;
   readonly milestone: string | null;
@@ -125,6 +132,7 @@ export interface GitLabCreateIssueInput {
   readonly description: string;
   readonly assigneeIds: readonly number[];
   readonly dueDate: string;
+  readonly milestoneId?: number;
   readonly labelNames?: readonly string[];
 }
 
@@ -136,6 +144,7 @@ export interface GitLabCreatedIssue {
 }
 
 export interface GitLabCreateMergeRequestSubmissionInput extends GitLabCreateMergeRequestInput {
+  readonly milestoneId?: number;
   readonly targetProjectPath: string;
   readonly labelNames: readonly string[];
   readonly assigneeIds: readonly number[];

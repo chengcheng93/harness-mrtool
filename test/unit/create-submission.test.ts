@@ -49,7 +49,7 @@ test("submits a new current-user Issue then a complete response-only MR without 
     const guarded: unknown[] = [];
     const result = await service.createSubmission({ ...f, assertNoCredentialExposure: value => guarded.push(value) });
     assert.deepEqual(f.calls, ["issue.create", "merge-request.create"]);
-    assert.deepEqual(result, { issue: f.issue, mergeRequest: f.mergeRequest, verification: "creation-response", operations: f.calls });
+    assert.deepEqual(result, { issue: f.issue, mergeRequest: f.mergeRequest, verification: "creation-response", milestoneSelection: { submissionDate: "2026-11-11", reason: "no-future-milestone", milestone: null }, operations: f.calls });
     assert.deepEqual(f.issueInput!.assigneeIds, [30]);
     assert.equal(f.issueInput!.dueDate, "2026-11-11");
     assert.match(f.issueInput!.description, /30/);
@@ -210,4 +210,26 @@ test("preflights the full static MR payload and marker context without an invent
   });
   assert.equal(typeof checked.description, "string");
   assert.equal(JSON.stringify(checked).includes("issueIid"), false);
+});
+
+
+test("selects one future milestone for both initial POSTs using the Shanghai submission date", async () => {
+ const f=await fixture(); const result=await service.createSubmission({...f,now:new Date("2026-11-11T23:55:00Z"),milestones:[
+ {id:1,title:"today",state:"active",dueDate:"2026-11-12"},
+ {id:81,title:"next",state:"active",dueDate:"2026-11-13"},
+ {id:9,title:"nearest",state:"active",dueDate:"2026-11-13"},
+ ]});
+ assert.equal(f.issueInput!.dueDate,"2026-11-12"); assert.equal(f.issueInput!.milestoneId,9);assert.equal(f.mrInput!.milestoneId,9);
+ assert.deepEqual(result.milestoneSelection,{submissionDate:"2026-11-12",reason:"nearest-future",milestone:{id:9,title:"nearest",dueDate:"2026-11-13"}});
+ assert.doesNotMatch(f.mrInput!.description, /- Milestone: (?:Not assigned|None\.)/u);
+ assert.equal(f.mrInput!.labelNames.length,3); assert.deepEqual(f.calls,["issue.create","merge-request.create"]);
+});
+test("successful empty milestone inventory omits both optional fields and reports the reason",async()=>{
+ const f=await fixture();const result=await service.createSubmission({...f,milestones:[]});
+ assert.equal(Object.hasOwn(f.issueInput!,"milestoneId"),false);assert.equal(Object.hasOwn(f.mrInput!,"milestoneId"),false);
+ assert.deepEqual(result.milestoneSelection,{submissionDate:"2026-11-11",reason:"no-future-milestone",milestone:null});
+});
+
+test("guards selected milestone metadata before either POST",async()=>{
+ const f=await fixture();await assert.rejects(service.createSubmission({...f,milestones:[{id:9,title:"glpat-NEVER_EXPOSE_SECRET",state:"active",dueDate:"2026-11-13"}],assertNoCredentialExposure:value=>{if(JSON.stringify(value).includes("NEVER_EXPOSE_SECRET"))throw new Error("unsafe metadata");}}));assert.deepEqual(f.calls,[]);
 });

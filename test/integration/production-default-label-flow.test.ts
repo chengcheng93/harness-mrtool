@@ -45,6 +45,7 @@ async function setup(t: test.TestContext) {
         sha: sourceSha, author: user, assignees: [], reviewers: [], labels: [], squash: true, shouldRemoveSourceBranch: true, pipelineStatus: "passed" });
   const client = {
     origin: "https://gitlab.example.test", audit: () => ({ requestIds: ["request-test"] }),
+    listProjectMilestones: async () => [],
     getProject: async () => project, getBranchHead: async () => targetSha,
     getCurrentUser: async () => user, listUsers: async () => [user, reviewer],
     labelInventory: async () => { const effective = labels.filter((label) => !state.omitP2 || label.name !== "priority::p2"); return { all: effective, effective, audit: { requestIds: ["request-test"] } }; },

@@ -14,7 +14,7 @@ import { parseCliInvocation } from "../../src/cli/program.ts";
 import { canonicalizeJson, sha256Utf8 } from "../../src/contracts/jcs.ts";
 import { CandidateContextStore } from "../../src/context/store.ts";
 import type { GitLabClient } from "../../src/gitlab/client.ts";
-import type { GitLabMergeRequest, GitLabUpdateMergeRequestInput, GitLabCreateMergeRequestInput } from "../../src/gitlab/types.ts";
+import type { GitLabMergeRequest, GitLabUpdateMergeRequestInput, GitLabCreateMergeRequestInput, GitLabMilestone, GitLabCreateIssueInput, GitLabCreateMergeRequestSubmissionInput } from "../../src/gitlab/types.ts";
 import type { RepositorySnapshot } from "../../src/git/repository.ts";
 import { runProductionMain } from "../../src/production-main.ts";
 
@@ -41,7 +41,8 @@ async function setup(t: test.TestContext) {
   const state: { mr: GitLabMergeRequest | null; writes: string[]; drift: boolean; omitP2: boolean; wrongReadback: boolean; driftOnFind: boolean; driftAfterCreate: boolean; renameAfterFind: boolean; sourceMissing: boolean; sourceMissingOnFind: boolean; dirtyOnFind: boolean; fastIssueReject: boolean; fastMrReject: boolean; fastStarted: boolean; driftAfterConsume: boolean; driftAfterLabels: boolean; duplicateAfterFields: boolean } = {
     mr: null, writes: [], drift: false, omitP2: false, wrongReadback: false, driftOnFind: false, driftAfterCreate: false, renameAfterFind: false, sourceMissing: false, sourceMissingOnFind: false, dirtyOnFind: false, fastIssueReject: false, fastMrReject: false, fastStarted: false, driftAfterConsume: false, driftAfterLabels: false, duplicateAfterFields: false,
   };
-  const calls = { mergeRequest: 0, mergeRequestReceipt: 0, inventory: 0, users: 0, review: 0, projects: 0, discover: 0, pushPlans: 0, diff: 0 };
+  const milestoneState = { candidates: [{id:91,title:"next",state:"active",dueDate:"2026-11-13"}] as GitLabMilestone[], fail:false, consumed:0, nowCalls:0, issueInput:null as GitLabCreateIssueInput | null, mrInput:null as GitLabCreateMergeRequestSubmissionInput | null };
+  const calls = { milestones:0, mergeRequest: 0, mergeRequestReceipt: 0, inventory: 0, users: 0, review: 0, projects: 0, discover: 0, pushPlans: 0, diff: 0 };
   const guardConcurrency = { armed: false, rejectPush: false, diffSettled: false,
     pushRejected: deferred(), diffEntered: deferred(), releaseDiff: deferred() };
   let receiptSequence = 0;
@@ -52,6 +53,7 @@ async function setup(t: test.TestContext) {
   });
   const client = {
     origin: "https://gitlab.example.test", audit: () => ({ requestIds: ["request-test"] }),
+    listProjectMilestones: async (projectId: string) => { calls.milestones++; assert.equal(projectId,"7"); assert.equal(state.fastStarted,false); if(milestoneState.fail) throw new Error("milestone read unavailable"); return milestoneState.candidates; },
     getProject: async () => { calls.projects++; return project; }, getBranchHead: async () => targetSha,
     getCurrentUser: async () => user, listUsers: async () => { calls.users++; return [user, reviewer]; },
     labelInventory: async () => { calls.inventory++; const effective = labels.filter((label) => !state.omitP2 || label.name !== "priority::p2"); return { all: effective, effective, audit: { requestIds: ["request-test"] } }; },
@@ -65,14 +67,16 @@ async function setup(t: test.TestContext) {
       if (state.renameAfterFind) labels.find((label) => label.name === "priority::p2")!.name = "priority::p1";
       return receipt(state.mr === null ? [] : [structuredClone(state.mr)]);
     },
-    createIssue: async (input: { projectId: number; assigneeIds: readonly number[]; dueDate: string }) => {
+    createIssue: async (input: GitLabCreateIssueInput) => {
+      milestoneState.issueInput = input;
       state.fastStarted = true; state.writes.push("issue.create");
       assert.deepEqual(input.assigneeIds, [42]);
       assert.match(input.dueDate, /^\d{4}-\d{2}-\d{2}$/u);
       if (state.fastIssueReject) throw new RemoteMutationError("rejected", "validation");
       return receipt({ id: 1001, iid: 41, projectId: 7, webUrl: project.webUrl + "/-/issues/41" });
     },
-    createMergeRequestSubmission: async (input: GitLabCreateMergeRequestInput & { labelNames: readonly string[]; assigneeIds: readonly number[]; reviewerIds: readonly number[] }) => {
+    createMergeRequestSubmission: async (input: GitLabCreateMergeRequestSubmissionInput) => {
+      milestoneState.mrInput = input;
       state.writes.push("merge-request.create");
       if (state.fastMrReject) throw new RemoteMutationError("rejected", "validation");
       assert.match(input.description, /Closes #41/u);
@@ -109,7 +113,7 @@ async function setup(t: test.TestContext) {
       return receipt(structuredClone(state.mr));
     },
   } as unknown as GitLabClient;
-  for (const method of ["getProject", "getBranchHead", "getCurrentUser", "listUsers", "labelInventory", "getReviewState", "getMergeRequest", "getMergeRequestReceipt", "listOpenMergeRequestReceipts"] as const) {
+  for (const method of ["listProjectMilestones", "getProject", "getBranchHead", "getCurrentUser", "listUsers", "labelInventory", "getReviewState", "getMergeRequest", "getMergeRequestReceipt", "listOpenMergeRequestReceipts"] as const) {
     const port = client[method] as (...args: unknown[]) => Promise<unknown>;
     (client as unknown as Record<string, unknown>)[method] = async (...args: unknown[]) => {
       assert.equal(state.fastStarted, false, "fast submission must not read GitLab after its first POST: " + method);
@@ -144,12 +148,13 @@ async function setup(t: test.TestContext) {
   const contextStore = new CandidateContextStore({ stateDirectory, windowsAclVerifier: allowTestAcl });
   const resolveCandidates = contextStore.resolve.bind(contextStore);
   contextStore.resolve = async (input) => {
+    if(input.consume) milestoneState.consumed++;
     const result = await resolveCandidates(input);
     if (input.consume && state.driftAfterConsume) state.drift = true;
     if (input.consume && guardConcurrency.armed) guardConcurrency.rejectPush = true;
     return result;
   };
-  const overrides = { stateDirectory, windowsAclVerifier: allowTestAcl, contextStore, repository, stdinIsTerminal: () => false,
+  const overrides = { now: () => { milestoneState.nowCalls++; return new Date("2026-11-11T23:55:00Z"); }, stateDirectory, windowsAclVerifier: allowTestAcl, contextStore, repository, stdinIsTerminal: () => false,
     inputIo: { statFile: async () => ({ size: Buffer.byteLength(JSON.stringify(raw)) }), readFile: async () => Buffer.from(JSON.stringify(raw)), stdin: { async *[Symbol.asyncIterator]() {} } },
     targetSessionResolver: { resolve: async () => ({ origin: client.origin, gitlab: client, project, identity: { host: "gitlab.example.test", path: project.fullPath }, targetRemote: "origin", assertNoCredentialExposure: () => {} }) } };
   const defaults = createProductionReadOnlyDefaults({ ...overrides, cliVersion: packageMetadata.version, cwd: root, currentBundle, contextIssueIid: null });
@@ -172,7 +177,7 @@ async function setup(t: test.TestContext) {
     });
     return { code, stdout, stderr };
   }
-  return { issue, run, state, raw, calls, guardConcurrency, resetCalls: () => { for (const key of Object.keys(calls) as (keyof typeof calls)[]) calls[key] = 0; } };
+  return { issue, run, state, raw, calls, milestoneState, guardConcurrency, resetCalls: () => { for (const key of Object.keys(calls) as (keyof typeof calls)[]) calls[key] = 0; } };
 }
 
 // These exercise the default production adapter and transaction, not a fake
@@ -341,4 +346,31 @@ test("fast submission rejects candidate-consumption drift before Issue creation"
 test("fast submission requires the selected source SHA to be published before Issue creation", async (t) => {
  const f=await setup(t); await f.issue(); f.raw.workItem={relation:"new"}; f.state.sourceMissing=true;
  const result=await f.run(["create"]); assert.notEqual(result.code,0); assert.equal(JSON.parse(result.stdout).code,"REPOSITORY_ERROR"); assert.deepEqual(f.state.writes,[]);
+});
+
+
+test("fast default freezes Shanghai date once and supplies the same selected milestone on both POSTs",async(t)=>{
+ const f=await setup(t);await f.issue();f.raw.workItem={relation:"new"};f.resetCalls();
+ const result=await f.run(["create"]);assert.equal(result.code,0,result.stdout);
+ assert.equal(f.milestoneState.nowCalls,1);assert.equal(f.calls.milestones,1);
+ assert.equal(f.milestoneState.issueInput!.dueDate,"2026-11-12");
+ assert.equal(f.milestoneState.issueInput!.milestoneId,91);assert.equal(f.milestoneState.mrInput!.milestoneId,91);
+ assert.deepEqual(JSON.parse(result.stdout).data.milestoneSelection,{submissionDate:"2026-11-12",reason:"nearest-future",milestone:{id:91,title:"next",dueDate:"2026-11-13"}});
+});
+test("milestone read failure stops before candidate consumption and permits a later explicit attempt",async(t)=>{
+ const f=await setup(t);await f.issue();f.raw.workItem={relation:"new"};f.milestoneState.fail=true;
+ const failed=await f.run(["create"]);assert.notEqual(failed.code,0);assert.deepEqual(f.state.writes,[]);assert.equal(f.milestoneState.consumed,0);
+ f.milestoneState.fail=false;const success=await f.run(["create"]);assert.equal(success.code,0,success.stdout);assert.equal(f.milestoneState.consumed,1);
+});
+test("empty milestones produce structured omission in default submission",async(t)=>{
+ const f=await setup(t);await f.issue();f.raw.workItem={relation:"new"};f.milestoneState.candidates=[];
+ const result=await f.run(["create"]);assert.equal(result.code,0,result.stdout);
+ assert.equal(Object.hasOwn(f.milestoneState.issueInput!,"milestoneId"),false);assert.equal(Object.hasOwn(f.milestoneState.mrInput!,"milestoneId"),false);
+ assert.equal(JSON.parse(result.stdout).data.milestoneSelection.reason,"no-future-milestone");
+});
+test("legacy and dry-run paths do not prefetch milestones",async(t)=>{
+ const f=await setup(t);await f.issue();f.milestoneState.fail=true;
+ const legacy=await f.run(["create","--dry-run"]);assert.equal(legacy.code,0,legacy.stdout);
+ f.raw.workItem={relation:"new"};const dry=await f.run(["create","--dry-run"]);assert.equal(dry.code,0,dry.stdout);
+ assert.equal(f.calls.milestones,0);assert.equal(f.milestoneState.nowCalls,0);assert.deepEqual(f.state.writes,[]);
 });
