@@ -1,5 +1,7 @@
 # Thin Submission and Future Milestone Verification
 
+Follow-up: the five failures below were fixed and retested. See [the follow-up verification](2026-11-11-five-failure-fixes.md). The original run and its limits remain recorded as historical evidence.
+
 Date: 2026-11-11. Status: **implemented local 0.1.11 candidate; scoped acceptance passed; complete legacy suite is not green**.
 
 Branch: `codex/thin-submit-future-milestone`. Product/test head: `96cd26e3d3064f96a4684bb51fb48ddee96243c0`. Implementation base: `9454ae94df70a633b2f2ac4cf251fbe7cef0a06a`. No production GitLab writes, shared push, release, signing or global installation were performed.
