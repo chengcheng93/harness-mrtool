@@ -1,7 +1,7 @@
 # 最小提交编排与未来里程碑设计
 
 日期：2026-11-11
-状态：设计草案，等待用户审阅；尚未修改产品代码
+状态：用户于2026-11-11批准，授权生成计划后直接实施
 范围：harness-mrtool 默认 Issue-first 提交与配套 Skill
 
 ## 1. 目标与已确认的取舍
@@ -59,7 +59,7 @@ scripts/run-flow.ps1 -Phase create -Repository <absolute-repo>
 
 这里的“里程碑标签”落实为 GitLab milestone_id 字段，而不是第四个 label。已有 type、priority、status 三标签规则保持原样。
 
-代理提出以下确定性默认值，供本次设计审阅：
+用户已批准以下确定性默认值：
 - 在默认新建流程的预检开始时冻结一次时刻，以 Asia/Shanghai 转成提交日期；Issue日期、due_date及里程碑选择复用同一日期。
 - 读取目标项目可用的 active 项目及祖先组里程碑，使用 GitLab 项目 milestones API 的 include_ancestors=true，并按现有客户端上限完整处理分页。
 - 候选必须有合法日历日期形式的 due_date，且 due_date 严格大于提交日期；“今天”不属于未来。无日期、非法日期和 closed 候选不参与选择。
