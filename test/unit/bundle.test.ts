@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { Ajv } from "ajv";
+import { Ajv, type SchemaObject } from "ajv";
 import {
   cp,
   mkdtemp,
@@ -212,7 +212,7 @@ test("template bundle loads an exact immutable nine-payload manifest", async () 
 
 test("current normalization preserves the immutable Bundle 1.2.0 legacy work-item contract", async () => {
   const bundle = await loadTemplateBundle(templateBundlePath);
-  const validateHistorical = new Ajv({ allErrors: true, strict: true }).compile(bundle.schema);
+  const validateHistorical = new Ajv({ allErrors: true, strict: true }).compile(bundle.schema as SchemaObject);
   const fixture = JSON.parse(await readFile(
     resolve(repositoryRoot, "test/fixtures/requests/code-docs.json"),
     "utf8",
@@ -231,7 +231,7 @@ test("current normalization preserves the immutable Bundle 1.2.0 legacy work-ite
 
 test("current raw requests extend the frozen Bundle contract with omitted and new work items", async () => {
   const bundle = await loadTemplateBundle(templateBundlePath);
-  const validateHistorical = new Ajv({ allErrors: true, strict: true }).compile(bundle.schema);
+  const validateHistorical = new Ajv({ allErrors: true, strict: true }).compile(bundle.schema as SchemaObject);
   const validateCurrent = new Ajv({ allErrors: true, strict: true }).compile(requestSchema);
   const fixture = normalizeAndValidateRequest(JSON.parse(await readFile(
     resolve(repositoryRoot, "test/fixtures/requests/code-docs.json"),
