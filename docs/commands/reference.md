@@ -60,7 +60,7 @@ problem, reproduction or feature scenarios, implementation, test, deployment,
 rollback, and acceptance details. The CLI renders one unified eight-section Issue
 without a template choice, extra AI call, or new required Issue fields.
 Issue owner is the current API user; phase/due dates are today's Asia/Shanghai
-date. Milestone and TAPD are optional. Pending evidence remains pending.
+date. TAPD is optional. The CLI automatically selects the nearest active project/ancestor-group milestone with a valid due_date strictly after the frozen Asia/Shanghai submission date (same date: smallest numeric ID), sharing milestone_id across the initial Issue/MR POSTs. No future candidate omits the field with structured no-future-milestone; a read failure stops before writes or ticket consumption. Pending evidence remains pending.
 
 All validation and context resolution precede writes. Then Issue POST is followed
 by MR POST; the initial MR POST includes exactly three planned labels and selected
@@ -169,3 +169,5 @@ and manual handoff; a clean worktree is not required. The tool does not
 automatically add, stash, clean, or delete local files.
 `--offline` is rejected for live create/update/verify; a local handoff still
 requires an explicit human request and `manual --auth ssh`.
+
+On Windows the default Skill uses its bundled `scripts/run-flow.ps1` with system Windows PowerShell 5.1 and the native CLI; no Node, Python or PowerShell 7 is required. Context runs schema/profiles/context once, then create sends the original Request bytes via stdin. The runner returns one JSON with complete `cliResult`, Stopwatch `elapsedMs` and per-step timings. Keep waiting on the same process beyond 30 seconds; a started create without a complete CLI result is unknown and must not be retried. See [detailed workflows](../../skill/harness-mr/references/workflows.md).

@@ -6,7 +6,7 @@ profiles, rendering, labels, writes, and verification.
 
 ## Prerequisites
 
-CLI/Plugin 0.1.10 is a release candidate, not yet published. Build the CLI from
+CLI/Plugin 0.1.11 is a release candidate, not yet published. Build the CLI from
 current `main` source using the pinned-runtime instructions in the repository's
 root README; the plugin does not include a CLI binary. New release download links
 will be added only after publication.
@@ -90,7 +90,7 @@ The host AI fills existing motivation/changes/verification/risk/profile text
 with the actual problem, scenarios, implementation, test, deployment, rollback,
 and acceptance details; no extra template choice or AI call is required.
 Issue owner is the API user; phase/due dates use today's Asia/Shanghai date.
-Milestone and TAPD are optional. Pending checks stay pending.
+TAPD is optional. The CLI automatically selects the nearest active project/ancestor-group milestone with a valid due_date strictly after the frozen Asia/Shanghai submission date (same date: smallest numeric ID), sharing milestone_id across the initial Issue/MR POSTs. No future candidate omits the field with structured no-future-milestone; a read failure stops before writes or ticket consumption. Pending checks stay pending.
 
 Run preview only when explicitly requested. Ask only for required factual
 information that cannot be established or a real blocker. On failure, stop
@@ -143,3 +143,5 @@ audit and activation fields without claiming success.
 
 The distributable artifact is built by the repository's plugin packaging
 script and published as `harness-mrtool-codex-plugin.zip`.
+
+On Windows the default Skill uses its bundled `scripts/run-flow.ps1` with system Windows PowerShell 5.1 and the native CLI; no Node, Python or PowerShell 7 is required. Context runs schema/profiles/context once, then create sends the original Request bytes via stdin. The runner returns one JSON with complete `cliResult`, Stopwatch `elapsedMs` and per-step timings. Keep waiting on the same process beyond 30 seconds; a started create without a complete CLI result is unknown and must not be retried. See [detailed workflows](skills/harness-mr/references/workflows.md).

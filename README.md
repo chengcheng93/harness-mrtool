@@ -6,7 +6,7 @@ AI/人填写完整变更说明，工具负责输入校验、自动标签和 Issu
 工具不是 GitLab 服务端合并门禁，也不能限制网页或原始 Git/API 操作。
 
 > **版本状态**：当前 main 已实现强制标签策略（Template Bundle **1.2.0**）。
-> CLI/Plugin **0.1.10** 是待验收发布候选，不代表已有可安装的新 Release。
+> CLI/Plugin **0.1.11** 是待验收发布候选，不代表已有可安装的新 Release。
 > 既有 [CLI 0.1.5](https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.5)
 > 和 [Plugin 0.1.5](https://github.com/chengcheng93/harness-mrtool/releases/tag/plugin-v0.1.5)
 > 不包含本次强制标签改造。新版尚未发布，完成发布后才更新正式下载链接。
@@ -188,7 +188,7 @@ hmr context --auth api --output json
 不查询/选择已有 Issue。AI/人将问题背景、复现或功能场景、方案、实现、测试、
 上线、回滚和验收细节填入现有 motivation/changes/verification/risk/profile 文本字段；
 CLI 渲染统一八节 Issue，无需选模板、额外 AI 调用或新增必填 Issue 字段。
-负责人为当前 API 用户，阶段日期/截止日期为 Asia/Shanghai 当日；milestone、TAPD 可不填。
+负责人为当前 API 用户，阶段日期/截止日期为同一次冻结的 Asia/Shanghai 当日。CLI 自动选择 active 项目/祖先组中 due_date 严格晚于当天的最近里程碑，同日取数值 ID 最小者；Issue/MR 初始 POST 使用同一个 milestone_id。无候选时省略并返回 no-future-milestone，读取失败在写入和票据消费前停止。TAPD 可不填。
 Issue 仅使用可用 type/priority 标签；MR 的三标签和人员都在首次 MR POST 提交。
 显式旧 `workItem`（closes/related/none）保留历史强事务，不会忽略调用者选择。
 
@@ -403,3 +403,5 @@ Windows CI、正式签名发布、真实 GitLab 与真实插件宿主验收属�
 - [架构](docs/architecture/harness-mrtool-architecture.md)
 - [本次逐需求验收与外部边界](docs/verification/mandatory-labels-2026-09-14.md)
 - [发布验收门槛](docs/verification/external-gates.md)
+
+Windows 默认 Skill 通过系统 PowerShell 5.1 的 `skill/harness-mr/scripts/run-flow.ps1` 执行 context/create；只需原生 exe，不要求 Node/Python/pwsh7。runner 的单一 JSON 保留完整 `cliResult`、Stopwatch 总耗时与各步骤耗时；Request 原始字节经 stdin 交给 CLI 校验。运行超过30秒继续等待同一进程；create 已启动但未取得完整 CLI 结果时报告 unknown 并停止，不自动重试。安装、非 Windows 直调与历史流程见 [按需说明](skill/harness-mr/references/workflows.md)。

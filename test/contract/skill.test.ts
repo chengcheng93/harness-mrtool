@@ -76,15 +76,13 @@ async function manager(paths: { readonly active: string; readonly staging: strin
   });
 }
 
-function assertApiDefaultInstructions(instructions: string): void {
+function assertApiDefaultInstructions(ordinary: string, workflows: string): void {
+  const instructions = ordinary + "\n" + workflows;
   const normalized = instructions.replace(/\s+/gu, " ");
-  const ordinary = instructions.split("## Historical")[0]!;
   const steps = [
-    "harness-mrtool schema show",
-    "harness-mrtool profiles list",
-    "harness-mrtool context --auth api",
+    "-Phase context",
     "Build the Request only after API context succeeds",
-    "harness-mrtool create --auth api",
+    "-Phase create",
   ];
   let previousIndex = -1;
   for (const step of steps) {
@@ -108,7 +106,7 @@ function assertApiDefaultInstructions(instructions: string): void {
   assert.match(normalized, /API mode may still use ordinary Git SSH transport/u);
   assert.match(normalized, /activationRequired/u);
   assert.match(normalized, /hostRefreshMayBeRequired/u);
-  assert.match(normalized, /raw JSON only when the user explicitly requests/u);
+  assert.match(normalized, /raw JSON only when (?:the user )?explicitly request/u);
   assert.doesNotMatch(instructions, /--confirm-label-type|--label-diff-digest|--confirm-migration/u);
   assert.doesNotMatch(normalized, /After create\/update succeeds, verify/u);
   assert.ok(!instructions.includes("## 1. Changes"));
@@ -128,13 +126,15 @@ function assertApiDefaultInstructions(instructions: string): void {
   }
 }
 
-test("generated Skill instructions default to Issue-first API creation and require human opt-in for SSH manual mode", () => {
-  assertApiDefaultInstructions(renderSkillInstructions({ skillVersion: "1.1.0", skillProtocol: 1 }));
+test("generated Skill instructions default to Issue-first API creation and require human opt-in for SSH manual mode", async () => {
+  assertApiDefaultInstructions(renderSkillInstructions({ skillVersion: "1.1.0", skillProtocol: 1 }),
+    await readFile(new URL("../../skill/harness-mr/references/workflows.md", import.meta.url), "utf8"));
 });
 
 for (const path of ["../../skill/harness-mr/SKILL.md", "../../plugins/harness-mrtool/skills/harness-mr/SKILL.md"]) {
   test(`${path} keeps the API default and explicit manual opt-in contract`, async () => {
-    assertApiDefaultInstructions(await readFile(new URL(path, import.meta.url), "utf8"));
+    assertApiDefaultInstructions(await readFile(new URL(path, import.meta.url), "utf8"),
+      await readFile(new URL(path.replace("SKILL.md", "references/workflows.md"), import.meta.url), "utf8"));
   });
 }
 
@@ -148,7 +148,7 @@ test("bundled and plugin Skills carry identical submission instructions", async 
 
 for (const path of ["../../skill/harness-mr/SKILL.md", "../../plugins/harness-mrtool/skills/harness-mr/SKILL.md"]) {
   test(`${path} retains executable historical resume validation and structure verification`, async () => {
-    const instructions = await readFile(new URL(path, import.meta.url), "utf8");
+    const instructions = await readFile(new URL(path.replace("SKILL.md", "references/workflows.md"), import.meta.url), "utf8");
     const commands = [...instructions.matchAll(/```text\r?\n([\s\S]*?)```/gu)]
       .map((match) => match[1]!.trim().split(/\r?\n/u))
       .find((lines) => lines.some((line) => line.includes(" --resume ")));
@@ -752,4 +752,12 @@ test("status fails closed when the Skill activation journal is non-canonical", a
   } finally {
     await rm(paths.root, { recursive: true, force: true });
   }
+});
+
+test("default Skill stays short and generated instructions exactly preserve the static contract", async () => {
+  const bundled = await readFile(new URL("../../skill/harness-mr/SKILL.md", import.meta.url), "utf8");
+  const body = bundled.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/u, "").trim();
+  assert.ok(body.split(/\r?\n/u).length <= 80);
+  const generated = renderSkillInstructions({ skillVersion: "0.1.11", skillProtocol: 1 });
+  assert.equal(generated.trim(), body.replaceAll("<skill-semver>", "0.1.11").replaceAll("<protocol>", "1"));
 });

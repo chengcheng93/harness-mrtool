@@ -16,15 +16,24 @@ test("Codex plugin packaging emits a bounded, self-contained archive", async (t)
     const result = await packagePlugin({
       inputDirectory: join(repositoryRoot, "plugins", "harness-mrtool"),
       outputDirectory: output,
-      version: "0.1.10",
+      version: "0.1.11",
     });
     const archive = await readFile(result.archivePath);
     const entries = unzipSync(archive);
     const names = Object.keys(entries).sort();
+    const instructions = Buffer.from(entries["skills/harness-mr/SKILL.md"]!).toString("utf8");
+    for (const link of instructions.matchAll(/\]\(([^)]+)\)/gu)) {
+      assert.ok(entries["skills/harness-mr/" + link[1]!], link[1] + " must resolve inside the plugin archive");
+    }
     assert.ok(names.includes(".codex-plugin/plugin.json"));
     assert.ok(names.includes("skills/harness-mr/SKILL.md"));
     assert.ok(names.includes("skills/harness-mr/scripts/bootstrap.ps1"));
     assert.ok(names.includes("README.md"));
+    for (const relative of ["scripts/run-flow.ps1", "references/workflows.md"]) {
+      const name = "skills/harness-mr/" + relative;
+      assert.ok(names.includes(name), name + " must ship in the actual plugin archive");
+      assert.deepEqual(Buffer.from(entries[name]!), await readFile(join(repositoryRoot, "skill/harness-mr", relative)));
+    }
     assert.ok(names.includes("scripts/setup-gitlab.ps1"));
     assert.ok(names.includes("hooks/hooks.json"));
     assert.ok(names.includes("hooks/session-start.ps1"));
@@ -45,7 +54,12 @@ test("Codex plugin packaging emits a bounded, self-contained archive", async (t)
     );
     const manifest = JSON.parse(Buffer.from(entries[".codex-plugin/plugin.json"]!).toString("utf8")) as Record<string, unknown>;
     assert.equal(manifest.name, "harness-mrtool");
-    assert.equal(manifest.version, "0.1.10");
+    assert.equal(manifest.version, "0.1.11");
+    const pkg = JSON.parse(await readFile(join(repositoryRoot, "package.json"), "utf8"));
+    const lock = JSON.parse(await readFile(join(repositoryRoot, "package-lock.json"), "utf8"));
+    assert.equal(pkg.version, manifest.version);
+    assert.equal(lock.version, manifest.version);
+    assert.equal(lock.packages[""].version, manifest.version);
     const sums = await readFile(result.sumsPath, "utf8");
     assert.match(sums, /^[a-f0-9]{64}  harness-mrtool-codex-plugin\.zip\n$/u);
     const readme = Buffer.from(entries["README.md"]!).toString("utf8").replace(/\s+/gu, " ");

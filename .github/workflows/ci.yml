@@ -83,6 +83,8 @@ jobs:
         run: |
           $files = @(Get-ChildItem scripts -Filter *.ps1 | Select-Object -ExpandProperty FullName)
           $files += Join-Path $PWD 'skill/harness-mr/scripts/bootstrap.ps1'
+          $files += Join-Path $PWD 'skill/harness-mr/scripts/run-flow.ps1'
+          $files += Join-Path $PWD 'plugins/harness-mrtool/skills/harness-mr/scripts/run-flow.ps1'
           foreach ($path in $files) {
             $errors = $null
             [void][System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$null, [ref]$errors)
