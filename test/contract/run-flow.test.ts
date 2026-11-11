@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import test from "node:test";
 
 const windows = process.platform === "win32";
@@ -17,24 +17,40 @@ test("Windows PowerShell 5.1 thin runner native behavior", { skip: windows ? fal
   const dir = await mkdtemp(join(tmpdir(), "run-flow native 中文 "));
   const exe = join(dir, "fake cli.exe");
   const repository = join(dir, "repository");
-  const { mkdir } = await import("node:fs/promises"); await mkdir(repository);
+  await mkdir(repository);
   const compiled = spawnSync(ps, ["-NoProfile", "-NonInteractive", "-Command", "Add-Type -Path " + quote(resolve("test/helpers/run-flow-fake-cli.cs")) + " -ReferencedAssemblies System.Web.Extensions -OutputAssembly " + quote(exe) + " -OutputType ConsoleApplication"], { encoding: "utf8", windowsHide: true });
   assert.equal(compiled.status, 0, compiled.stderr);
   let serial = 0;
-  async function run(phase: "context" | "create", options: { mode?: string; command?: string; bytes?: Buffer; stdin?: boolean; executable?: string } = {}) {
+  type RunOptions = {
+    mode?: string; command?: string; bytes?: Buffer; stdin?: boolean; executable?: string | null;
+    output?: string; env?: NodeJS.ProcessEnv; lockTail?: boolean;
+    partialPath?: "repository" | "executable" | "request"; driveRelative?: boolean;
+  };
+  async function run(phase: "context" | "create", options: RunOptions = {}) {
     const log = join(dir, "calls-" + serial++ + ".jsonl");
     const request = join(dir, "request-" + serial + ".json");
     const bytes = options.bytes ?? Buffer.from('{"body":"中文 😀 glpat-request-secret","a":1,"a":2}\r\n');
     await writeFile(request, bytes);
-    const args = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", runner, "-Phase", phase, "-Repository", repository, "-ClientVersion", "0.1.11", "-SkillProtocol", "1", "-Executable", options.executable ?? exe, ...(phase === "create" ? ["-RequestPath", options.stdin ? "-" : request] : [])];
-    // PS5.1 powershell.exe -File misbinds a standalone dash before the script runs.
-    // Invoke the documented script parameter as a quoted PowerShell literal instead.
-    const invocation = options.stdin ? ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "& " + quote(runner) + " -Phase create -Repository " + quote(repository) + " -ClientVersion 0.1.11 -SkillProtocol 1 -Executable " + quote(options.executable ?? exe) + " -RequestPath '-'" ] : args;
-    const child = spawn(ps, invocation, { windowsHide: true, env: { ...process.env, RUN_FLOW_FAKE_LOG: log, RUN_FLOW_FAKE_MODE: options.mode ?? "ok", RUN_FLOW_FAKE_COMMAND: options.command ?? (phase === "context" ? "context" : "create") } });
+    const argumentPath = (kind: RunOptions["partialPath"], absolute: string) => {
+      if (kind !== options.partialPath) return absolute;
+      return options.driveRelative ? absolute.slice(0, 2) + basename(absolute) : absolute.slice(2);
+    };
+    // PS5.1 -File misbinds a standalone dash. Quote values as PowerShell literals.
+    let command = "& " + quote(runner) + " -Phase " + phase + " -Repository " + quote(argumentPath("repository", repository)) + " -ClientVersion 0.1.11 -SkillProtocol 1";
+    if (options.executable !== null) command += " -Executable " + quote(argumentPath("executable", options.executable ?? exe));
+    if (phase === "create") command += " -RequestPath " + quote(options.stdin ? "-" : argumentPath("request", request));
+    if (options.lockTail) {
+      command = "$lock = [IO.File]::OpenRead(" + quote(request) + "); $lock.Lock(200000, 1); try { " + command + "; exit $LASTEXITCODE } finally { $lock.Dispose() }";
+    }
+    const child = spawn(ps, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command], {
+      cwd: dir, windowsHide: true,
+      env: { ...process.env, ...options.env, RUN_FLOW_FAKE_LOG: log, RUN_FLOW_FAKE_OUTPUT: options.output,
+        RUN_FLOW_FAKE_MODE: options.mode ?? "ok", RUN_FLOW_FAKE_COMMAND: options.command ?? (phase === "context" ? "context" : "create") },
+    });
     const stdout: Buffer[] = [], stderr: Buffer[] = [];
     child.stdout.on("data", (data: Buffer) => stdout.push(data)); child.stderr.on("data", (data: Buffer) => stderr.push(data));
     child.stdin.on("error", () => {}); child.stdin.end(options.stdin ? bytes : undefined);
-    const exit = await new Promise<number | null>((resolve, reject) => { child.once("error", reject); child.once("exit", resolve); });
+    const exit = await new Promise<number | null>((resolve, reject) => { child.once("error", reject); child.once("close", resolve); });
     const out = Buffer.concat(stdout).toString("utf8"); const err = Buffer.concat(stderr).toString("utf8");
     let result: any;
     try { result = JSON.parse(out); } catch { assert.fail("missing runner or invalid single runner JSON: " + err.slice(0, 500)); }
@@ -70,7 +86,18 @@ test("Windows PowerShell 5.1 thin runner native behavior", { skip: windows ? fal
     });
     await t.test("early CLI input rejection preserves complete failure envelope after broken pipe", async () => {
       const { result, exit, calls } = await run("create", { mode: "early", bytes: Buffer.alloc(5_000_000, 0x61) });
-      assert.notEqual(exit, 0); assert.equal(result.outcome, "cli-result"); assert.equal(result.cliResult.ok, false); assert.equal(result.cliResult.code, "INPUT_ERROR"); assert.equal(result.cliResult.remoteWrite.state, "none"); assert.equal(calls.filter((call) => call.kind === "start").length, 1);
+      assert.notEqual(exit, 0);
+      assert.equal(result.outcome, "cli-result");
+      assert.equal(result.cliResult.ok, false);
+      assert.equal(result.cliResult.code, "INPUT_ERROR");
+      assert.deepEqual(result.cliResult.error, { field: "request", expected: "valid", actual: "invalid", safeNextStep: "stop" });
+      assert.deepEqual(result.cliResult.remoteWrite, { state: "none", operations: [] });
+      assert.deepEqual(result.cliResult.validation, { valid: false, issues: [] });
+      assert.equal(result.cliResult.versions.cliVersion, "0.1.11");
+      assert.equal(result.cliResult.update.activationRequired, true);
+      assert.deepEqual(result.cliResult.warnings, []);
+      assert.equal(result.cliResult.data.command, "create");
+      assert.equal(calls.filter((call) => call.kind === "start").length, 1);
     });
     await t.test("nonzero, ok=false and malformed output stop at failed context step", async () => {
       for (const mode of ["nonzero", "false", "invalid", "malformed"]) {
@@ -92,6 +119,85 @@ test("Windows PowerShell 5.1 thin runner native behavior", { skip: windows ? fal
     await t.test("startup failure has bounded safe error and no fake envelope", async () => {
       const { result, exit, calls } = await run("create", { executable: join(dir, "glpat-missing-secret.exe") });
       assert.notEqual(exit, 0); assert.equal(result.cliResult, null); assert.equal(result.outcome, "not-started"); assert.equal(calls.length, 0); assert.equal(JSON.stringify(result).includes("glpat-"), false);
+    });
+    await t.test("finds the standard installer without PATH and still supports a PATH install", async () => {
+      const local = join(dir, "local");
+      const install = join(local, "HarnessMrTool");
+      await mkdir(install, { recursive: true });
+      await copyFile(exe, join(install, "harness-mrtool.exe"));
+      for (const env of [
+        { LOCALAPPDATA: local, PATH: dir },
+        { LOCALAPPDATA: dir, PATH: install },
+      ]) {
+        const { result, exit, calls } = await run("create", { executable: null, env });
+        assert.equal(exit, 0, JSON.stringify(result.error));
+        assert.equal(calls.filter(call => call.kind === "start").length, 1);
+      }
+    });
+    await t.test("rejects root-relative and drive-relative arguments before starting a process", async t => {
+      for (const partialPath of ["repository", "executable", "request"] as const) {
+        for (const driveRelative of [true, false]) {
+          await t.test(partialPath + (driveRelative ? " drive-relative" : " root-relative"), async () => {
+            const { result, exit, calls } = await run("create", { partialPath, driveRelative });
+            assert.notEqual(exit, 0);
+            assert.equal(result.outcome, "not-started");
+            assert.equal(result.error.code, "INVALID_ARGUMENT");
+            assert.equal(calls.length, 0);
+          });
+        }
+      }
+    });
+    await t.test("a locked Request tail cannot submit a readable JSON prefix", async () => {
+      const bytes = Buffer.alloc(300_000, 0x20);
+      bytes.write('{"complete":"prefix"}');
+      const { result, exit, calls } = await run("create", { bytes, lockTail: true });
+      assert.notEqual(exit, 0);
+      assert.equal(result.outcome, "not-started");
+      assert.equal(result.error.code, "REQUEST_READ_FAILED");
+      assert.equal(calls.length, 0);
+    });
+    await t.test("drains a large invalid UTF-8 result to child completion then reports unknown", async () => {
+      const { result, exit, calls } = await run("create", { mode: "invalid-utf8" });
+      assert.notEqual(exit, 0);
+      assert.equal(result.steps[0].exitCode, 0, "native writer finished without its blocked-pipe watchdog");
+      assert.equal(result.outcome, "unknown");
+      assert.equal(result.error.code, "INVALID_CLI_RESULT");
+      assert.equal(result.cliResult, null);
+      assert.equal(calls.filter(call => call.kind === "start").length, 1);
+    });
+    await t.test("validates strict JSON framing and typed CLI envelope members", async t => {
+      const envelope = {
+        schemaVersion: 1, ok: true, code: "OK", message: "text", versions: {}, update: {},
+        validation: {}, remoteWrite: {}, warnings: [], error: null, data: null,
+      };
+      const json = JSON.stringify(envelope);
+      const invalid = new Map([
+        ["single quotes", json.replaceAll('"', "'")],
+        ["unquoted key", json.replace('"ok"', "ok")],
+        ["trailing comma", json.slice(0, -1) + ",}"],
+        ["comment", json.replace("true", "/* note */true")],
+        ["multiple roots", json + "{}"],
+        ["boolean schemaVersion", json.replace(':1,', ':true,')],
+        ["string schemaVersion", json.replace(':1,', ':"1",')],
+        ["incorrect key case", json.replace('"versions"', '"Versions"')],
+      ]);
+      for (const key of ["versions", "update", "validation", "warnings"] as const) {
+        invalid.set("missing " + key, JSON.stringify({ ...envelope, [key]: undefined }));
+      }
+      for (const [name, output] of invalid) {
+        await t.test(name, async () => {
+          const { result, exit, calls } = await run("create", { output });
+          assert.notEqual(exit, 0);
+          assert.equal(result.outcome, "unknown");
+          assert.equal(result.error.code, "INVALID_CLI_RESULT");
+          assert.equal(result.cliResult, null);
+          assert.equal(calls.filter(call => call.kind === "start").length, 1);
+        });
+      }
+      const output = json.replace('"data":null', '"data": { "big": 9007199254740993, "value": 1.20e+3 }');
+      const { out, exit } = await run("create", { output });
+      assert.equal(exit, 0);
+      assert.ok(out.includes(output), "original CLI number spelling and whitespace must survive");
     });
     await t.test("large simultaneous stdout and stderr drains without deadlock", async () => {
       const { result, exit } = await run("create", { mode: "large" });

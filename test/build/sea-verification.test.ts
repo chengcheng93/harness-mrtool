@@ -113,6 +113,8 @@ test("accepts only the exact self-test JSON with an optional trailing newline", 
               },
         systemRoot: "C:\\Windows",
         expectedStdout,
+        expectedProbeStdout,
+        expectedRendererProbeStdout,
       }),
     );
   }

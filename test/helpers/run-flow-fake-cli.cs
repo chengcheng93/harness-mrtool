@@ -22,6 +22,18 @@ public class FakeCli {
   Console.Error.Write("glpat-fake-secret request-body candidate-token");
   if(selected && mode == "invalid") { Console.Write("glpat-fake-secret broken-json"); return 1; }
   if(selected && mode == "malformed") { Console.Write("{\"ok\":true}"); return 0; }
+  if(selected && mode == "invalid-utf8") {
+   // Bound the regression: an undrained OS pipe would otherwise hang this test.
+   var watchdog = new Thread(() => { Thread.Sleep(6000); Process.GetCurrentProcess().Kill(); });
+   watchdog.IsBackground = true; watchdog.Start();
+   using(var output = Console.OpenStandardOutput()) {
+    output.WriteByte(0xff);
+    output.Write(new byte[3000000], 0, 3000000);
+   }
+   return 0;
+  }
+  string raw = Environment.GetEnvironmentVariable("RUN_FLOW_FAKE_OUTPUT");
+  if(selected && raw != null) { Console.Write(raw); return 0; }
   bool ok = !(selected && (mode == "false" || mode == "nonzero" || mode == "early"));
   string padding = selected && mode == "large" ? new string('x', 2000000) : "";
   Thread stderr = new Thread(() => { if(padding.Length > 0) Console.Error.Write(padding); }); stderr.Start();

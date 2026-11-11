@@ -408,6 +408,8 @@ test("independent cache writers serialize through the shared update lock", async
   let entered = 0;
   let maximumActive = 0;
   let active = 0;
+  let signalFirst!: () => void;
+  const firstEntered = new Promise<void>((resolveEntered) => { signalFirst = resolveEntered; });
   let releaseFirst!: () => void;
   const firstGate = new Promise<void>((resolveGate) => { releaseFirst = resolveGate; });
   const injector = {
@@ -416,7 +418,10 @@ test("independent cache writers serialize through the shared update lock", async
       active += 1;
       maximumActive = Math.max(maximumActive, active);
       entered += 1;
-      if (entered === 1) await firstGate;
+      if (entered === 1) {
+        signalFirst();
+        await firstGate;
+      }
       active -= 1;
     },
   };
@@ -439,17 +444,29 @@ test("independent cache writers serialize through the shared update lock", async
   const firstWrite = first.storeVerifiedReleaseSet(snapshot({
     record: { transactionId: "tx-lock-a", releaseSetId: "stable-lock-a", manifestSequence: 51 },
   }));
-  for (let attempt = 0; attempt < 100 && entered === 0; attempt += 1) {
-    await new Promise<void>((resolveTick) => setTimeout(resolveTick, 1));
+  const writes = [firstWrite];
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    const deadline = new Promise<never>((_, reject) => {
+      timeout = setTimeout(() => reject(new Error("first writer did not reach the guarded write")), 30_000);
+    });
+    await Promise.race([firstEntered, firstWrite, deadline]);
+    assert.equal(entered, 1, "first writer reached the guarded write");
+    const secondWrite = second.storeVerifiedReleaseSet(snapshot({
+      record: { transactionId: "tx-lock-b", releaseSetId: "stable-lock-b", manifestSequence: 52 },
+    }));
+    writes.push(secondWrite);
+    await Promise.race([secondWrite, new Promise<void>((done) => setTimeout(done, 25))]);
+    assert.equal(entered, 1, "second writer entered while first writer was active");
+    releaseFirst();
+    await Promise.all(writes);
+    assert.equal(entered, 2, "both writers reached the guarded write");
+    assert.equal(maximumActive, 1);
+  } finally {
+    clearTimeout(timeout);
+    releaseFirst();
+    await Promise.allSettled(writes);
   }
-  assert.equal(entered, 1, "first writer did not reach the guarded write");
-  const secondWrite = second.storeVerifiedReleaseSet(snapshot({
-    record: { transactionId: "tx-lock-b", releaseSetId: "stable-lock-b", manifestSequence: 52 },
-  }));
-  await new Promise<void>((resolveTick) => setTimeout(resolveTick, 25));
-  assert.equal(maximumActive, 1, "second writer entered while first writer was active");
-  releaseFirst();
-  await Promise.all([firstWrite, secondWrite]);
 });
 
 

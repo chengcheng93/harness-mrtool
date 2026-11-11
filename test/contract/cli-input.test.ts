@@ -157,42 +157,16 @@ test("--non-interactive on a TTY requires structured input and never starts the 
   assert.equal(fixture.reads(), 0);
 });
 
-test("non-TTY migration requires the explicit hash flag before reading any input source", async () => {
-  let statCalls = 0;
-  let readCalls = 0;
-  let stdinReads = 0;
+test("non-TTY migration reads a valid explicit request without a confirmation hash", async () => {
+  const fixture = stdinIo(await readFile(jsonPath));
   const source = createProductionRequestSource({
-    inputIo: {
-      statFile: async () => {
-        statCalls += 1;
-        return { size: 2 };
-      },
-      readFile: async () => {
-        readCalls += 1;
-        return Buffer.from("{}", "utf8");
-      },
-      stdin: {
-        [Symbol.asyncIterator]() {
-          stdinReads += 1;
-          return (async function* () { yield Buffer.from("{}"); })();
-        },
-      },
-    },
+    inputIo: fixture.io,
     stdinIsTerminal: () => false,
   });
-
-  await assert.rejects(
-    source.read(parseCliInvocation([
-      "update",
-      "123",
-      "--migrate-template",
-      "--input",
-      "request.json",
-    ])),
-    (error: unknown) => isToolError(error, "INPUT_ERROR") &&
-      error.message === "Template migration confirmation is required for automation",
-  );
-  assert.equal(statCalls, 0);
-  assert.equal(readCalls, 0);
-  assert.equal(stdinReads, 0);
+  const request = await source.read(parseCliInvocation([
+    "update", "123", "--migrate-template", "--input", "-", "--input-format", "json",
+  ]));
+  assert.equal(fixture.reads(), 1);
+  assert.equal(request.contextId, "context:fixture-01");
+  assert.deepEqual(request.profileIds, ["code", "docs"]);
 });

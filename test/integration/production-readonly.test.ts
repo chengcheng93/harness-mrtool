@@ -538,7 +538,7 @@ test("text presentation invokes context once and never prints bearer or credenti
   assert.equal(text.includes(harness.api.credentialCanary), false);
 });
 
-test("text presentation reports only the sanitized failure code and message", async () => {
+test("text presentation reports the sanitized failure and safe next step", async () => {
   const harness = await fixture();
   const credential = "glpat-text-failure-must-not-leak";
   const stderr: string[] = [];
@@ -571,7 +571,11 @@ test("text presentation reports only the sanitized failure code and message", as
   });
 
   assert.equal(exitCode, 7);
-  assert.equal(stderr.join(""), "INTERNAL_ERROR: The command failed safely\n");
+  assert.equal(
+    stderr.join(""),
+    "INTERNAL_ERROR: The command failed safely\n" +
+      "Safe next step: Retry once, then report the command and tool version without including credentials.\n",
+  );
   assert.doesNotMatch(stderr.join(""), /glpat-text-failure-must-not-leak|REPOSITORY_ERROR/u);
 });
 

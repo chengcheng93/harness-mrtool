@@ -26,8 +26,12 @@ $stepClock = $null
 $stepRecorded = $true
 $command = $null
 $failureCode = 'INVALID_ARGUMENT'
-$inputStream = $null
-$ownsInput = $false
+$requestBytes = $null
+
+function Test-AbsolutePath([string] $Path) {
+    # .NET Framework IsPathRooted also accepts drive-relative and root-relative paths.
+    return $Path -match '^(?:[A-Za-z]:[\\/]|[\\/]{2}[^\\/]+[\\/][^\\/]+)'
+}
 
 # All command-line values are fixed flags or validated version/protocol values.
 # Repository and executable use ProcessStartInfo properties, never shell text.
@@ -46,8 +50,6 @@ function Invoke-CliStep([string] $Name, [string[]] $Arguments) {
     $info.RedirectStandardInput = $true
     $info.RedirectStandardOutput = $true
     $info.RedirectStandardError = $true
-    $info.StandardOutputEncoding = New-Object System.Text.UTF8Encoding($false, $true)
-    $info.StandardErrorEncoding = New-Object System.Text.UTF8Encoding($false, $false)
     $info.Arguments = $Arguments -join ' '
     $script:activeProcess = New-Object System.Diagnostics.Process
     $script:activeProcess.StartInfo = $info
@@ -56,14 +58,18 @@ function Invoke-CliStep([string] $Name, [string[]] $Arguments) {
     $script:failureCode = 'PROCESS_FAILED'
     # Drain both pipes before copying input or waiting; discard raw stderr so it
     # cannot disclose credentials and cannot accumulate unbounded progress text.
-    $stdout = $script:activeProcess.StandardOutput.ReadToEndAsync()
+    $outputBytes = New-Object System.IO.MemoryStream
+    $stdout = $script:activeProcess.StandardOutput.BaseStream.CopyToAsync($outputBytes)
     $stderr = $script:activeProcess.StandardError.BaseStream.CopyToAsync([System.IO.Stream]::Null)
     if ($Name -eq 'create') {
-        $copy = $script:inputStream.CopyToAsync($script:activeProcess.StandardInput.BaseStream)
-        while (-not $copy.IsCompleted) { Start-Sleep -Milliseconds 100 }
-        try { [void] $copy.GetAwaiter().GetResult() } catch [System.IO.IOException] {
-            # The CLI may reject input and close its pipe early. Still drain and
-            # inspect its authoritative envelope before deciding the outcome.
+        try {
+            $copy = $script:activeProcess.StandardInput.BaseStream.WriteAsync($requestBytes, 0, $requestBytes.Length)
+            while (-not $copy.IsCompleted) { Start-Sleep -Milliseconds 100 }
+            [void] $copy.GetAwaiter().GetResult()
+        } catch [System.IO.IOException] {
+            # Windows broken, closing or disconnected pipe after an early CLI rejection.
+            $win32Code = $_.Exception.GetBaseException().HResult -band 0xffff
+            if ($win32Code -notin @(109, 232, 233)) { throw }
         }
     }
     $script:activeProcess.StandardInput.Close()
@@ -71,7 +77,7 @@ function Invoke-CliStep([string] $Name, [string[]] $Arguments) {
     # keep waiting on this exact process, including when it exceeds thirty seconds.
     while (-not $script:activeProcess.WaitForExit(100)) { }
     $code = $script:activeProcess.ExitCode
-    $raw = $stdout.GetAwaiter().GetResult()
+    [void] $stdout.GetAwaiter().GetResult()
     [void] $stderr.GetAwaiter().GetResult()
     $script:stepClock.Stop()
     [void] $script:steps.Add([ordered]@{ command = $Name; exitCode = $code; elapsedMs = $script:stepClock.ElapsedMilliseconds })
@@ -79,20 +85,24 @@ function Invoke-CliStep([string] $Name, [string[]] $Arguments) {
     $script:activeProcess.Dispose()
     $script:activeProcess = $null
     $script:failureCode = 'INVALID_CLI_RESULT'
-    $envelope = ConvertFrom-Json -InputObject $raw -ErrorAction Stop
-    # Framing only: this wrapper does not duplicate the CLI's output or Request schema.
-    if ($null -eq $envelope -or $envelope -is [array] -or
-        $envelope.schemaVersion -ne 1 -or $envelope.ok -isnot [bool] -or
-        $envelope.code -isnot [string] -or $envelope.message -isnot [string] -or
-        $null -eq $envelope.PSObject.Properties['data'] -or
-        $null -eq $envelope.PSObject.Properties['error'] -or
-        $null -eq $envelope.PSObject.Properties['remoteWrite']) {
+    $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
+    $raw = $utf8.GetString($outputBytes.GetBuffer(), 0, $outputBytes.Length)
+    # The built-in Windows JSON parser rejects loose syntax. Typed accessors
+    # distinguish JSON booleans/numbers from strings; nested data stays opaque.
+    $envelope = [Windows.Data.Json.JsonObject, Windows.Data.Json, ContentType=WindowsRuntime]::Parse($raw)
+    $ok = $envelope.GetNamedBoolean('ok')
+    if ($envelope.GetNamedNumber('schemaVersion') -ne 1 -or
+        $envelope.GetNamedValue('code').ValueType -ne 'String' -or
+        $envelope.GetNamedValue('message').ValueType -ne 'String') {
         throw 'Invalid CLI envelope.'
+    }
+    foreach ($member in @('versions', 'update', 'validation', 'remoteWrite', 'warnings', 'error', 'data')) {
+        if (-not $envelope.ContainsKey($member)) { throw 'Incomplete CLI envelope.' }
     }
     # Embed the original valid JSON instead of reserializing its numbers/nesting.
     $script:cliJson = $raw.Trim()
     $script:outcome = 'cli-result'
-    if ($code -ne 0 -or -not $envelope.ok) {
+    if ($code -ne 0 -or -not $ok) {
         $script:failureCode = 'CLI_FAILED'
         throw 'CLI step failed.'
     }
@@ -102,7 +112,7 @@ function Invoke-CliStep([string] $Name, [string[]] $Arguments) {
 try {
     if ($PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSVersion.Minor -ne 1 -or
         ($Phase -ne 'context' -and $Phase -ne 'create') -or
-        [string]::IsNullOrWhiteSpace($Repository) -or -not [System.IO.Path]::IsPathRooted($Repository) -or
+        -not (Test-AbsolutePath $Repository) -or
         -not [System.IO.Directory]::Exists($Repository) -or
         $ClientVersion -cnotmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$' -or
         $SkillProtocol -cnotmatch '^[1-9][0-9]*$') {
@@ -110,9 +120,14 @@ try {
     }
     if ([string]::IsNullOrWhiteSpace($Executable)) {
         $failureCode = 'PROCESS_START_FAILED'
-        $Executable = (Get-Command harness-mrtool.exe -CommandType Application -ErrorAction Stop).Source
+        if (Test-AbsolutePath $env:LOCALAPPDATA) {
+            $Executable = [IO.Path]::Combine($env:LOCALAPPDATA, 'HarnessMrTool', 'harness-mrtool.exe')
+        }
+        if (-not [IO.File]::Exists($Executable)) {
+            $Executable = (Get-Command harness-mrtool.exe -CommandType Application -ErrorAction Stop).Source
+        }
     }
-    if (-not [System.IO.Path]::IsPathRooted($Executable) -or [System.IO.Path]::GetExtension($Executable) -ine '.exe') {
+    if (-not (Test-AbsolutePath $Executable) -or [System.IO.Path]::GetExtension($Executable) -ine '.exe') {
         $failureCode = 'INVALID_ARGUMENT'
         throw 'A native executable absolute path is required.'
     }
@@ -122,14 +137,23 @@ try {
         Invoke-CliStep 'profiles list' @('profiles', 'list', '--output', 'json')
         Invoke-CliStep 'context' (@('context') + $identity + @('--output', 'json'))
     } else {
+        if ($RequestPath -ne '-' -and -not (Test-AbsolutePath $RequestPath)) {
+            $failureCode = 'INVALID_ARGUMENT'
+            throw 'An absolute Request path or stdin is required.'
+        }
+        # Finish reading before starting create: a source failure must never
+        # deliver a truncated Request followed by normal EOF to a live CLI.
         $failureCode = 'REQUEST_READ_FAILED'
         if ($RequestPath -eq '-') {
-            $inputStream = [Console]::OpenStandardInput()
-        } elseif (-not [string]::IsNullOrWhiteSpace($RequestPath) -and [System.IO.Path]::IsPathRooted($RequestPath)) {
-            $inputStream = [System.IO.File]::OpenRead($RequestPath)
-            $ownsInput = $true
+            $buffer = New-Object System.IO.MemoryStream
+            try {
+                $read = [Console]::OpenStandardInput().CopyToAsync($buffer)
+                while (-not $read.IsCompleted) { Start-Sleep -Milliseconds 100 }
+                [void] $read.GetAwaiter().GetResult()
+                $requestBytes = $buffer.ToArray()
+            } finally { $buffer.Dispose() }
         } else {
-            throw 'An absolute Request path or stdin is required.'
+            $requestBytes = [IO.File]::ReadAllBytes($RequestPath)
         }
         Invoke-CliStep 'create' (@('create') + $identity + @('--input', '-', '--input-format', 'json', '--output', 'json'))
     }
@@ -151,7 +175,6 @@ try {
         }
         $activeProcess.Dispose()
     }
-    if ($ownsInput -and $null -ne $inputStream) { $inputStream.Dispose() }
     if ($exitCode -ne 0 -and $null -eq $runnerError) {
         $runnerError = [ordered]@{ code = 'CANCELLED'; message = 'Runner cancelled. Do not retry an unknown create outcome.' }
     }

@@ -45,6 +45,11 @@ export class RealGitLabelTransport implements GitLabHttpTransport {
       });
       if (path === "/api/v4/user") return respond(author);
       if (path === "/api/v4/projects/7/groups") return respond([]);
+      if (path === "/api/v4/projects/7/milestones") {
+        assert.equal(url.searchParams.get("state"), "active");
+        assert.equal(url.searchParams.get("include_ancestors"), "true");
+        return respond([]);
+      }
       if (path === "/api/v4/projects/7/labels") return respond(this.labels);
       if (path === "/api/v4/projects/7/members/all") return respond([author, reviewer]);
       if (path === "/api/v4/projects/7/repository/branches/main") return respond({ name: "main", commit: { id: this.targetSha } });
