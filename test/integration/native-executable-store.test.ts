@@ -166,9 +166,20 @@ test('the real Windows ACL adapter preserves current-user file and directory acc
  const nested=resolve(directory,'nested');await mkdir(nested);
  const inherited=resolve(nested,'inherited-file');await writeFile(inherited,'inherited bytes');
  assert.equal(await readFile(inherited,'utf8'),'inherited bytes');
+ const audit=[
+  "$ErrorActionPreference = 'Stop'",
+  `$acl = Get-Acl -LiteralPath '${directory.replaceAll("'","''")}'`,
+  "$current = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value",
+  "$rights = [System.Security.AccessControl.FileSystemRights]::FullControl",
+  "$inheritance = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'",
+  "[bool]($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | Where-Object { $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Value -eq $current -and ($_.FileSystemRights -band $rights) -eq $rights -and ($_.InheritanceFlags -band $inheritance) -eq $inheritance })",
+ ].join('; ');
+ const {stdout}=await promisify(execFile)(resolveWindowsPowerShellPath(),['-NoLogo','-NoProfile','-NonInteractive','-Command',audit],{windowsHide:true});
+ assert.equal(stdout.trim(),'True','secured directory grants current-user FullControl with both file and directory inheritance');
 });
 
-test('the real Windows ACL adapter rejects effective token-group denials',async(t)=>{
+for(const [principal,sid] of [['token-group','S-1-1-0'],['OWNER RIGHTS','S-1-3-4']] as const){
+test(`the real Windows ACL adapter rejects effective ${principal} denials`,async(t)=>{
  if(process.platform!=='win32')return t.skip('requires native Windows');
  if(process.env.GITHUB_ACTIONS==='true')return t.skip('requires a clean current-user parent ACL');
  const root=await mkdtemp(resolve(await realpath(tmpdir()),'native-denied-acl-'));t.after(()=>cleanup(root));
@@ -176,16 +187,18 @@ test('the real Windows ACL adapter rejects effective token-group denials',async(
  const script=[
   `$path = '${path.replaceAll("'","''")}'`,
   "$ErrorActionPreference = 'Stop'",
-  "$sid = New-Object System.Security.Principal.SecurityIdentifier('S-1-1-0')",
+  `$sid = New-Object System.Security.Principal.SecurityIdentifier('${sid}')`,
   "$acl = Get-Acl -LiteralPath $path",
   "$rule = New-Object System.Security.AccessControl.FileSystemAccessRule($sid, 'WriteData', 'Deny')",
   "$acl.AddAccessRule($rule)",
   "Set-Acl -LiteralPath $path -AclObject $acl",
  ].join('; ');
  await promisify(execFile)(resolveWindowsPowerShellPath(),['-NoLogo','-NoProfile','-NonInteractive','-Command',script],{windowsHide:true});
+ await assert.rejects(writeFile(path,'changed'),(error:NodeJS.ErrnoException)=>error.code==='EPERM'||error.code==='EACCES');
  await assert.rejects(systemWindowsAclVerifier.verify(path),/ACL verification failed at authorization stage/);
  assert.equal(await readFile(path,'utf8'),'private bytes');
 });
+}
 
 test('native Windows materialization uses the real ACL adapter and write-through helper',async(t)=>{
  if(process.platform!=='win32')return t.skip('requires native Windows');

@@ -98,7 +98,6 @@ export const systemWindowsAclVerifier: WindowsAclVerifier = {
       "$admins = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')",
       "$rights = [System.Security.AccessControl.FileSystemRights]::FullControl",
       "$currentValue = $current.Value",
-      "$currentPrincipals = @($current.Value) + @($identity.Groups | ForEach-Object { $_.Value })",
       "$grant = if ((Get-Item -LiteralPath $path -Force).PSIsContainer) { '(OI)(CI)(F)' } else { '(F)' }",
       "$aclArguments = @($path, '/inheritance:r', '/grant:r', ('*' + $currentValue + ':' + $grant), ('*S-1-5-18:' + $grant), ('*S-1-5-32-544:' + $grant))",
       `& ${powershellSingleQuoted(resolveWindowsIcaclsPath())} @aclArguments | Out-Null`,
@@ -119,7 +118,7 @@ export const systemWindowsAclVerifier: WindowsAclVerifier = {
       "if ($unsafe) { exit 22 }",
       "if (-not $acl.AreAccessRulesProtected) { exit 23 }",
       "$effective = $rules | Where-Object { -not ($_.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly) }",
-      "$denied = $effective | Where-Object { $_.AccessControlType -eq 'Deny' -and $_.IdentityReference.Value -in $currentPrincipals }",
+      "$denied = $effective | Where-Object { $_.AccessControlType -eq 'Deny' }",
       "$authorized = $effective | Where-Object { $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Value -eq $currentValue -and ($_.FileSystemRights -band $rights) -eq $rights }",
       "if ($denied -or -not $authorized) { exit 29 }",
     ].join("; ");
