@@ -1,3 +1,4 @@
+import { seedHistoricalMr } from "../helpers/seed-historical-mr.ts";
 import { bugLabelDiff } from "../helpers/label-diff.ts";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
@@ -6,8 +7,8 @@ import test from "node:test";
 
 import {
   createMergeRequest,
-  UnknownRemoteOutcomeError,
   type CreateMergeRequestInput,
+  type CreateMergeRequestInputs,
   type ManagedFieldsInput,
   type MergeRequestRemote,
   type RemoteMergeRequest,
@@ -195,10 +196,7 @@ class FakeMergeRequestRemote implements MergeRequestRemote {
   findOpenCalls = 0;
   current: RemoteMergeRequest | null = null;
   failWrite: WriteKind | null = null;
-  unknownCreate: "none" | "applied" = "none";
   createRecovery: "exact" | "none" | "mismatch" | "multiple" = "exact";
-  createRecoveryReadError: RemoteReadError | null = null;
-  mismatchConfirmedCreateReadback = false;
   unknownAfterWrite: WriteKind | null = null;
   unclassifiedAfterWrite: WriteKind | null = null;
   driftDescriptionBeforeRead: string | null = null;
@@ -315,53 +313,23 @@ class FakeMergeRequestRemote implements MergeRequestRemote {
     }
   }
 
+  seed(current: RemoteMergeRequest): void {
+    this.current = Object.freeze({ ...current, snapshot: this.snapshotFor(current) });
+  }
+
   /** Simulates a merge request that the retired Draft stage left as a GitLab Draft. */
   markLegacyDraft(): void {
     const current = this.requireCurrent();
     this.replace({ draft: true, title: `Draft: ${current.title}` });
   }
 
-  async create(input: CreateMergeRequestInput) {
+  async create(_input: CreateMergeRequestInput): Promise<never> {
     this.record("create");
-    this.preparePostWriteSnapshot("create");
-    assert.equal(input.sourceBranch, "fix/webengine-css");
-    const created: RemoteMergeRequest = {
-      iid: 88,
-      webUrl: `${this.gitlabOrigin}/luban/luban-studio/-/merge_requests/88`,
-      title: input.title,
-      description: input.description,
-      // A normal merge request: GitLab only creates a Draft for a Draft-prefixed title.
-      draft: isDraftTitle(input.title),
-      state: "opened",
-      sourceProjectId: input.sourceProjectId,
-      sourceBranch: input.sourceBranch,
-      targetProjectId: input.targetProjectId,
-      targetBranch: input.targetBranch,
-      sourceHeadSha: input.sourceHeadSha,
-      labelIds: [],
-      assigneeUserId: null,
-      reviewerUserIds: [],
-      squash: input.squash,
-      removeSourceBranch: input.removeSourceBranch,
-      snapshot: this.baseSnapshot,
-    };
-    this.current = Object.freeze({ ...created, snapshot: this.snapshotFor(created) });
-    if (this.unknownCreate === "applied") {
-      throw new UnknownRemoteOutcomeError("create outcome is unknown");
-    }
-    if (this.mismatchConfirmedCreateReadback) {
-      this.replace({ title: "Concurrent provisional title" });
-    }
-    return valueReceipt({ iid: this.current.iid }, "req-create");
+    throw new Error("Retired MR-only create must not reach the remote");
   }
 
   async findOpen(input: CreateMergeRequestInput) {
     this.findOpenCalls += 1;
-    if (this.createRecoveryReadError !== null && this.findOpenCalls > 1) {
-      const error = this.createRecoveryReadError;
-      this.createRecoveryReadError = null;
-      throw error;
-    }
     const current = this.current;
     if (current === null || current.state !== "opened" ||
         current.sourceProjectId !== input.sourceProjectId ||
@@ -483,28 +451,37 @@ function transactionRuntime(remote: FakeMergeRequestRemote) {
   };
 }
 
-test("create queries open merge requests before its first remote write", async () => {
+// Historical MRs are seeded locally; only the supported update transaction is exercised.
+function seedTransaction(inputs: CreateMergeRequestInputs) {
+  const seeded = seedHistoricalMr(inputs);
+  const remote = inputs.remote as FakeMergeRequestRemote;
+  remote.seed(seeded.current);
+  return { ...seeded, final: remote.current! };
+}
+
+async function updateHistoricalMergeRequest(inputs: CreateMergeRequestInputs) {
+  const remote = inputs.remote as FakeMergeRequestRemote;
+  if (remote.current === null) {
+    const seeded = seedTransaction(inputs);
+    remote.seed({ ...seeded.current, labelIds: [], assigneeUserId: null, reviewerUserIds: [] });
+  }
+  return updateMergeRequest({ ...inputs, initial: remote.current! });
+}
+
+test("create queries open merge requests before refusing legacy fresh creation", async () => {
   const fixture = await transactionFixture();
-
-  await createMergeRequest({
-    request: fixture.request,
-    initialSnapshot: fixture.snapshot,
-    resolvedCandidates: fixture.candidates,
-    bundle: fixture.bundle,
-    releaseTag: "templates-v1.0.0",
-    cliVersion: "0.1.0-dev",
-    sourceBranch: "fix/webengine-css",
-    ...transactionRuntime(fixture.remote),
-  });
-
+  await assert.rejects(createMergeRequest({ request: fixture.request, initialSnapshot: fixture.snapshot,
+    resolvedCandidates: fixture.candidates, bundle: fixture.bundle, releaseTag: "templates-v1.0.0",
+    cliVersion: "0.1.0-dev", sourceBranch: "fix/webengine-css", ...transactionRuntime(fixture.remote),
+  }), { code: "INPUT_ERROR" });
   assert.equal(fixture.remote.findOpenCalls, 1);
-  assert.equal(fixture.remote.writes[0], "create");
+  assert.deepEqual(fixture.remote.writes, []);
 });
 
 test("create refuses one or multiple existing open merge requests before writing", async () => {
   for (const count of [1, 2]) {
     const fixture = await transactionFixture();
-    await createMergeRequest({
+    seedTransaction({
       request: fixture.request,
       initialSnapshot: fixture.snapshot,
       resolvedCandidates: fixture.candidates,
@@ -537,7 +514,7 @@ test("create refuses one or multiple existing open merge requests before writing
 
 test("create upserts the one existing open managed merge request only when explicitly requested", async () => {
   const fixture = await transactionFixture();
-  const created = await createMergeRequest({
+  const created = seedTransaction({
     request: fixture.request,
     initialSnapshot: fixture.snapshot,
     resolvedCandidates: fixture.candidates,
@@ -593,12 +570,7 @@ async function pristineResumeFixture() {
     bundle: fixture.bundle, releaseTag, cliVersion: binding.cliVersion, sourceBranch: binding.sourceBranch,
     ...transactionRuntime(fixture.remote),
   };
-  fixture.remote.failReads = 1;
-  await assert.rejects(createMergeRequest(original),
-    (error: unknown) => typeof error === "object" && error !== null && "code" in error &&
-      error.code === "PARTIAL_REMOTE_STATE");
-  assert.deepEqual(fixture.remote.writes, ["create"]);
-  fixture.remote.writes.length = 0;
+  fixture.remote.seed(seedHistoricalMr({ ...original, provisional: true }).current);
   const request = normalizeAndValidateRequest({ ...fixture.request, contextId: "renewed-create-context",
     mergeRequest: { ...fixture.request.mergeRequest, labelCandidateTokens: ["fresh-type", "fresh-priority"],
       assigneeCandidateToken: "fresh-assignee" },
@@ -756,7 +728,7 @@ async function transactionFixture(gitlabOrigin = "https://gitlab.example.test"):
 
 test("the final description write is the last normal write and the final marker is read back", async () => {
   const fixture = await transactionFixture();
-  const result = await createMergeRequest({
+  const result = await updateHistoricalMergeRequest({
     request: fixture.request,
     initialSnapshot: fixture.snapshot,
     resolvedCandidates: fixture.candidates,
@@ -767,8 +739,8 @@ test("the final description write is the last normal write and the final marker 
     ...transactionRuntime(fixture.remote),
   });
 
-  assert.deepEqual(fixture.remote.writes, ["create", "add-labels", "write-fields", "write-description"]);
-  assert.deepEqual(result.completedWrites, ["create", "labels-add", "fields-write", "description-write"]);
+  assert.deepEqual(fixture.remote.writes, ["add-labels", "write-fields", "write-description"]);
+  assert.deepEqual(result.completedWrites, ["labels-add", "fields-write", "description-write"]);
   assert.equal(fixture.remote.current?.draft, false);
   assert.equal(fixture.remote.current?.title, result.writePlan.desired.title);
   assert.deepEqual(fixture.remote.current?.labelIds, [...result.writePlan.desired.labelIds].sort());
@@ -777,7 +749,7 @@ test("the final description write is the last normal write and the final marker 
   assert.equal(result.recoveredUnknownOutcome, false);
 });
 
-test("a request with zero reviewers creates a complete merge request", async () => {
+test("a request with zero reviewers updates a historical merge request", async () => {
   const fixture = await transactionFixture();
   const request = normalizeAndValidateRequest({
     ...structuredClone(fixture.request),
@@ -786,7 +758,7 @@ test("a request with zero reviewers creates a complete merge request", async () 
   });
   const candidates = fixture.candidates.filter((candidate) => candidate.kind !== "reviewer");
 
-  const result = await createMergeRequest({
+  const result = await updateHistoricalMergeRequest({
     request,
     initialSnapshot: fixture.snapshot,
     resolvedCandidates: candidates,
@@ -801,7 +773,7 @@ test("a request with zero reviewers creates a complete merge request", async () 
   assert.equal(result.final.draft, false);
   assert.deepEqual(result.final.reviewerUserIds, []);
   assert.equal(result.final.assigneeUserId, "user:10");
-  assert.deepEqual(fixture.remote.writes, ["create", "add-labels", "write-fields", "write-description"]);
+  assert.deepEqual(fixture.remote.writes, ["add-labels", "write-fields", "write-description"]);
   assert.equal(verifyMergeRequest({
     level: "ready",
     current: result.final,
@@ -814,7 +786,7 @@ test("a selected reviewer losing qualification no longer stops the transaction",
   const fixture = await transactionFixture();
   fixture.remote.dropReviewerQualification = true;
 
-  const result = await createMergeRequest({
+  const result = await updateHistoricalMergeRequest({
     request: fixture.request,
     initialSnapshot: fixture.snapshot,
     resolvedCandidates: fixture.candidates,
@@ -840,7 +812,7 @@ test("unknown label, field, and description writes continue only after exact rea
   for (const kind of ["add-labels", "write-fields", "write-description"] as const) {
     const fixture = await transactionFixture();
     fixture.remote.unknownAfterWrite = kind;
-    const result = await createMergeRequest({
+    const result = await updateHistoricalMergeRequest({
       request: fixture.request,
       initialSnapshot: fixture.snapshot,
       resolvedCandidates: fixture.candidates,
@@ -860,7 +832,7 @@ test("an unclassified adapter failure is treated as unknown until exact readback
   const fixture = await transactionFixture();
   fixture.remote.unclassifiedAfterWrite = "write-fields";
 
-  const result = await createMergeRequest({
+  const result = await updateHistoricalMergeRequest({
     request: fixture.request,
     initialSnapshot: fixture.snapshot,
     resolvedCandidates: fixture.candidates,
@@ -878,107 +850,6 @@ test("an unclassified adapter failure is treated as unknown until exact readback
   assert.equal(step?.postcondition, "matched");
 });
 
-test("an unknown create outcome is recovered by exact source and target identity", async () => {
-  const fixture = await transactionFixture();
-  fixture.remote.unknownCreate = "applied";
-
-  const result = await createMergeRequest({
-    request: fixture.request,
-    initialSnapshot: fixture.snapshot,
-    resolvedCandidates: fixture.candidates,
-    bundle: fixture.bundle,
-    releaseTag: "templates-v1.0.0",
-    cliVersion: "0.1.0-dev",
-    sourceBranch: "fix/webengine-css",
-    ...transactionRuntime(fixture.remote),
-  });
-
-  assert.equal(result.recoveredUnknownOutcome, true);
-  assert.equal(result.final.draft, false);
-  assert.deepEqual(result.completedWrites, ["create.recovered", "labels-add", "fields-write", "description-write"]);
-  assert.deepEqual(
-    result.transaction.steps.map((step) => [step.phase, step.operation]),
-    [
-      ["normal", "create"],
-      ["recovery", "create-outcome-query"],
-      ["normal", "labels-add"],
-      ["normal", "fields-write"],
-      ["normal", "description-write"],
-    ],
-  );
-});
-
-test("unknown create recovery preserves the failed query request ID", async () => {
-  const fixture = await transactionFixture();
-  fixture.remote.unknownCreate = "applied";
-  fixture.remote.createRecoveryReadError = new RemoteReadError("timeout", "req-create-outcome-query");
-  let caught: unknown;
-
-  try {
-    await createMergeRequest({
-      request: fixture.request,
-      initialSnapshot: fixture.snapshot,
-      resolvedCandidates: fixture.candidates,
-      bundle: fixture.bundle,
-      releaseTag: "templates-v1.0.0",
-      cliVersion: "0.1.0-dev",
-      sourceBranch: "fix/webengine-css",
-      ...transactionRuntime(fixture.remote),
-    });
-  } catch (error) {
-    caught = error;
-  }
-
-  const recoveryStep = getTransactionAudit(caught)?.steps.find((step) => step.operation === "create-outcome-query");
-  assert.equal(recoveryStep?.postRead.outcome, "failed");
-  assert.equal(recoveryStep?.postRead.requestId, "req-create-outcome-query");
-  assert.equal(recoveryStep?.postcondition, "unavailable");
-});
-
-test("unknown create recovery refuses zero, multiple, or non-identical candidates", async () => {
-  for (const recovery of ["none", "mismatch", "multiple"] as const) {
-    const fixture = await transactionFixture();
-    fixture.remote.unknownCreate = "applied";
-    fixture.remote.createRecovery = recovery;
-    let caught: unknown;
-    try {
-      await createMergeRequest({
-        request: fixture.request,
-        initialSnapshot: fixture.snapshot,
-        resolvedCandidates: fixture.candidates,
-        bundle: fixture.bundle,
-        releaseTag: "templates-v1.0.0",
-        cliVersion: "0.1.0-dev",
-        sourceBranch: "fix/webengine-css",
-        ...transactionRuntime(fixture.remote),
-      });
-    } catch (error) {
-      caught = error;
-    }
-    assert.equal(
-      typeof caught === "object" && caught !== null && "code" in caught ? caught.code : null,
-      "PARTIAL_REMOTE_STATE",
-    );
-    const receipt = getTransactionFailureReceipt(caught);
-    if (recovery === "mismatch") {
-      assert.equal(receipt?.iid, 88);
-      assert.equal(receipt?.iidUnavailable, false);
-      assert.equal(receipt?.webUrlUnavailable, false);
-      assert.equal(receipt?.retryCommand, "harness-mrtool verify 88 --level structure --output json");
-    } else {
-      assert.equal(receipt?.iid, null);
-      assert.equal(receipt?.iidUnavailable, true);
-      assert.equal(receipt?.webUrl, null);
-      assert.equal(receipt?.webUrlUnavailable, true);
-      assert.equal(receipt?.retryCommand, "harness-mrtool context --output json");
-    }
-    assert.equal(receipt?.failedOperation, "create-outcome-query");
-    assert.equal(receipt?.failedField, "mergeRequest.createOutcome");
-    assert.deepEqual(receipt?.completedSteps, []);
-    assert.deepEqual(fixture.remote.writes, ["create"]);
-  }
-});
-
 test("a request whose rendered title exceeds GitLab's limit writes nothing", async () => {
   const fixture = await transactionFixture();
   const raw = structuredClone(fixture.request);
@@ -988,7 +859,7 @@ test("a request whose rendered title exceeds GitLab's limit writes nothing", asy
   const request = normalizeAndValidateRequest(raw);
 
   await assert.rejects(
-    createMergeRequest({
+    updateHistoricalMergeRequest({
       request,
       initialSnapshot: fixture.snapshot,
       resolvedCandidates: fixture.candidates,
@@ -1004,150 +875,9 @@ test("a request whose rendered title exceeds GitLab's limit writes nothing", asy
   assert.deepEqual(fixture.remote.writes, []);
 });
 
-test("a rejected create maps to a stable zero-write error with an audit receipt", async () => {
-  const fixture = await transactionFixture();
-  fixture.remote.failWrite = "create";
-  let caught: unknown;
-  try {
-    await createMergeRequest({
-      request: fixture.request,
-      initialSnapshot: fixture.snapshot,
-      resolvedCandidates: fixture.candidates,
-      bundle: fixture.bundle,
-      releaseTag: "templates-v1.0.0",
-      cliVersion: "0.1.0-dev",
-      sourceBranch: "fix/webengine-css",
-      ...transactionRuntime(fixture.remote),
-    });
-  } catch (error) {
-    caught = error;
-  }
-  assert.equal(
-    typeof caught === "object" && caught !== null && "code" in caught ? caught.code : null,
-    "GITLAB_ERROR",
-  );
-  const audit = getTransactionAudit(caught);
-  assert.equal(audit?.finalState, "not-started");
-  assert.equal(audit?.steps[0]?.operation, "create");
-  assert.equal(audit?.steps[0]?.mutation?.outcome, "rejected");
-  assert.equal(getTransactionFailureReceipt(caught), null);
-});
-
-test("a deterministic post-create write failure reports a provable partial write", async () => {
-  const cases = [
-    { failWrite: "add-labels", completed: ["create"], operation: "labels-add", field: "mergeRequest.labels" },
-    { failWrite: "write-fields", completed: ["create", "labels-add"], operation: "fields-write",
-      field: "mergeRequest.fields" },
-    { failWrite: "write-description", completed: ["create", "labels-add", "fields-write"],
-      operation: "description-write", field: "mergeRequest.description" },
-  ] as const;
-
-  for (const scenario of cases) {
-    const fixture = await transactionFixture();
-    fixture.remote.failWrite = scenario.failWrite;
-    let caught: unknown;
-    try {
-      await createMergeRequest({
-        request: fixture.request,
-        initialSnapshot: fixture.snapshot,
-        resolvedCandidates: fixture.candidates,
-        bundle: fixture.bundle,
-        releaseTag: "templates-v1.0.0",
-        cliVersion: "0.1.0-dev",
-        sourceBranch: "fix/webengine-css",
-        ...transactionRuntime(fixture.remote),
-      });
-    } catch (error) {
-      caught = error;
-    }
-    assert.equal(errorCode(caught), "PARTIAL_WRITE", scenario.operation);
-    assert.equal(
-      errorMessage(caught),
-      "The merge request was created but the transaction did not complete",
-      scenario.operation,
-    );
-    assert.equal(fixture.remote.current?.draft, false, scenario.operation);
-    assert.equal(fixture.remote.current?.state, "opened", scenario.operation);
-    const audit = getTransactionAudit(caught);
-    assert.equal(audit?.finalState, "partial", scenario.operation);
-    assert.equal(audit?.steps.at(-1)?.operation, scenario.operation);
-    assert.equal(audit?.steps.at(-1)?.mutation?.outcome, "rejected", scenario.operation);
-    assert.deepEqual(getTransactionFailureReceipt(caught), {
-      receiptVersion: 1,
-      iid: 88,
-      iidUnavailable: false,
-      webUrl: "https://gitlab.example.test/luban/luban-studio/-/merge_requests/88",
-      webUrlUnavailable: false,
-      completedSteps: scenario.completed,
-      failedOperation: scenario.operation,
-      failedField: scenario.field,
-      retryCommand: "harness-mrtool update 88 --input - --non-interactive --output json",
-    }, scenario.operation);
-    assert.equal(JSON.stringify(getTransactionFailureReceipt(caught)).includes("week-token"), false);
-  }
-});
-
-test("create readback failure preserves the known IID and explicitly marks its URL unavailable", async () => {
-  const fixture = await transactionFixture();
-  fixture.remote.failReads = 1;
-  let caught: unknown;
-
-  try {
-    await createMergeRequest({
-      request: fixture.request,
-      initialSnapshot: fixture.snapshot,
-      resolvedCandidates: fixture.candidates,
-      bundle: fixture.bundle,
-      releaseTag: "templates-v1.0.0",
-      cliVersion: "0.1.0-dev",
-      sourceBranch: "fix/webengine-css",
-      ...transactionRuntime(fixture.remote),
-    });
-  } catch (error) {
-    caught = error;
-  }
-
-  assert.deepEqual(getTransactionFailureReceipt(caught), {
-    receiptVersion: 1,
-    iid: 88,
-    iidUnavailable: false,
-    webUrl: null,
-    webUrlUnavailable: true,
-    completedSteps: [],
-    failedOperation: "create",
-    failedField: "mergeRequest.readback",
-    retryCommand: "harness-mrtool verify 88 --level structure --output json",
-  });
-});
-
-test("a confirmed create readback mismatch is recorded as a mismatched postcondition", async () => {
-  const fixture = await transactionFixture();
-  fixture.remote.mismatchConfirmedCreateReadback = true;
-  let caught: unknown;
-
-  try {
-    await createMergeRequest({
-      request: fixture.request,
-      initialSnapshot: fixture.snapshot,
-      resolvedCandidates: fixture.candidates,
-      bundle: fixture.bundle,
-      releaseTag: "templates-v1.0.0",
-      cliVersion: "0.1.0-dev",
-      sourceBranch: "fix/webengine-css",
-      ...transactionRuntime(fixture.remote),
-    });
-  } catch (error) {
-    caught = error;
-  }
-
-  const createStep = getTransactionAudit(caught)?.steps.find((step) => step.operation === "create");
-  assert.equal(createStep?.postRead.outcome, "succeeded");
-  assert.equal(createStep?.postcondition, "mismatched");
-});
-
 test("structure and ready verification allow pending live gates while merge verification does not", async () => {
   const fixture = await transactionFixture();
-  const created = await createMergeRequest({
+  const created = await updateHistoricalMergeRequest({
     request: fixture.request,
     initialSnapshot: fixture.snapshot,
     resolvedCandidates: fixture.candidates,
@@ -1184,7 +914,7 @@ test("structure and ready verification allow pending live gates while merge veri
 
 test("stored verification rejects an invalid level before loading durable state", async () => {
   const fixture = await transactionFixture();
-  const created = await createMergeRequest({
+  const created = await updateHistoricalMergeRequest({
     request: fixture.request,
     initialSnapshot: fixture.snapshot,
     resolvedCandidates: fixture.candidates,
@@ -1221,7 +951,7 @@ test("the durable verification receipt is staged before the final description wr
   const fixture = await transactionFixture();
   const staged: VerificationReceiptV1[] = [];
 
-  const created = await createMergeRequest({
+  const created = await updateHistoricalMergeRequest({
     request: fixture.request,
     initialSnapshot: fixture.snapshot,
     resolvedCandidates: fixture.candidates,
@@ -1248,7 +978,7 @@ test("a durable receipt staging failure prevents the final description write", a
   const fixture = await transactionFixture();
   let caught: unknown;
   try {
-    await createMergeRequest({
+    await updateHistoricalMergeRequest({
       request: fixture.request,
       initialSnapshot: fixture.snapshot,
       resolvedCandidates: fixture.candidates,
@@ -1274,13 +1004,13 @@ test("a durable receipt staging failure prevents the final description write", a
   assert.equal(getTransactionAudit(caught)?.finalState, "partial");
   assert.equal(getTransactionFailureReceipt(caught)?.failedOperation, "verification-receipt-stage");
   assert.equal(getTransactionFailureReceipt(caught)?.failedField, "verificationReceipt");
-  assert.deepEqual(getTransactionFailureReceipt(caught)?.completedSteps, ["create", "labels-add", "fields-write"]);
+  assert.deepEqual(getTransactionFailureReceipt(caught)?.completedSteps, ["labels-add", "fields-write"]);
   assert.equal(fixture.remote.writes.includes("write-description"), false);
 });
 
 test("standalone verification reloads a trusted durable receipt and exact historical Bundle", async () => {
   const fixture = await transactionFixture();
-  const created = await createMergeRequest({
+  const created = await updateHistoricalMergeRequest({
     request: fixture.request,
     initialSnapshot: fixture.snapshot,
     resolvedCandidates: fixture.candidates,
@@ -1321,7 +1051,7 @@ test("standalone verification reloads a trusted durable receipt and exact histor
 
 test("HTTP transactions stage a receipt and standalone verification preserves its exact origin identity", async () => {
   const fixture = await transactionFixture("http://gitlab.example.test:8080");
-  const created = await createMergeRequest({
+  const created = await updateHistoricalMergeRequest({
     request: fixture.request,
     initialSnapshot: fixture.snapshot,
     resolvedCandidates: fixture.candidates,
@@ -1390,7 +1120,7 @@ test("HTTP transaction failures retain their MR URL and recovery receipt", async
   fixture.remote.failReadAfterWrite = "write-fields";
   let caught: unknown;
   try {
-    await createMergeRequest({
+    await updateHistoricalMergeRequest({
       request: fixture.request,
       initialSnapshot: fixture.snapshot,
       resolvedCandidates: fixture.candidates,
@@ -1414,7 +1144,7 @@ test("HTTP transaction failures retain their MR URL and recovery receipt", async
 
 test("standalone verification fails closed for a missing or untrusted durable receipt", async () => {
   const fixture = await transactionFixture();
-  const created = await createMergeRequest({
+  const created = await updateHistoricalMergeRequest({
     request: fixture.request,
     initialSnapshot: fixture.snapshot,
     resolvedCandidates: fixture.candidates,
@@ -1449,7 +1179,7 @@ test("standalone verification fails closed for a missing or untrusted durable re
 
 test("a durable receipt must bind every managed user identity", async () => {
   const fixture = await transactionFixture();
-  const created = await createMergeRequest({
+  const created = await updateHistoricalMergeRequest({
     request: fixture.request,
     initialSnapshot: fixture.snapshot,
     resolvedCandidates: fixture.candidates,
@@ -1489,7 +1219,7 @@ test("a durable receipt must bind every managed user identity", async () => {
 
 test("verification receipt validation rejects bearer-shaped persisted content", async () => {
   const fixture = await transactionFixture();
-  const created = await createMergeRequest({
+  const created = await updateHistoricalMergeRequest({
     request: fixture.request,
     initialSnapshot: fixture.snapshot,
     resolvedCandidates: fixture.candidates,
@@ -1518,7 +1248,7 @@ test("verification receipt validation rejects bearer-shaped persisted content", 
 
 test("merge verification never counts the MR author's approval", async () => {
   const fixture = await transactionFixture();
-  const created = await createMergeRequest({
+  const created = await updateHistoricalMergeRequest({
     request: fixture.request,
     initialSnapshot: fixture.snapshot,
     resolvedCandidates: fixture.candidates,
@@ -1558,7 +1288,7 @@ test("merge verification never counts the MR author's approval", async () => {
 
 test("merge verification requires the Policy merge lifecycle label", async () => {
   const fixture = await transactionFixture();
-  const created = await createMergeRequest({
+  const created = await updateHistoricalMergeRequest({
     request: fixture.request,
     initialSnapshot: fixture.snapshot,
     resolvedCandidates: fixture.candidates,
@@ -1603,52 +1333,9 @@ test("merge verification requires the Policy merge lifecycle label", async () =>
   );
 });
 
-test("a readback failure after the create reports unknown remote state", async () => {
-  const fixture = await transactionFixture();
-  fixture.remote.failReads = 1;
-  let caught: unknown;
-  try {
-    await createMergeRequest({
-      request: fixture.request,
-      initialSnapshot: fixture.snapshot,
-      resolvedCandidates: fixture.candidates,
-      bundle: fixture.bundle,
-      releaseTag: "templates-v1.0.0",
-      cliVersion: "0.1.0-dev",
-      sourceBranch: "fix/webengine-css",
-      ...transactionRuntime(fixture.remote),
-    });
-  } catch (error) {
-    caught = error;
-  }
-  assert.equal(errorCode(caught), "PARTIAL_REMOTE_STATE");
-  assert.equal(getTransactionAudit(caught)?.finalState, "unknown");
-  assert.deepEqual(fixture.remote.writes, ["create"]);
-  assert.equal(fixture.remote.current?.draft, false);
-});
-
-test("persistent readback failure after creation reports unknown remote state", async () => {
-  const fixture = await transactionFixture();
-  fixture.remote.failReads = 10;
-  await assert.rejects(
-    createMergeRequest({
-      request: fixture.request,
-      initialSnapshot: fixture.snapshot,
-      resolvedCandidates: fixture.candidates,
-      bundle: fixture.bundle,
-      releaseTag: "templates-v1.0.0",
-      cliVersion: "0.1.0-dev",
-      sourceBranch: "fix/webengine-css",
-      ...transactionRuntime(fixture.remote),
-    }),
-    (error: unknown) => typeof error === "object" && error !== null && "code" in error &&
-      error.code === "PARTIAL_REMOTE_STATE",
-  );
-});
-
 test("structure verification detects body drift without writing the MR", async () => {
   const fixture = await transactionFixture();
-  const created = await createMergeRequest({
+  const created = await updateHistoricalMergeRequest({
     request: fixture.request,
     initialSnapshot: fixture.snapshot,
     resolvedCandidates: fixture.candidates,
@@ -1675,7 +1362,7 @@ test("structure verification detects body drift without writing the MR", async (
 
 test("structure verification rejects a merge request that became a Draft", async () => {
   const fixture = await transactionFixture();
-  const created = await createMergeRequest({
+  const created = await updateHistoricalMergeRequest({
     request: fixture.request,
     initialSnapshot: fixture.snapshot,
     resolvedCandidates: fixture.candidates,
@@ -1700,7 +1387,7 @@ test("structure verification rejects a merge request that became a Draft", async
 
 test("verification classifies unmanaged and manually edited descriptions without writes", async () => {
   const fixture = await transactionFixture();
-  const created = await createMergeRequest({
+  const created = await updateHistoricalMergeRequest({
     request: fixture.request,
     initialSnapshot: fixture.snapshot,
     resolvedCandidates: fixture.candidates,
@@ -1732,7 +1419,7 @@ test("verification classifies unmanaged and manually edited descriptions without
 
 test("update refuses an unmanaged or manually edited description without remote writes", async () => {
   const fixture = await transactionFixture();
-  await createMergeRequest({
+  await updateHistoricalMergeRequest({
     request: fixture.request,
     initialSnapshot: fixture.snapshot,
     resolvedCandidates: fixture.candidates,
@@ -1769,7 +1456,7 @@ test("update refuses an unmanaged or manually edited description without remote 
 
 test("update maps its initial read failure without claiming a remote write", async () => {
   const fixture = await transactionFixture();
-  const created = await createMergeRequest({
+  const created = await updateHistoricalMergeRequest({
     request: fixture.request,
     initialSnapshot: fixture.snapshot,
     resolvedCandidates: fixture.candidates,
@@ -1806,7 +1493,7 @@ test("update maps its initial read failure without claiming a remote write", asy
 
 test("force replacement is limited to a managed MR with a manually edited body", async () => {
   const fixture = await transactionFixture();
-  await createMergeRequest({
+  await updateHistoricalMergeRequest({
     request: fixture.request,
     initialSnapshot: fixture.snapshot,
     resolvedCandidates: fixture.candidates,
@@ -1841,7 +1528,7 @@ test("force replacement is limited to a managed MR with a manually edited body",
 
 test("a managed merge request update rewrites fields and finishes with the description write", async () => {
   const fixture = await transactionFixture();
-  await createMergeRequest({
+  await updateHistoricalMergeRequest({
     request: fixture.request,
     initialSnapshot: fixture.snapshot,
     resolvedCandidates: fixture.candidates,
@@ -1879,7 +1566,7 @@ test("a managed merge request update rewrites fields and finishes with the descr
 
 test("update converts a legacy Draft merge request into a normal one through the title rewrite", async () => {
   const fixture = await transactionFixture();
-  const created = await createMergeRequest({
+  const created = await updateHistoricalMergeRequest({
     request: fixture.request,
     initialSnapshot: fixture.snapshot,
     resolvedCandidates: fixture.candidates,
@@ -1931,7 +1618,7 @@ test("update converts a legacy Draft merge request into a normal one through the
 
 test("an update failure after a confirmed write reports a provable partial write", async () => {
   const fixture = await transactionFixture();
-  const created = await createMergeRequest({
+  const created = await updateHistoricalMergeRequest({
     request: fixture.request,
     initialSnapshot: fixture.snapshot,
     resolvedCandidates: fixture.candidates,
@@ -1974,7 +1661,7 @@ test("an update failure after a confirmed write reports a provable partial write
 
 test("an update whose first write is rejected claims no remote write", async () => {
   const fixture = await transactionFixture();
-  const created = await createMergeRequest({
+  const created = await updateHistoricalMergeRequest({
     request: fixture.request,
     initialSnapshot: fixture.snapshot,
     resolvedCandidates: fixture.candidates,
@@ -2011,7 +1698,7 @@ test("an update whose first write is rejected claims no remote write", async () 
 
 test("update re-reads ownership and rejects description drift before its first write", async () => {
   const fixture = await transactionFixture();
-  await createMergeRequest({
+  await updateHistoricalMergeRequest({
     request: fixture.request,
     initialSnapshot: fixture.snapshot,
     resolvedCandidates: fixture.candidates,
@@ -2044,7 +1731,7 @@ test("update re-reads ownership and rejects description drift before its first w
 
 test("update reports concurrent drift found by its first mutation pre-read with zero writes", async () => {
   const fixture = await transactionFixture();
-  const created = await createMergeRequest({
+  const created = await updateHistoricalMergeRequest({
     request: fixture.request,
     initialSnapshot: fixture.snapshot,
     resolvedCandidates: fixture.candidates,
@@ -2085,7 +1772,7 @@ test("update reports concurrent drift found by its first mutation pre-read with 
 
 test("update ignores naturally changing Issue, CI, and review context for concurrency", async () => {
   const fixture = await transactionFixture();
-  const created = await createMergeRequest({
+  const created = await updateHistoricalMergeRequest({
     request: fixture.request,
     initialSnapshot: fixture.snapshot,
     resolvedCandidates: fixture.candidates,
@@ -2123,7 +1810,7 @@ test("a selected label renamed under the same stable ID stops the transaction", 
   };
   let caught: unknown;
   try {
-    await createMergeRequest({
+    await updateHistoricalMergeRequest({
       request: fixture.request,
       initialSnapshot: fixture.snapshot,
       resolvedCandidates: fixture.candidates,
@@ -2152,7 +1839,7 @@ test("a post-write identity drift records the successful read receipt before mis
   };
   let caught: unknown;
   try {
-    await createMergeRequest({
+    await updateHistoricalMergeRequest({
       request: fixture.request,
       initialSnapshot: fixture.snapshot,
       resolvedCandidates: fixture.candidates,
@@ -2175,7 +1862,7 @@ test("a post-write identity drift records the successful read receipt before mis
 
 test("update treats a successful write followed by failed readback as unknown remote state", async () => {
   const fixture = await transactionFixture();
-  const created = await createMergeRequest({
+  const created = await updateHistoricalMergeRequest({
     request: fixture.request,
     initialSnapshot: fixture.snapshot,
     resolvedCandidates: fixture.candidates,
@@ -2207,7 +1894,7 @@ test("update treats a successful write followed by failed readback as unknown re
 
 test("successful transactions expose a stable per-write audit journal", async () => {
   const fixture = await transactionFixture();
-  const result = await createMergeRequest({
+  const result = await updateHistoricalMergeRequest({
     request: fixture.request,
     initialSnapshot: fixture.snapshot,
     resolvedCandidates: fixture.candidates,
@@ -2219,13 +1906,12 @@ test("successful transactions expose a stable per-write audit journal", async ()
   });
 
   assert.equal(result.transaction.journalVersion, 2);
-  assert.equal(result.transaction.operation, "create");
+  assert.equal(result.transaction.operation, "update");
   assert.equal(result.transaction.finalState, "complete");
   assert.match(result.transaction.candidateSelectionDigest, /^[a-f0-9]{64}$/u);
   assert.deepEqual(
     result.transaction.steps.filter((step) => step.mutation !== null).map((step) => step.operation),
     [
-      "create",
       "labels-add",
       "fields-write",
       "description-write",
@@ -2242,7 +1928,7 @@ test("failed transactions retain safe audit evidence outside enumerable ToolErro
   fixture.remote.failReadAfterWrite = "write-fields";
   let caught: unknown;
   try {
-    await createMergeRequest({
+    await updateHistoricalMergeRequest({
       request: fixture.request,
       initialSnapshot: fixture.snapshot,
       resolvedCandidates: fixture.candidates,
@@ -2280,7 +1966,7 @@ test("every confirmed normal write preserves a failed readback in the audit", as
     fixture.remote.failReadAfterWriteOccurrence = scenario.occurrence;
     let caught: unknown;
     try {
-      await createMergeRequest({
+      await updateHistoricalMergeRequest({
         request: fixture.request,
         initialSnapshot: fixture.snapshot,
         resolvedCandidates: fixture.candidates,
@@ -2312,7 +1998,7 @@ test("every confirmed normal write preserves a failed readback in the audit", as
 test("final transaction verification independently rejects out-of-pool labels even with an unchanged valid marker", async () => {
   const { assertTransactionStructure } = await import("../../src/app/verify-mr.ts");
   const fixture = await transactionFixture();
-  const created = await createMergeRequest({
+  const created = await updateHistoricalMergeRequest({
     request: fixture.request, initialSnapshot: fixture.snapshot, resolvedCandidates: fixture.candidates,
     bundle: fixture.bundle, releaseTag: "templates-v1.0.0", cliVersion: "0.1.0-dev",
     sourceBranch: "fix/webengine-css", ...transactionRuntime(fixture.remote),
@@ -2328,22 +2014,22 @@ test("final transaction verification independently rejects out-of-pool labels ev
 });
 
 for (const name of ["type::bug", "priority::p2", "status::review"]) {
-  test(`a newly ambiguous planned name ${name} stops after creation without further mutation`, async () => {
+  test(`a newly ambiguous planned name ${name} stops after label synchronization without further mutation`, async () => {
     const fixture = await transactionFixture();
-    fixture.remote.duplicateLabelAfterWrite = { kind: "create", name };
-    await assert.rejects(createMergeRequest({
+    fixture.remote.duplicateLabelAfterWrite = { kind: "add-labels", name };
+    await assert.rejects(updateHistoricalMergeRequest({
       request: fixture.request, initialSnapshot: fixture.snapshot, resolvedCandidates: fixture.candidates,
       bundle: fixture.bundle, releaseTag: "templates-v1.0.0", cliVersion: "0.1.0-dev",
       sourceBranch: "fix/webengine-css", ...transactionRuntime(fixture.remote),
     }), { code: "PARTIAL_REMOTE_STATE" });
-    assert.deepEqual(fixture.remote.writes, ["create"]);
+    assert.deepEqual(fixture.remote.writes, ["add-labels"]);
     assert.equal(fixture.remote.current?.draft, false);
-    assert.deepEqual(fixture.remote.current?.labelIds, []);
+    assert.equal(fixture.remote.current?.labelIds.length, 3);
   });
 }
 test("an update stops after a selected name becomes ambiguous", async () => {
   const fixture = await transactionFixture();
-  const created = await createMergeRequest({
+  const created = await updateHistoricalMergeRequest({
     request: fixture.request, initialSnapshot: fixture.snapshot, resolvedCandidates: fixture.candidates,
     bundle: fixture.bundle, releaseTag: "templates-v1.0.0", cliVersion: "0.1.0-dev",
     sourceBranch: "fix/webengine-css", ...transactionRuntime(fixture.remote),
@@ -2368,7 +2054,7 @@ test("an update stops after a selected name becomes ambiguous", async () => {
 for (const gate of ["structure", "verify"] as const) {
   test(`${gate} independently rejects ambiguous live selected names with unchanged applied IDs`, async () => {
     const fixture = await transactionFixture();
-    const created = await createMergeRequest({
+    const created = await updateHistoricalMergeRequest({
       request: fixture.request, initialSnapshot: fixture.snapshot, resolvedCandidates: fixture.candidates,
       bundle: fixture.bundle, releaseTag: "templates-v1.0.0", cliVersion: "0.1.0-dev",
       sourceBranch: "fix/webengine-css", ...transactionRuntime(fixture.remote),
@@ -2387,7 +2073,7 @@ for (const gate of ["structure", "verify"] as const) {
 
 test("stored verification rejects live name ambiguity under the mandatory-label policy", async () => {
   const fixture = await transactionFixture();
-  const created = await createMergeRequest({
+  const created = await updateHistoricalMergeRequest({
     request: fixture.request, initialSnapshot: fixture.snapshot, resolvedCandidates: fixture.candidates,
     bundle: fixture.bundle, releaseTag: "templates-v1.0.0", cliVersion: "0.1.0-dev",
     sourceBranch: "fix/webengine-css", ...transactionRuntime(fixture.remote),

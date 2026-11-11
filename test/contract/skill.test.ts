@@ -1,3 +1,4 @@
+import packageMetadata from "../../package.json" with { type: "json" };
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -97,12 +98,10 @@ function assertApiDefaultInstructions(ordinary: string, workflows: string): void
   assert.match(normalized, /preview only when.*user explicitly requests/u);
   assert.match(normalized, /API credentials are missing or API requests fail, stop and explain/u);
   assert.match(normalized, /Never automatically fall back to manual/u);
-  assert.match(normalized, /Manual mode is disabled by default/u);
-  const manual = instructions.slice(instructions.indexOf("## Explicitly requested SSH manual handoff"));
-  assert.match(manual.replace(/\s+/gu, " "), /Manual does not support.*workItem.*new/u);
-  assert.match(manual, /examples\/request\.json/u);
-  assert.match(normalized, /only when the human explicitly requests/u);
-  assert.match(normalized, /--ssh-mr`? is disabled/u);
+  assert.match(normalized, /Every new MR requires successful Issue creation first/u);
+  assert.match(normalized, /New submissions reject.*none.*closes.*related/u);
+  assert.match(normalized, /Manual MR creation handoff is disabled/u);
+  assert.doesNotMatch(instructions, /harness-mrtool manual --auth/u);
   assert.match(normalized, /API mode may still use ordinary Git SSH transport/u);
   assert.match(normalized, /activationRequired/u);
   assert.match(normalized, /hostRefreshMayBeRequired/u);
@@ -126,13 +125,13 @@ function assertApiDefaultInstructions(ordinary: string, workflows: string): void
   }
 }
 
-test("generated Skill instructions default to Issue-first API creation and require human opt-in for SSH manual mode", async () => {
+test("generated Skill instructions require Issue-first API creation and reject manual creation", async () => {
   assertApiDefaultInstructions(renderSkillInstructions({ skillVersion: "1.1.0", skillProtocol: 1 }),
     await readFile(new URL("../../skill/harness-mr/references/workflows.md", import.meta.url), "utf8"));
 });
 
 for (const path of ["../../skill/harness-mr/SKILL.md", "../../plugins/harness-mrtool/skills/harness-mr/SKILL.md"]) {
-  test(`${path} keeps the API default and explicit manual opt-in contract`, async () => {
+  test(`${path} keeps mandatory Issue-first creation and disabled manual handoff`, async () => {
     assertApiDefaultInstructions(await readFile(new URL(path, import.meta.url), "utf8"),
       await readFile(new URL(path.replace("SKILL.md", "references/workflows.md"), import.meta.url), "utf8"));
   });
@@ -149,6 +148,8 @@ test("bundled and plugin Skills carry identical submission instructions", async 
 for (const path of ["../../skill/harness-mr/SKILL.md", "../../plugins/harness-mrtool/skills/harness-mr/SKILL.md"]) {
   test(`${path} retains executable historical resume validation and structure verification`, async () => {
     const instructions = await readFile(new URL(path.replace("SKILL.md", "references/workflows.md"), import.meta.url), "utf8");
+    const resumeSection = instructions.split("### Resume a historical provisional transaction prefix")[1]!.split("## Manual creation is disabled")[0]!;
+    assert.doesNotMatch(resumeSection, /preview/iu, "Historical resume uses its own dry-run, not new-submission preview");
     const commands = [...instructions.matchAll(/```text\r?\n([\s\S]*?)```/gu)]
       .map((match) => match[1]!.trim().split(/\r?\n/u))
       .find((lines) => lines.some((line) => line.includes(" --resume ")));
@@ -758,6 +759,6 @@ test("default Skill stays short and generated instructions exactly preserve the 
   const bundled = await readFile(new URL("../../skill/harness-mr/SKILL.md", import.meta.url), "utf8");
   const body = bundled.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/u, "").trim();
   assert.ok(body.split(/\r?\n/u).length <= 80);
-  const generated = renderSkillInstructions({ skillVersion: "0.1.11", skillProtocol: 1 });
-  assert.equal(generated.trim(), body.replaceAll("<skill-semver>", "0.1.11").replaceAll("<protocol>", "1"));
+  const generated = renderSkillInstructions({ skillVersion: packageMetadata.version, skillProtocol: 1 });
+  assert.equal(generated.trim(), body.replaceAll("<skill-semver>", packageMetadata.version).replaceAll("<protocol>", "1"));
 });

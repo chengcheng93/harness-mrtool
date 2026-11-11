@@ -1,6 +1,6 @@
 # Detailed workflows
 
-Read only the section needed for installation/auth, non-Windows direct CLI, explicit preview/manual handoff or historical MR operations. Windows default submission uses ../scripts/run-flow.ps1 as described in ../SKILL.md.
+Read only the section needed for installation/auth, non-Windows direct CLI, explicit preview or historical MR operations. Windows default submission uses ../scripts/run-flow.ps1 as described in ../SKILL.md.
 
 This Skill is a thin natural-language adapter. The CLI is the authority for
 schemas, profiles, label selection, candidate identity, rendering, Git operations,
@@ -57,7 +57,9 @@ harness-mrtool context --auth api --client codex-skill --client-version <skill-s
 
 Build the Request only after API context succeeds, using the returned schema,
 CLI-issued context/candidate identities, and repository evidence. Use
-`workItem: { "relation": "new" }`; omission also defaults to a new Issue.
+`workItem: { "relation": "new" }`; omission also selects a new Issue.
+Every new MR requires successful Issue creation first. New submissions reject
+`none`, `closes`, `related`, and `--upsert` before planning or ticket consumption.
 Do not look up or select an existing Issue for an ordinary submission.
 Put the complete problem background, reproduction or feature scenarios,
 implementation, impact, test evidence, deployment, rollback, and acceptance
@@ -114,10 +116,10 @@ contexts; they may read live data and are not completed submissions.
 
 ## Historical managed MR workflow
 
-This section applies only to the legacy strong transaction and its historical
-managed MRs. An explicit old `workItem` choice (`closes`, `related`, or `none`)
-retains that workflow; never silently discard a caller's explicit choice.
-New-Issue mode rejects upsert/resume before writes. Fast-submission MRs have a
+This section applies only to already-existing historical managed MRs. Their
+`closes`, `related`, or `none` values remain readable and updateable; they do not
+authorize new MR creation. Ordinary create rejects upsert; explicit resume
+requires proof of the existing IID and can never create. Fast-submission MRs have a
 separate marker and do not support legacy update, verify, upsert, or resume.
 Do not use this section to recover a fast submission.
 
@@ -130,10 +132,9 @@ harness-mrtool update <iid> --auth api --client codex-skill --client-version <sk
 harness-mrtool verify <iid> --auth api --level structure --client codex-skill --client-version <skill-semver> --skill-protocol <protocol> --output json
 ```
 
-Legacy upsert authenticates the existing receipt and exact historical Bundle.
-If it differs from the create context, follow `context --mr <iid>` and
-`update <iid>`, or explicitly requested template migration. Never substitute
-the current Bundle for a historical one. Migration automatically binds and
+Use `context --mr <iid>` and `update <iid>` for an existing historical MR, or
+explicitly requested template migration. Never substitute the current Bundle
+for a historical one. `create --upsert` is rejected. Migration automatically binds and
 verifies old:new hashes; do not ask for human hash entry or repeated approval.
 On historical verified success, return the verified MR link.
 
@@ -161,43 +162,26 @@ After resolving the blocker, obtain a fresh ordinary create context using the
 API context command above without `--mr`. Build a separate fresh Request with
 the same committed diff, request meaning, and selected candidate identities.
 Carry forward the existing authorization for this unchanged submission and the
-same Request meaning and automatic diff binding for resume and any requested
-preview. Historical private proof is read-only: at most 16 expired contexts
+same Request meaning and automatic diff binding for resume. Historical private proof is read-only: at most 16 expired contexts
 remain for up to 24 hours after expiry; retention never revives expired or
 consumed candidate tickets.
 
 Validate explicit resume with `--dry-run`. After it succeeds, repeat the resume
 command with `--dry-run` removed, then run structure verification and return the
-MR link. Preview remains optional on explicit request; do not ask again for an
-unchanged, already authorized submission:
+MR link. Do not ask again for an unchanged, already authorized submission:
 
 ```text
 harness-mrtool create --resume <iid> --resume-from <original-request.json> --auth api --client codex-skill --client-version <skill-semver> --skill-protocol <protocol> --input <fresh-request.json> --dry-run --output json
 harness-mrtool verify <iid> --auth api --level structure --client codex-skill --client-version <skill-semver> --skill-protocol <protocol> --output json
 ```
 
-## Explicitly requested SSH manual handoff
+## Manual creation is disabled
 
-Manual does not support `workItem: { "relation": "new" }` or an omitted
-workItem (which defaults to new). Use API create for automatic Issue creation.
-For manual handoff, start from `examples/request.json` and keep an explicit
-legacy workItem (`closes`, `related`, or `none`), with its real Issue IID or
-no-Issue reason. Do not reuse the default new-Issue submission sample.
-
-Manual mode is disabled by default. Use it only when the human explicitly requests
-an SSH manual handoff, with explicit `--auth ssh`:
-
-```text
-harness-mrtool manual --auth ssh --input - --input-format json --output json
-```
-
-Manual mode never calls GitLab or resolves labels, assignees, or reviewers. Show
-the title, description, target branch, and push plan. If the user requested the
-branch push, run with `--push` directly; do not ask for another confirmation. A branch push or subsequent user-created web MR is not
-mrtool-verified. `--ssh-mr` is disabled and returns `LABEL_ERROR` before push
-planning or execution, even with `--push`. Do not substitute raw Git push options
-or API calls to bypass this refusal. mrtool's guarantees do not govern operations
-outside it.
+Manual MR creation handoff is disabled for every workItem and auth selection,
+including `--push` and `--ssh-mr`. It stops before repository inspection, push
+planning, Git push, or network calls. Use API create so the tool first creates
+and links an Issue. Do not substitute a web handoff or raw Git push options.
+`examples/request.json` is a historical rendering fixture, not a new-submission sample.
 
 ## Updates
 

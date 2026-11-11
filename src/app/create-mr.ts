@@ -2,7 +2,7 @@ import { selectMandatoryLabels, type LabelSelectionOptions } from "./mandatory-l
 import { normalizeAndValidateRequest } from "../input/normalize.ts";
 import type { LoadedTemplateBundle } from "../bundle/load.ts";
 import type { CanonicalLabelChangeSet } from "../git/change-set.ts";
-import { isToolError, ToolError } from "../contracts/errors.ts";
+import { ToolError } from "../contracts/errors.ts";
 import type { Request } from "../contracts/request.ts";
 import type { Candidate, ContextBinding, ResolvedContext } from "../context/types.ts";
 import { renderDescription } from "../render/markdown.ts";
@@ -10,39 +10,19 @@ import {
   validateExternalContextSnapshot,
   type ExternalContextSnapshot,
 } from "../render/marker.ts";
-import {
-  assertManagedFields,
-  assertRemoteIdentity,
-  managedFields,
-  readVerified,
-  readVerifiedReceipt,
-  syncLabels,
-  transactionError,
-  writeAndRead,
-  type ManagedTransactionContext,
-} from "./compensate.ts";
+import { transactionError } from "./compensate.ts";
 import { buildWritePlan, type MergeRequestWritePlan } from "./write-plan.ts";
 import { updateMergeRequest } from "./update-mr.ts";
 import { validatePristineCreateResume } from "./resume-create.ts";
+import type { MergeRequestVerificationExpectation, VerificationReceiptWriter } from "./verify-mr.ts";
 import {
-  assertTransactionStructure,
-  isVerificationReceiptStageError,
-  stageVerificationReceipt,
-  type MergeRequestVerificationExpectation,
-  type VerificationReceiptWriter,
-} from "./verify-mr.ts";
-import { UnknownRemoteOutcomeError } from "./remote-outcome.ts";
-import {
-  isRemoteMutationError,
   isRemoteReadError,
   remoteFailureToolError,
 } from "./remote-outcome.ts";
 import type { RemoteMutationReceipt, RemoteValueReceipt } from "./remote-receipt.ts";
 import {
   attachTransactionAudit,
-  attachTransactionFailure,
   candidateSelectionDigest,
-  getTransactionAudit,
   TransactionJournal,
   type TransactionAudit,
 } from "./transaction-journal.ts";
@@ -90,7 +70,7 @@ export interface ManagedFieldsInput {
 }
 
 export interface MergeRequestRemote {
-  /** Creates a normal (non-Draft) merge request with no labels and no people. */
+  /** Retained for historical port compatibility; production adapters reject MR-only creation. */
   create(input: CreateMergeRequestInput): Promise<RemoteValueReceipt<{ readonly iid: number }>>;
   findOpen(input: CreateMergeRequestInput): Promise<RemoteValueReceipt<readonly RemoteMergeRequest[]>>;
   addLabels(iid: number, labelIds: readonly string[]): Promise<RemoteMutationReceipt>;
@@ -162,14 +142,6 @@ export async function createMergeRequest(
     initialSnapshot.sourceHeadSha,
     candidateSelectionDigest(inputs.request, inputs.resolvedCandidates, inputs.initialSnapshot),
   );
-  const context: ManagedTransactionContext = {
-    ...inputs,
-    writePlan: plan,
-    journal,
-    gitlabOrigin: inputs.gitlabOrigin,
-    verificationReceiptWriter: inputs.verificationReceiptWriter,
-  };
-  const completed: string[] = [];
   const provisionalDescription = renderDescription({
     request: inputs.request,
     snapshot: initialSnapshot,
@@ -234,7 +206,7 @@ export async function createMergeRequest(
         expected: "no open merge request, or one explicitly selected for update",
         actual: existing.value.length,
         safeNextStep: existing.value.length === 1
-          ? "Confirm updating the existing merge request and retry with --upsert."
+          ? "Run update with the existing merge request IID."
           : "Specify the intended merge request IID and run update explicitly.",
       });
     }
@@ -244,321 +216,12 @@ export async function createMergeRequest(
     attachTransactionAudit(failure, journal.snapshot());
     throw failure;
   }
-  let current: RemoteMergeRequest | null = null;
-  let recoveredUnknownOutcome = false;
-  const createStep = journal.start("normal", "create", null);
-  let createMutationRecorded = false;
-  try {
-    const created = await inputs.remote.create(createInput);
-    createStep.mutation("confirmed", created.requestId);
-    createMutationRecorded = true;
-    let readback: RemoteValueReceipt<RemoteMergeRequest>;
-    try {
-      readback = await readVerifiedReceipt(context, created.value.iid);
-      createStep.readSucceeded(readback.requestId, readback.value);
-    } catch (error) {
-      createStep.readFailed(isRemoteReadError(error) ? error.requestId : null);
-      const failure = transactionError(
-        "PARTIAL_REMOTE_STATE",
-        "The merge request was created but its independent readback failed",
-        "create readback is unavailable",
-        error,
-      );
-      journal.setFinalState("unknown");
-      const audit = journal.snapshot();
-      attachTransactionAudit(failure, audit);
-      attachTransactionFailure(failure, {
-        audit,
-        iid: created.value.iid,
-        webUrl: null,
-        completedSteps: completed,
-        retry: "verify",
-        failedOperation: "create",
-        failedField: "mergeRequest.readback",
-      });
-      throw failure;
-    }
-    current = readback.value;
-    try {
-      assertExactProvisional(current, createInput);
-      createStep.postcondition("matched");
-    } catch (error) {
-      createStep.postcondition("mismatched");
-      throw error;
-    }
-    completed.push("create");
-  } catch (error) {
-    if (createMutationRecorded) {
-      const failure = error;
-      if (getTransactionAudit(failure) === null) {
-        journal.setFinalState("unknown");
-        const audit = journal.snapshot();
-        attachTransactionAudit(failure, audit);
-        if (current !== null) {
-          attachTransactionFailure(failure, {
-            audit,
-            iid: current.iid,
-            webUrl: current.webUrl,
-            completedSteps: completed,
-            retry: "verify",
-          });
-        }
-      }
-      throw failure;
-    }
-    if (isRemoteMutationError(error, "rejected")) {
-      createStep.mutation("rejected", error.requestId);
-      const failure = remoteFailureToolError(error);
-      journal.setFinalState("not-started");
-      attachTransactionAudit(failure, journal.snapshot());
-      throw failure;
-    }
-    createStep.mutation("unknown", isRemoteMutationError(error, "unknown") ? error.requestId : null);
-    createMutationRecorded = true;
-    let matches: readonly RemoteMergeRequest[];
-    const recoveryStep = journal.start("recovery", "create-outcome-query", null);
-    try {
-      const found = await inputs.remote.findOpen(createInput);
-      matches = found.value;
-      recoveryStep.readResultSucceeded(found.requestId, matches);
-    } catch (readError) {
-      recoveryStep.readFailed(isRemoteReadError(readError) ? readError.requestId : null);
-      recoveryStep.postcondition("unavailable");
-      const failure = transactionError(
-        "PARTIAL_REMOTE_STATE",
-        "Merge request creation outcome is unknown and could not be queried",
-        "create outcome unavailable",
-        readError,
-      );
-      journal.setFinalState("unknown");
-      const audit = journal.snapshot();
-      attachTransactionAudit(failure, audit);
-      attachTransactionFailure(failure, {
-        audit,
-        iid: null,
-        webUrl: null,
-        completedSteps: completed,
-        retry: "verify",
-        failedOperation: "create-outcome-query",
-      });
-      throw failure;
-    }
-    const match = matches[0];
-    try {
-      if (matches.length !== 1 || match === undefined) {
-        throw new Error("The create query did not return exactly one merge request");
-      }
-      assertRemoteIdentity(match, context);
-      assertExactProvisional(match, createInput);
-      recoveryStep.postcondition("matched");
-    } catch (recoveryError) {
-      recoveryStep.postcondition("mismatched");
-      const failure = transactionError(
-        "PARTIAL_REMOTE_STATE",
-        "Merge request creation outcome is unknown and no exact unique MR could be proven",
-        "create query did not return one byte-equivalent provisional merge request",
-        recoveryError,
-      );
-      journal.setFinalState("unknown");
-      const audit = journal.snapshot();
-      attachTransactionAudit(failure, audit);
-      const singleCandidate = matches.length === 1 ? matches[0] : undefined;
-      attachTransactionFailure(failure, {
-        audit,
-        iid: singleCandidate?.iid ?? null,
-        webUrl: singleCandidate?.webUrl ?? null,
-        completedSteps: completed,
-        retry: "verify",
-        failedOperation: "create-outcome-query",
-      });
-      throw failure;
-    }
-    current = match;
-    recoveredUnknownOutcome = true;
-    journal.markRecoveredUnknown();
-    completed.push("create.recovered");
-  }
-
-  if (current === null) {
-    const failure = transactionError(
-      "PARTIAL_REMOTE_STATE",
-      "The merge request creation state could not be established",
-      "create produced no readable MR",
-    );
-    journal.setFinalState("unknown");
-    const audit = journal.snapshot();
-    attachTransactionAudit(failure, audit);
-    attachTransactionFailure(failure, {
-      audit,
-      iid: null,
-      webUrl: null,
-      completedSteps: completed,
-      retry: "verify",
-      failedOperation: "create",
-    });
-    throw failure;
-  }
-
-  try {
-    assertRemoteIdentity(current, context);
-    current = await syncLabels(
-      context,
-      current,
-      plan.desired.labelIds,
-      plan.managedLabelIds,
-      completed,
-      () => { recoveredUnknownOutcome = true; },
-    );
-    current = await writeAndRead(
-      context,
-      current,
-      "fields-write",
-      "normal",
-      completed,
-      () => inputs.remote.writeManagedFields(
-        current!.iid,
-        managedFields(plan, inputs.request.targetBranch),
-      ),
-      () => { recoveredUnknownOutcome = true; },
-      (value) => assertManagedFields(value, plan, inputs.request),
-    );
-
-    const finalRenderSnapshot = current.snapshot;
-    const finalDescription = renderDescription({
-      request: inputs.request,
-      snapshot: finalRenderSnapshot,
-      writePlan: plan.desired,
-      bundle: inputs.bundle,
-      releaseTag: inputs.releaseTag,
-      cliVersion: inputs.cliVersion,
-      renderPhase: "final",
-    });
-    await stageVerificationReceipt(inputs.verificationReceiptWriter, {
-      gitlabOrigin: inputs.gitlabOrigin,
-      current,
-      expected: {
-        request: inputs.request,
-        snapshot: finalRenderSnapshot,
-        writePlan: plan.desired,
-        releaseTag: inputs.releaseTag,
-        cliVersion: inputs.cliVersion,
-        description: finalDescription,
-        sourceBranch: inputs.sourceBranch,
-      },
-      bundle: inputs.bundle,
-    });
-    // The final description write is the last remote write of the transaction.
-    current = await writeAndRead(
-      context,
-      current,
-      "description-write",
-      "normal",
-      completed,
-      () => inputs.remote.writeDescription(current!.iid, finalDescription),
-      () => { recoveredUnknownOutcome = true; },
-      (value) => {
-        assertManagedFields(value, plan, inputs.request);
-        assertTransactionStructure(value, finalDescription, inputs.bundle, inputs.releaseTag);
-      },
-    );
-    journal.setFinalState("complete");
-    return transactionResult(
-      current,
-      plan,
-      completed,
-      recoveredUnknownOutcome,
-      finalRenderSnapshot,
-      finalDescription,
-      inputs,
-      journal.snapshot(),
-    );
-  } catch (error) {
-    let failure: unknown = error;
-    const verificationReceiptStageFailed = isVerificationReceiptStageError(error);
-    if (!isToolError(error, "PARTIAL_REMOTE_STATE")) {
-      try {
-        current = await readVerified(context, current.iid);
-        if (current.state !== "opened") throw new Error("MR is not open");
-        journal.setFinalState("partial");
-        failure = transactionError(
-          "PARTIAL_WRITE",
-          "The merge request was created but the transaction did not complete",
-          current.webUrl,
-          error,
-        );
-      } catch (readError) {
-        journal.setFinalState("unknown");
-        failure = transactionError(
-          "PARTIAL_REMOTE_STATE",
-          "The merge request was created but its current remote state could not be proven",
-          current.webUrl,
-          readError,
-        );
-      }
-    } else {
-      journal.setFinalState("unknown");
-    }
-    const audit = journal.snapshot();
-    attachTransactionAudit(failure, audit);
-    attachTransactionFailure(failure, {
-      audit,
-      iid: current.iid,
-      webUrl: current.webUrl,
-      completedSteps: completed,
-      retry: "update",
-      ...(verificationReceiptStageFailed
-        ? {
-            failedOperation: "verification-receipt-stage" as const,
-            failedField: "verificationReceipt",
-          }
-        : {}),
-    });
-    throw failure;
-  }
-}
-
-function assertExactProvisional(current: RemoteMergeRequest, input: CreateMergeRequestInput): void {
-  if (current.title !== input.title || current.description !== input.description ||
-      current.draft || current.state !== "opened" ||
-      current.sourceProjectId !== input.sourceProjectId || current.sourceBranch !== input.sourceBranch ||
-      current.targetProjectId !== input.targetProjectId || current.targetBranch !== input.targetBranch ||
-      current.sourceHeadSha !== input.sourceHeadSha || current.labelIds.length !== 0 ||
-      current.assigneeUserId !== null || current.reviewerUserIds.length !== 0 ||
-      current.squash !== input.squash || current.removeSourceBranch !== input.removeSourceBranch) {
-    throw transactionError(
-      "PARTIAL_REMOTE_STATE",
-      "The provisional merge request did not match the create request",
-      "create postcondition mismatch",
-    );
-  }
-}
-
-function transactionResult(
-  current: RemoteMergeRequest,
-  plan: MergeRequestWritePlan,
-  completed: string[],
-  recoveredUnknownOutcome: boolean,
-  renderSnapshot: ExternalContextSnapshot,
-  description: string,
-  inputs: CreateMergeRequestInputs,
-  transaction: TransactionAudit,
-): CreateMergeRequestResult {
-  return Object.freeze({
-    iid: current.iid,
-    webUrl: current.webUrl,
-    writePlan: plan,
-    completedWrites: Object.freeze([...completed]),
-    recoveredUnknownOutcome,
-    final: current,
-    verification: Object.freeze({
-      request: inputs.request,
-      snapshot: renderSnapshot,
-      writePlan: plan.desired,
-      releaseTag: inputs.releaseTag,
-      cliVersion: inputs.cliVersion,
-      description,
-      sourceBranch: inputs.sourceBranch,
-    }),
-    transaction,
+  const failure = new ToolError("INPUT_ERROR", "New merge requests require Issue-first submission", {
+    field: "workItem", expected: "a successfully created Issue before a new merge request",
+    actual: "legacy MR-only creation is disabled",
+    safeNextStep: "Use create with workItem omitted or relation:new; use update for an existing merge request.",
   });
+  journal.setFinalState("not-started");
+  attachTransactionAudit(failure, journal.snapshot());
+  throw failure;
 }

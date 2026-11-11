@@ -7,9 +7,9 @@ description: Use when installing or initializing harness-mrtool GitLab authoriza
 
 The CLI is the authority for schemas, profiles, candidate identity, labels,
 rendering and GitLab writes. Do not invent IDs, labels or template fields.
-Skill version: 0.1.11; protocol: 1. Keep this invocation's loaded version/protocol fixed.
+Skill version: 0.1.12; protocol: 1. Keep this invocation's loaded version/protocol fixed.
 For installation/auth initialization, non-Windows direct CLI, explicit preview,
-manual handoff or historical MRs, read [workflows](references/workflows.md) on demand.
+or historical MRs, read [workflows](references/workflows.md) on demand.
 Initialize missing GitLab API authorization immediately; never collect tokens in chat/argv/repo.
 
 ## Default Issue-first submission
@@ -33,7 +33,8 @@ the blocker. Never automatically fall back to manual mode, SSH MR creation or we
 
 3. Build the Request only after API context succeeds. Create one complete Request from
    returned schema/context/candidate identities and the reviewed diff; use
-   workItem: { "relation": "new" }. Do not select an existing Issue for ordinary submission.
+   workItem: { "relation": "new" }. Every new MR requires successful Issue creation first.
+   New submissions reject none/closes/related; do not select an existing Issue.
    Use only the unique kind=assignee/defaultSelected=true candidate for assignee;
    otherwise stop for the missing fact. Unspecified reviewers stay []; explicit usernames
    must match real reviewer candidates; never select the author as self-reviewer.
@@ -66,5 +67,5 @@ readback, verify, retry, query recovery or rollback. Return the creation-respons
 as a concise Markdown link, say created, and include runner total/step timings briefly.
 On failure/partial write preserve CLI ok/code/remoteWrite, known Issue URL, MR failure or
 unknown outcome, audit, activationRequired and hostRefreshMayBeRequired. Stop immediately.
-For an explicit old workItem or historical MR, follow the on-demand workflows; never use
+For existing historical MRs, follow the on-demand workflows; never use
 legacy update/verify/upsert/resume to recover a fast submission.

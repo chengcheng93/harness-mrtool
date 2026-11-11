@@ -1,5 +1,7 @@
 # harness-mrtool：原理、实现逻辑与使用手册
 
+> 历史操作记录：自 0.1.12 起，新建 MR 必须先成功创建并关联 Issue。本文旧 `manual`/`--upsert` 示例已失效，旧 workItem 仅供已有历史 MR。当前流程以 [命令参考](../commands/reference.md) 为准；手工 MR 交接已禁用，历史恢复只能操作经验证的已有 IID。
+
 > 适合复制到 Notion 的项目说明文档
 >
 > 当前源码候选：CLI/Plugin `0.1.10`，Template Bundle `1.2.0`，默认 API 新建 Issue → MR；尚未发布。

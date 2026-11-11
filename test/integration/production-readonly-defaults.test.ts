@@ -811,6 +811,10 @@ test("context publishes the new-Issue schema while historical MR context keeps i
   assert.deepEqual(omitted, { relation: "new" });
   assert.equal(validate(withoutWorkItem), true, JSON.stringify(validate.errors));
 
+  for (const workItem of [{ relation: "none", noIssueReason: "legacy" }, { relation: "closes", iid: 37 }, { relation: "related", iid: 37 }]) {
+    assert.equal(validate({ ...withoutWorkItem, workItem }), false, workItem.relation);
+  }
+
   const existing = await services.context!(parseCliInvocation(["context", "--mr", "88", "--output", "json"]));
   assert.ok(existing.output?.data);
   assert.deepEqual(existing.output.data.inputSchema, historical.bundle.schema);
@@ -818,6 +822,9 @@ test("context publishes the new-Issue schema while historical MR context keeps i
     .compile(existing.output.data.inputSchema as object);
   assert.equal(validateHistorical(request), false, "historical Bundle does not acquire new-Issue mode");
   assert.equal(validateHistorical(withoutWorkItem), false, "historical workItem remains required");
+  for (const workItem of [{ relation: "none", noIssueReason: "legacy" }, { relation: "closes", iid: 37 }, { relation: "related", iid: 37 }]) {
+    assert.equal(validateHistorical({ ...withoutWorkItem, workItem }), true, workItem.relation);
+  }
 });
 
 test("context MR uses only the injected exact historical loader and migration records both Bundles", async () => {

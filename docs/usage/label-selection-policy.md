@@ -3,7 +3,7 @@
 ## 状态与适用范围
 
 本工作树的 Template Bundle 为 `1.2.0`。默认 production 入口已接入 API
-`create`、`create --upsert`、`update`、`verify` 和自动标签交互向导。
+`create`、历史 `update`、`verify` 和自动标签交互向导。
 CLI 与 Skill 默认使用 API 自动 MR 流程；缺少 Token 或 API 失败时停止，
 不会自动回退到 manual/SSH。`--auth auto` 仅兼容选择 API。
 这是本地实现状态，不代表已发布、已上线或通过真实 GitLab 验收。
@@ -51,12 +51,10 @@ CLI 读取已提交的 canonical actual diff，绑定 `sourceHeadSha`、`targetR
 ## 写入、dry-run 与已有 MR
 
 默认 `workItem: new`（省略时相同）校验 diff 和实时库存后，创建 Issue，再以完整初始 POST 创建关联 MR，直接返回创建响应中的链接；写入后不回读、不补写、不重试。三标签在 MR 创建请求中一次发送，输出只声明 `creation-response`。
-不增加普通预览或确认步骤。只有用户主动要求时才执行 preview/dry-run。历史显式 `closes/related/none` 仍用原事务回读验证。`preview` 以及 API create/update 的 `--dry-run` 不推送、
+不增加普通预览或确认步骤。只有用户主动要求时才执行 preview/dry-run。仅已有历史 MR 的 `closes/related/none` 仍用原事务更新和回读验证；新建拒绝这三种值。`preview` 以及 API create/update 的 `--dry-run` 不推送、
 不执行 GitLab 写入，也不消费候选 context；仍可读取实时上下文，不等于离线。
 
-新模式不支持 upsert、resume、旧强验证或更新入口；后续普通 Git push 仍会更新分支内容。历史显式 `closes/related/none` 的 `create --upsert` 必须认证已有 MR 的 receipt 和历史 Bundle。如果已有 MR
-使用的 Bundle 与 create context 不同，当前路径要求 `context --mr <iid>` 后
-执行 `update <iid>`，或显式迁移；不得静默回退到当前 Bundle。
+新建 MR 必须先成功创建并关联 Issue，拒绝 `--upsert`。快速创建不支持历史 resume、强验证或更新入口；后续普通 Git push 仍会更新分支内容。已有历史 MR 使用 `context --mr <iid>` 后执行 `update <iid>`，或显式迁移；resume 只能恢复经验证的已有 IID，不能创建新 MR。
 已有可信签名的历史 policy 仍可按其原 Bundle 读取和验证，不能原地改写成新策略。
 新 `1.2.0` 写入的三标签约束也不能被历史 policy 宽松规则绕过。
 `--migrate-template` 是显式迁移入口：先用
@@ -69,8 +67,4 @@ production adapter 验证原 receipt、精确历史 Bundle 和迁移绑定后执
 
 ## SSH 边界
 
-`manual --ssh-mr` 返回 `LABEL_ERROR`，在 push 规划或执行前停止，即使同时
-传入 `--push` 也不能创建基础 MR。仅在人类明确要求手工交接时，才使用
-`manual --auth ssh` 生成本地 handoff，已要求推送时直接附加 `--push` 执行；这不是
-已验证 MR，更不代表标签达标。Git 本身仍可使用 SSH 发布源分支，随后由
-默认 API 快速路径创建 Issue 与 MR；历史显式模式仍使用原事务校验标签。manual 必须显式提供旧 workItem，不支持 new 或省略。
+所有 `manual` MR 交接已禁用，包括 `--push` 和 `--ssh-mr`，在仓库检查、推送规划和执行前停止。Git 本身仍可使用 SSH 发布源分支，随后统一通过 API 先创建并关联 Issue，再创建 MR。

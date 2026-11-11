@@ -1,3 +1,4 @@
+import { seedHistoricalMr } from "../helpers/seed-historical-mr.ts";
 import { bugLabelDiff } from "../helpers/label-diff.ts";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
@@ -11,11 +12,11 @@ import type {
   MergeRequestRemote,
   RemoteMergeRequest,
 } from "../../src/app/create-mr.ts";
+import type { UpdateMergeRequestInputs, UpdateMergeRequestResult } from "../../src/app/update-mr.ts";
 import { mutationReceipt, valueReceipt } from "../../src/app/remote-receipt.ts";
 import {
   RemoteMutationError,
   RemoteReadError,
-  UnknownRemoteOutcomeError,
 } from "../../src/app/remote-outcome.ts";
 import {
   attachTransactionAudit,
@@ -217,7 +218,7 @@ function result(
   final: RemoteMergeRequest,
   base: Fixture,
   auditSnapshot: ExternalContextSnapshot = operation === "create" ? base.snapshot : final.snapshot,
-): CreateMergeRequestResult {
+): UpdateMergeRequestResult {
   const desired = {
     writePlanVersion: 1 as const,
     title: final.title,
@@ -258,7 +259,7 @@ function result(
       final,
       candidateSelectionDigest(base.request, candidates, auditSnapshot),
     ),
-    ...(operation === "update" ? { forcedDescriptionReplacement: false } : {}),
+    forcedDescriptionReplacement: false,
   };
 }
 
@@ -474,7 +475,6 @@ class StatefulRemote implements MergeRequestRemote {
   readonly operations: string[] = [];
   current: RemoteMergeRequest | null = null;
   failReadAt: number | null = null;
-  unknownCreate = false;
   private requestSequence = 0;
   private readSequence = 0;
 
@@ -515,43 +515,9 @@ class StatefulRemote implements MergeRequestRemote {
     return valueReceipt(this.current === null ? [] : [this.current], this.requestId("find"));
   }
 
-  async create(input: CreateMergeRequestInput) {
+  async create(_input: CreateMergeRequestInput): Promise<never> {
     this.operations.push("mutation:create");
-    const snapshot = validateExternalContextSnapshot({
-      ...structuredClone(this.initialSnapshot),
-      metadataRead: { status: "available", evidence: "MR metadata read." },
-      mergeRequest: {
-        ...structuredClone(this.initialSnapshot.mergeRequest),
-        iid: 88,
-        lifecycle: "ready",
-        labelIds: [],
-        assigneeUserId: null,
-        reviewerUserIds: [],
-      },
-    });
-    // The tool creates a normal (non-Draft) merge request with no labels and no people.
-    this.current = Object.freeze({
-      iid: 88,
-      webUrl: "https://gitlab.example.test/luban/luban-studio/-/merge_requests/88",
-      title: input.title,
-      description: input.description,
-      draft: false,
-      state: "opened" as const,
-      sourceProjectId: input.sourceProjectId,
-      sourceBranch: input.sourceBranch,
-      targetProjectId: input.targetProjectId,
-      targetBranch: input.targetBranch,
-      sourceHeadSha: input.sourceHeadSha,
-      labelIds: [],
-      assigneeUserId: null,
-      reviewerUserIds: [],
-      squash: input.squash,
-      removeSourceBranch: input.removeSourceBranch,
-      snapshot,
-    });
-    const requestId = this.requestId("create");
-    if (this.unknownCreate) throw new UnknownRemoteOutcomeError("unknown create", requestId);
-    return valueReceipt({ iid: 88 }, requestId);
+    throw new Error("Retired MR-only create must not reach the remote");
   }
 
   async addLabels(_iid: number, labelIds: readonly string[]) {
@@ -645,6 +611,24 @@ function candidateStore(
   };
 }
 
+async function performInjectedUpdate(input: UpdateMergeRequestInputs, remote: RecordingRemote, base: Fixture) {
+  const read = async () => { try { await input.remote.read(88); } catch { /* injected domain deliberately forges successful reads */ } };
+  await read();
+  await read();
+  try { await input.remote.writeManagedFields(88, managedFieldsInput()); } catch { /* deliberately forged success */ }
+  await read();
+  await input.verificationReceiptWriter.stageAuthenticated({} as never);
+  await read();
+  await input.remote.writeDescription(88, "final");
+  await read();
+  return result("update", remote.current, base);
+}
+
+function updateFixture(base: Fixture): Fixture {
+  return { ...base, snapshot: existingSnapshot(base.snapshot),
+    binding: { ...base.binding, operation: "update", mrIid: 88 } };
+}
+
 function preparedCreate(base: Fixture, remote: MergeRequestRemote): PreparedCreateMergeRequestCommand {
   return {
     labelDiff: bugLabelDiff(base.snapshot),
@@ -714,19 +698,19 @@ test("trusted current binding rejects release, protocol, and remote provenance d
     }),
   ];
   for (const drift of scenarios) {
-    const base = await fixture();
+    const base = updateFixture(await fixture());
     const operations: string[] = [];
     const remote = new RecordingRemote(operations, base.snapshot);
     const adapter = createMergeRequestCommandAdapter(dependencies(base, operations, {
       readCurrentBinding: async () => drift(base.binding),
       domain: {
-        create: async () => result("create", remote.current, base),
-        update: async () => { throw new Error("unused"); },
+        update: async () => result("update", remote.current, base),
+        create: async () => { throw new Error("unused"); },
       },
     }));
 
     await assert.rejects(
-      adapter.create({ upsert: false, prepare: async () => preparedCreate(base, remote) }),
+      adapter.update({ forceReplaceDescription: false, prepare: async () => preparedUpdate(base, remote) }),
       (error: unknown) => error instanceof ToolError && error.code === "INTERNAL_ERROR",
     );
     assert.deepEqual(operations, []);
@@ -734,7 +718,7 @@ test("trusted current binding rejects release, protocol, and remote provenance d
 });
 
 test("candidate preflight snapshot must exactly match the prepared repository snapshot", async () => {
-  const base = await fixture();
+  const base = updateFixture(await fixture());
   const operations: string[] = [];
   const remote = new RecordingRemote(operations, base.snapshot);
   const driftedSnapshot = validateExternalContextSnapshot({
@@ -757,24 +741,24 @@ test("candidate preflight snapshot must exactly match the prepared repository sn
       },
     },
     domain: {
-      create: async () => result("create", remote.current, base),
-      update: async () => { throw new Error("unused"); },
+      update: async () => result("update", remote.current, base),
+      create: async () => { throw new Error("unused"); },
     },
   }));
 
   await assert.rejects(
-    adapter.create({ upsert: false, prepare: async () => preparedCreate(base, remote) }),
+    adapter.update({ forceReplaceDescription: false, prepare: async () => preparedUpdate(base, remote) }),
     (error: unknown) => error instanceof ToolError && error.code === "INTERNAL_ERROR",
   );
   assert.deepEqual(operations, ["candidate:false"]);
 });
 
 test("prepared request mutation during an await is rejected before candidate access", async () => {
-  const base = await fixture();
+  const base = updateFixture(await fixture());
   const operations: string[] = [];
   const remote = new RecordingRemote(operations, base.snapshot);
   const prepared = {
-    ...preparedCreate(base, remote),
+    ...preparedUpdate(base, remote),
     request: structuredClone(base.request),
     binding: structuredClone(base.binding),
     initialSnapshot: structuredClone(base.snapshot),
@@ -785,23 +769,23 @@ test("prepared request mutation during an await is rejected before candidate acc
       return structuredClone(base.binding);
     },
     domain: {
-      create: async (input) => {
-        await input.remote.create(createInput());
-        return result("create", remote.current, base);
+      update: async (input) => {
+        await input.remote.writeManagedFields(88, managedFieldsInput());
+        return result("update", remote.current, base);
       },
-      update: async () => { throw new Error("unused"); },
+      create: async () => { throw new Error("unused"); },
     },
   }));
 
   await assert.rejects(
-    adapter.create({ upsert: false, prepare: async () => prepared }),
+    adapter.update({ forceReplaceDescription: false, prepare: async () => prepared }),
     (error: unknown) => error instanceof ToolError && error.code === "INTERNAL_ERROR",
   );
   assert.deepEqual(operations, []);
 });
 
 test("trusted binding drift after preflight is rejected before consume and mutation", async () => {
-  const base = await fixture();
+  const base = updateFixture(await fixture());
   const operations: string[] = [];
   const remote = new RecordingRemote(operations, base.snapshot);
   let bindingReads = 0;
@@ -813,17 +797,16 @@ test("trusted binding drift after preflight is rejected before consume and mutat
         : { ...structuredClone(base.binding), releaseSetId: "stable-43" };
     },
     domain: {
-      create: async (input) => {
-        await input.remote.findOpen(createInput());
-        await input.remote.create(createInput());
-        return result("create", remote.current, base);
+      update: async (input) => {
+        await input.remote.writeManagedFields(88, managedFieldsInput());
+        return result("update", remote.current, base);
       },
-      update: async () => { throw new Error("unused"); },
+      create: async () => { throw new Error("unused"); },
     },
   }));
 
   await assert.rejects(
-    adapter.create({ upsert: false, prepare: async () => preparedCreate(base, remote) }),
+    adapter.update({ forceReplaceDescription: false, prepare: async () => preparedUpdate(base, remote) }),
     (error: unknown) => error instanceof RemoteMutationError && error.outcome === "rejected" && error.reason === "conflict",
   );
   assert.equal(bindingReads, 2);
@@ -832,21 +815,19 @@ test("trusted binding drift after preflight is rejected before consume and mutat
 });
 
 test("an injected write domain cannot return success without gate, exact audit, and final identity proof", async (t) => {
-  const scenarios = ["no-gate", "digest", "identity", "operation"] as const;
+  const scenarios = ["valid", "no-gate", "digest", "identity", "operation"] as const;
   for (const scenario of scenarios) {
     await t.test(scenario, async () => {
-      const base = await fixture();
+      const base = updateFixture(await fixture());
       const operations: string[] = [];
       const remote = new RecordingRemote(operations, base.snapshot);
+      remote.readRequestIds = ["req-initial-update", "req-pre-fields", "req-read-fields", "req-pre-description", "req-read-description"];
       const adapter = createMergeRequestCommandAdapter(dependencies(base, operations, {
         domain: {
-          create: async (input) => {
-            if (scenario !== "no-gate") await input.remote.create(createInput());
-            const successful = result(
-              scenario === "operation" ? "update" : "create",
-              remote.current,
-              base,
-            );
+          update: async (input) => {
+            const successful = scenario === "no-gate" ? result("update", remote.current, base)
+              : await performInjectedUpdate(input, remote, base);
+            if (scenario === "operation") return { ...successful, transaction: { ...successful.transaction, operation: "create" } };
             if (scenario === "digest") {
               return {
                 ...successful,
@@ -861,299 +842,99 @@ test("an injected write domain cannot return success without gate, exact audit, 
             }
             return successful;
           },
-          update: async () => { throw new Error("unused"); },
+          create: async () => { throw new Error("unused"); },
         },
       }));
 
-      await assert.rejects(
-        adapter.create({ upsert: false, prepare: async () => preparedCreate(base, remote) }),
-        (error: unknown) => error instanceof ToolError && error.code === "INTERNAL_ERROR",
-        scenario,
-      );
+      const execution = adapter.update({ forceReplaceDescription: false, prepare: async () => preparedUpdate(base, remote) });
+      if (scenario === "valid") assert.equal((await execution).output?.data?.command, "update");
+      else await assert.rejects(execution, (error: unknown) => error instanceof ToolError && error.code === "INTERNAL_ERROR", scenario);
     });
   }
 });
 
 test("write success proof binds each mutation method, outcome, order, and completed write", async (t) => {
-  const scenarios = [
-    "only-description-write",
-    "wrong-order",
-    "duplicate-request-id",
-    "rejected",
-    "unknown",
-    "read-only",
-    "completed-order",
-  ] as const;
-  for (const scenario of scenarios) {
+  for (const scenario of ["valid", "only-description-write", "wrong-order", "duplicate-request-id", "rejected", "unknown", "read-only", "completed-order"] as const) {
     await t.test(scenario, async () => {
-      const base = await fixture();
-      const operations: string[] = [];
+      const base = updateFixture(await fixture()); const operations: string[] = [];
       const remote = new RecordingRemote(operations, base.snapshot);
+      remote.readRequestIds = ["req-initial-update", "req-pre-fields", "req-read-fields", "req-pre-description", "req-read-description"];
       if (scenario === "duplicate-request-id") {
-        remote.create = async () => {
-          operations.push("mutation:create");
-          return valueReceipt({ iid: 88 }, "req-description");
-        };
-        remote.writeManagedFields = async () => {
-          operations.push("mutation:write-fields");
-          return mutationReceipt("req-description");
-        };
-        remote.writeDescription = async () => {
-          operations.push("mutation:write-description");
-          return mutationReceipt("req-description");
-        };
-      } else if (scenario === "rejected") {
-        remote.create = async () => {
-          operations.push("mutation:create");
-          throw new RemoteMutationError("rejected", "validation", "req-create");
-        };
-      } else if (scenario === "unknown") {
-        remote.create = async () => {
-          operations.push("mutation:create");
-          throw new UnknownRemoteOutcomeError("unknown create", "req-create");
-        };
+        remote.writeManagedFields = async () => { operations.push("mutation:write-fields"); return mutationReceipt("req-description"); };
+      } else if (scenario === "rejected" || scenario === "unknown") {
+        remote.writeManagedFields = async () => { operations.push("mutation:write-fields");
+          throw new RemoteMutationError(scenario === "rejected" ? "rejected" : "unknown", "validation", "req-fields"); };
       }
-      const adapter = createMergeRequestCommandAdapter(dependencies(base, operations, {
-        domain: {
-          create: async (input) => {
-            if (scenario === "read-only") {
-              await input.remote.findOpen(createInput());
-              await input.remote.read(88);
-            } else if (scenario === "only-description-write") {
-              await input.remote.writeDescription(88, "final");
-            } else if (scenario === "wrong-order") {
-              await input.remote.writeDescription(88, "final");
-              await input.remote.writeManagedFields(88, managedFieldsInput());
-              await input.remote.create(createInput());
-            } else {
-              try {
-                await input.remote.create(createInput());
-              } catch {
-                // The injected domain is deliberately trying to turn a failed write into success.
-              }
-              await input.remote.writeManagedFields(88, managedFieldsInput());
-              await input.remote.writeDescription(88, "final");
-            }
-            const successful = result("create", remote.current, base);
-            if (scenario === "only-description-write" || scenario === "duplicate-request-id") {
-              const transaction = structuredClone(successful.transaction);
-              for (const step of transaction.steps) {
-                if (step.mutation !== null) {
-                  (step.mutation as { requestId: string | null }).requestId = "req-description";
-                }
-              }
-              return { ...successful, transaction };
-            }
-            if (scenario === "completed-order") {
-              return { ...successful, completedWrites: ["description-write", "fields-write", "create"] };
-            }
-            return successful;
-          },
-          update: async () => { throw new Error("unused"); },
-        },
-      }));
-
-      await assert.rejects(
-        adapter.create({ upsert: false, prepare: async () => preparedCreate(base, remote) }),
-        (error: unknown) => error instanceof ToolError && error.code === "INTERNAL_ERROR",
-      );
+      const adapter = createMergeRequestCommandAdapter(dependencies(base, operations, { domain: {
+        create: async () => { throw new Error("unused"); }, update: async input => {
+          let successful;
+          if (scenario === "read-only") { await input.remote.read(88); successful = result("update", remote.current, base); }
+          else if (scenario === "only-description-write") { await input.remote.writeDescription(88, "final"); successful = result("update", remote.current, base); }
+          else if (scenario === "wrong-order") { await input.remote.writeDescription(88, "final"); successful = await performInjectedUpdate(input, remote, base); }
+          else successful = await performInjectedUpdate(input, remote, base);
+          if (scenario === "duplicate-request-id") {
+            const transaction = structuredClone(successful.transaction);
+            for (const step of transaction.steps) if (step.mutation !== null)
+              (step.mutation as {requestId:string|null}).requestId = "req-description";
+            return {...successful, transaction};
+          }
+          if (scenario === "completed-order") return {...successful, completedWrites:["description-write", "fields-write"]};
+          return successful;
+        } } }));
+      const execution=adapter.update({forceReplaceDescription:false,prepare:async()=>preparedUpdate(base,remote)});
+      if(scenario==="valid") assert.equal((await execution).output?.data?.command,"update");
+      else await assert.rejects(execution,(error:unknown)=>error instanceof ToolError && error.code==="INTERNAL_ERROR");
     });
   }
-});
-
-test("unknown create recovery requires the remote reads claimed by the audit", async () => {
-  const base = await fixture();
-  const operations: string[] = [];
-  const remote = new RecordingRemote(operations, base.snapshot);
-  remote.create = async () => {
-    operations.push("mutation:create");
-    throw new UnknownRemoteOutcomeError("unknown create", "req-create");
-  };
-  const adapter = createMergeRequestCommandAdapter(dependencies(base, operations, {
-    domain: {
-      create: async (input) => {
-        try {
-          await input.remote.create(createInput());
-        } catch {
-          // Deliberately omit the recovery query and every mutation readback.
-        }
-        await input.remote.writeManagedFields(88, managedFieldsInput());
-        await input.remote.writeDescription(88, "final");
-        const forged = result("create", remote.current, base);
-        const journal = new TransactionJournal(
-          "create",
-          remote.current.sourceHeadSha,
-          forged.transaction.candidateSelectionDigest,
-        );
-        const created = journal.start("normal", "create", null);
-        created.mutation("unknown", "req-create");
-        const recovery = journal.start("recovery", "create-outcome-query", null);
-        recovery.readResultSucceeded("req-recovery", [remote.current]);
-        recovery.postcondition("matched");
-        journal.markRecoveredUnknown();
-        const fields = journal.start("normal", "fields-write", remote.current, "req-pre-fields");
-        fields.mutation("confirmed", "req-fields");
-        fields.readSucceeded("req-read-fields", remote.current);
-        fields.postcondition("matched");
-        const description = journal.start(
-          "normal",
-          "description-write",
-          remote.current,
-          "req-pre-description",
-        );
-        description.mutation("confirmed", "req-description");
-        description.readSucceeded("req-read-description", remote.current);
-        description.postcondition("matched");
-        journal.setFinalState("complete");
-        return {
-          ...forged,
-          completedWrites: ["create.recovered", "fields-write", "description-write"],
-          recoveredUnknownOutcome: true,
-          transaction: journal.snapshot(),
-        };
-      },
-      update: async () => { throw new Error("unused"); },
-    },
-  }));
-
-  await assert.rejects(
-    adapter.create({ upsert: false, prepare: async () => preparedCreate(base, remote) }),
-    (error: unknown) => error instanceof ToolError && error.code === "INTERNAL_ERROR",
-  );
-  assert.equal(operations.some((operation) => operation.startsWith("read:")), false);
 });
 
 test("write success binds every audit read to the exact remote query trace", async (t) => {
-  const scenarios = [
-    "missing",
-    "wrong-method",
-    "wrong-request-id",
-    "wrong-order",
-    "reused-request-id",
-    "threw-read",
-    "snapshot-mismatch",
-  ] as const;
-  for (const scenario of scenarios) {
+  for (const scenario of ["valid", "missing", "wrong-method", "wrong-request-id", "wrong-order", "reused-request-id", "threw-read", "snapshot-mismatch"] as const) {
     await t.test(scenario, async () => {
-      const base = await fixture();
-      const operations: string[] = [];
-      const remote = new RecordingRemote(operations, base.snapshot);
-      const final = remote.current;
-      const drifted = Object.freeze({ ...final, description: "different remote description" });
-      const ids = [
-        scenario === "wrong-request-id" ? "req-wrong"
-          : scenario === "reused-request-id" ? "req-create" : "req-read-create",
-        "req-pre-fields",
-        "req-read-fields",
-        "req-pre-description",
-        "req-read-description",
-      ];
-      const values = [scenario === "snapshot-mismatch" ? drifted : final, final, final, final, final];
-      if (scenario === "wrong-method") {
-        ids.shift();
-        values.shift();
-        let findCalls = 0;
-        remote.findOpen = async () => {
-          operations.push("read:find-open");
-          findCalls += 1;
-          return findCalls === 1
-            ? valueReceipt([], "req-find")
-            : valueReceipt([final], "req-read-create");
-        };
-      }
-      let readIndex = 0;
-      remote.read = async () => {
-        operations.push("read:mr");
-        const index = readIndex++;
-        if (scenario === "threw-read" && index === 0) {
-          throw new RemoteReadError("network", "req-read-create");
-        }
-        return valueReceipt(values[index] ?? final, ids[index] ?? `req-extra-${String(index)}`);
-      };
-      const adapter = createMergeRequestCommandAdapter(dependencies(base, operations, {
-        domain: {
-          create: async (input) => {
-            await input.remote.findOpen(createInput());
-            await input.remote.create(createInput());
-            if (scenario !== "missing") {
-              if (scenario === "wrong-method") {
-                await input.remote.findOpen(createInput());
-              } else {
-                try {
-                  await input.remote.read(88);
-                } catch {
-                  // The fake domain continues and forges a successful read receipt in its audit.
-                }
-              }
-              if (scenario === "wrong-order") {
-                await input.remote.writeManagedFields(88, managedFieldsInput());
-                await input.remote.read(88);
-              } else {
-                await input.remote.read(88);
-                await input.remote.writeManagedFields(88, managedFieldsInput());
-              }
-              await input.remote.read(88);
-              await input.remote.read(88);
-            } else {
-              await input.remote.writeManagedFields(88, managedFieldsInput());
-            }
-            await input.remote.writeDescription(88, "final");
-            if (scenario !== "missing") await input.remote.read(88);
-            const forged = result("create", final, base);
-            if (scenario === "reused-request-id") {
-              const transaction = structuredClone(forged.transaction);
-              const createStep = transaction.steps[0];
-              if (createStep !== undefined) {
-                (createStep.postRead as { requestId: string | null }).requestId = "req-create";
-              }
-              return { ...forged, transaction };
-            }
-            return forged;
-          },
-          update: async () => { throw new Error("unused"); },
-        },
-      }));
-
-      await assert.rejects(
-        adapter.create({ upsert: false, prepare: async () => preparedCreate(base, remote) }),
-        (error: unknown) => error instanceof ToolError && error.code === "INTERNAL_ERROR",
-      );
+      const base = updateFixture(await fixture()); const operations:string[]=[];
+      const remote = new RecordingRemote(operations,base.snapshot); const final=remote.current;
+      const ids=["req-initial-update","req-pre-fields","req-read-fields","req-pre-description","req-read-description"];
+      let readIndex=0;
+      remote.read=async()=>{ const index=readIndex++; operations.push("read:mr");
+        if(scenario==="threw-read" && index===2) throw new RemoteReadError("network",ids[index]??null);
+        const value=scenario==="snapshot-mismatch" && index===2?{...final,description:"changed"}:final;
+        return valueReceipt(value,scenario==="wrong-request-id"&&index===2?"req-wrong":
+          scenario==="reused-request-id"&&index===2?"req-fields":ids[index]??"extra"); };
+      const adapter=createMergeRequestCommandAdapter(dependencies(base,operations,{domain:{
+        create:async()=>{throw new Error("unused");},update:async input=>{
+          await input.remote.read(88);
+          if(scenario==="wrong-method") await input.remote.findOpen(createInput());
+          else if(scenario!=="missing" && scenario!=="wrong-order") await input.remote.read(88);
+          await input.remote.writeManagedFields(88,managedFieldsInput());
+          if(scenario==="wrong-order") await input.remote.read(88);
+          try{await input.remote.read(88);}catch{/* domain forges successful postread */}
+          await input.verificationReceiptWriter.stageAuthenticated({} as never);
+          await input.remote.read(88); await input.remote.writeDescription(88,"final"); await input.remote.read(88);
+          const forged=result("update",final,base);
+          if(scenario==="reused-request-id"){const transaction=structuredClone(forged.transaction);
+            (transaction.steps[0]!.postRead as {requestId:string|null}).requestId="req-fields";return {...forged,transaction};}
+          return forged;
+        }}}));
+      const execution=adapter.update({forceReplaceDescription:false,prepare:async()=>preparedUpdate(base,remote)});
+      if(scenario==="valid") assert.equal((await execution).output?.data?.command,"update");
+      else await assert.rejects(execution,(error:unknown)=>error instanceof ToolError && error.code==="INTERNAL_ERROR");
     });
   }
 });
 
-test("the default create domain satisfies the exact remote query proof", async () => {
-  const base = await fixture();
-  const durable = durableVerificationFixture(base);
-  const writeBase: Fixture = {
-    ...base,
-    request: durable.request,
-    snapshot: durable.initialSnapshot,
-  };
-  const operations: string[] = [];
-  const remote = new StatefulRemote(writeBase.snapshot);
-  const adapter = createMergeRequestCommandAdapter(dependencies(writeBase, operations, {
-    candidateStore: durableCandidateStore(writeBase, operations, durable.resolved),
-  }));
-
-  const execution = await adapter.create({
-    upsert: false,
-    prepare: async () => preparedCreate(writeBase, remote),
-  });
-
-  assert.equal(execution.output?.data?.command, "create");
-  assert.equal(execution.output?.data?.lifecycle, "ready");
-  assert.equal(execution.context?.remoteWrite?.state, "written");
-  assert.equal(remote.operations[0], "read:find-open");
-  assert.deepEqual(remote.operations.filter((operation) => operation.startsWith("mutation:")), [
-    "mutation:create",
-    "mutation:add-labels",
-    "mutation:write-fields",
-    "mutation:write-description",
-  ]);
-  assert.deepEqual(execution.output?.data?.completedWrites, ["create", "labels-add", "fields-write", "description-write"]);
-  assert.equal(remote.current?.draft, false);
-  assert.equal(remote.operations.at(-1), "read:mr");
+test("the default update domain satisfies the exact remote query proof for a seeded historical MR", async () => {
+  const base = await fixture(); const durable = durableVerificationFixture(base);
+  const writeBase:Fixture={...base,request:durable.request,snapshot:durable.current.snapshot,
+    binding:{...base.binding,operation:"update",mrIid:88}};
+  const operations:string[]=[];const remote=new StatefulRemote(writeBase.snapshot);remote.current=durable.current;
+  const adapter=createMergeRequestCommandAdapter(dependencies(writeBase,operations,{
+    candidateStore:durableCandidateStore(writeBase,operations,durable.resolved)}));
+  const execution=await adapter.update({forceReplaceDescription:false,prepare:async()=>({...preparedUpdate(writeBase,remote),initial:remote.current!})});
+  assert.equal(execution.output?.data?.command,"update");assert.equal(execution.output?.data?.lifecycle,"ready");
+  assert.equal(execution.context?.remoteWrite?.state,"written");assert.equal(remote.operations[0],"read:mr");
+  assert.deepEqual(remote.operations.filter(operation=>operation.startsWith("mutation:")),["mutation:write-fields","mutation:write-description"]);
+  assert.deepEqual(execution.output?.data?.completedWrites,["fields-write","description-write"]);
+  assert.equal(remote.current?.draft,false);assert.equal(remote.operations.at(-1),"read:mr");
 });
 
 async function pristineAdapterResumeFixture() {
@@ -1173,15 +954,10 @@ async function pristineAdapterResumeFixture() {
     snapshot: copyJsonValue(writeBase.snapshot), candidates: durable.resolved,
   };
   const remote = new StatefulRemote(writeBase.snapshot);
-  const plan = buildWritePlan({ request: originalRequest, snapshot: writeBase.snapshot,
-    resolvedCandidates: durable.resolved, bundle: base.bundle, labelDiff: bugLabelDiff(writeBase.snapshot) });
-  await remote.create({ ...createInput(), title: plan.provisional.title,
-    sourceProjectId: base.binding.sourceProject.id, targetProjectId: base.binding.targetProject.id,
-    sourceHeadSha: base.binding.sourceHeadSha,
-    description: renderDescription({ request: originalRequest, snapshot: writeBase.snapshot,
-      writePlan: plan.desired, bundle: base.bundle, releaseTag: base.binding.bundle.releaseTag,
-      cliVersion: base.binding.cliVersion, renderPhase: "provisional" }),
-  });
+  remote.current=seedHistoricalMr({request:originalRequest,initialSnapshot:writeBase.snapshot,
+    resolvedCandidates:durable.resolved,bundle:base.bundle,releaseTag:base.binding.bundle.releaseTag,
+    cliVersion:base.binding.cliVersion,sourceBranch:base.binding.sourceBranch,gitlabOrigin:base.binding.gitlabOrigin,
+    labelDiff:bugLabelDiff(writeBase.snapshot),provisional:true}).current;
   remote.operations.length = 0;
   return { writeBase, remote, resolved: durable.resolved,
     resume: { iid: 88, originalRequest, originalContext } };
@@ -1277,68 +1053,24 @@ test("resume evidence mutation across preparation and the first-write gate rejec
   }
 });
 
-test("the default create domain binds unknown recovery to its second findOpen", async () => {
-  const base = await fixture();
-  const durable = durableVerificationFixture(base);
-  const writeBase: Fixture = {
-    ...base,
-    request: durable.request,
-    snapshot: durable.initialSnapshot,
-  };
-  const operations: string[] = [];
-  const remote = new StatefulRemote(writeBase.snapshot);
-  remote.unknownCreate = true;
-  const adapter = createMergeRequestCommandAdapter(dependencies(writeBase, operations, {
-    candidateStore: durableCandidateStore(writeBase, operations, durable.resolved),
-  }));
-
-  const execution = await adapter.create({
-    upsert: false,
-    prepare: async () => preparedCreate(writeBase, remote),
-  });
-
-  assert.deepEqual(remote.operations.slice(0, 3), [
-    "read:find-open",
-    "mutation:create",
-    "read:find-open",
-  ]);
-  assert.equal(execution.output?.data?.recoveredUnknownOutcome, true);
-  assert.equal((execution.output?.data?.completedWrites as readonly string[])[0], "create.recovered");
+test("a default update readback failure preserves the real partial audit",async()=>{
+  const base=await fixture();const durable=durableVerificationFixture(base);
+  const writeBase:Fixture={...base,request:durable.request,snapshot:durable.current.snapshot,
+    binding:{...base.binding,operation:"update",mrIid:88}};
+  const operations:string[]=[];const remote=new StatefulRemote(writeBase.snapshot);remote.current=durable.current;remote.failReadAt=3;
+  const adapter=createMergeRequestCommandAdapter(dependencies(writeBase,operations,{candidateStore:durableCandidateStore(writeBase,operations,durable.resolved)}));
+  let caught:unknown;try{await adapter.update({forceReplaceDescription:false,prepare:async()=>({...preparedUpdate(writeBase,remote),initial:remote.current!})});}catch(error){caught=error;}
+  assert.equal(caught instanceof ToolError && caught.code==="PARTIAL_REMOTE_STATE",true);
+  assert.equal(getTransactionAudit(caught)?.steps[0]?.postRead.outcome,"failed");
+  assert.deepEqual(remote.operations,["read:mr","read:mr","mutation:write-fields","read:mr"]);
 });
 
-test("a default-domain read failure preserves the real partial audit", async () => {
-  const base = await fixture();
-  const durable = durableVerificationFixture(base);
-  const writeBase: Fixture = {
-    ...base,
-    request: durable.request,
-    snapshot: durable.initialSnapshot,
-  };
-  const operations: string[] = [];
-  const remote = new StatefulRemote(writeBase.snapshot);
-  remote.failReadAt = 1;
-  const adapter = createMergeRequestCommandAdapter(dependencies(writeBase, operations, {
-    candidateStore: durableCandidateStore(writeBase, operations, durable.resolved),
-  }));
-
-  let caught: unknown;
-  try {
-    await adapter.create({ upsert: false, prepare: async () => preparedCreate(writeBase, remote) });
-  } catch (error) {
-    caught = error;
-  }
-
-  assert.equal(caught instanceof ToolError && caught.code === "PARTIAL_REMOTE_STATE", true);
-  assert.equal(getTransactionAudit(caught)?.steps[0]?.postRead.outcome, "failed");
-  assert.deepEqual(remote.operations, ["read:find-open", "mutation:create", "read:mr"]);
-});
-
-test("create runs every read precondition before live revalidation, consumption, and the first mutation", async () => {
-  const base = await fixture();
+test("update runs every read precondition before live revalidation, consumption, and the first mutation", async () => {
+  const base = updateFixture(await fixture());
   const operations: string[] = [];
   const remote = new RecordingRemote(operations, base.snapshot);
   remote.readRequestIds = [
-    "req-read-create",
+    "req-initial-update",
     "req-pre-fields",
     "req-read-fields",
     "req-pre-description",
@@ -1346,50 +1078,26 @@ test("create runs every read precondition before live revalidation, consumption,
   ];
   const adapter = createMergeRequestCommandAdapter(dependencies(base, operations, {
     domain: {
-      create: async (input) => {
-        await input.remote.findOpen(createInput());
-        await input.remote.create(createInput());
-        await input.remote.read(88);
-        await input.remote.read(88);
-        await input.remote.writeManagedFields(88, managedFieldsInput());
-        await input.remote.read(88);
-        await input.verificationReceiptWriter.stageAuthenticated({} as never);
-        await input.remote.read(88);
-        await input.remote.writeDescription(88, "final");
-        await input.remote.read(88);
-        return result("create", remote.current, base);
-      },
-      update: async () => { throw new Error("unused"); },
+      update: async input => performInjectedUpdate(input, remote, base),
+      create: async () => { throw new Error("unused"); },
     },
   }));
 
-  const execution = await adapter.create({
-    upsert: false,
+  const execution = await adapter.update({
+    forceReplaceDescription: false,
     prepare: async () => {
       operations.push("prepare");
-      return preparedCreate(base, remote);
+      return preparedUpdate(base, remote);
     },
   });
 
   assert.deepEqual(operations, [
-    "prepare",
-    "candidate:false",
-    "read:find-open",
-    "live-identities",
-    "candidate:false",
-    "candidate:true",
-    "mutation:create",
-    "read:mr",
-    "read:mr",
-    "mutation:write-fields",
-    "read:mr",
-    "receipt-stage",
-    "read:mr",
-    "mutation:write-description",
-    "read:mr",
+    "prepare", "candidate:false", "read:mr", "read:mr", "live-identities",
+    "candidate:false", "candidate:true", "mutation:write-fields", "read:mr",
+    "receipt-stage", "read:mr", "mutation:write-description", "read:mr",
   ]);
   assert.equal(execution.context?.remoteWrite?.state, "written");
-  assert.equal(execution.output?.data?.command, "create");
+  assert.equal(execution.output?.data?.command, "update");
   assert.equal(execution.output?.data?.lifecycle, "ready");
   const mandatory = execution.output?.data?.mandatoryLabels as { names: string[]; ids: string[]; diffDigest: string; source: string };
   assert.deepEqual(mandatory.names, ["type::bug", "priority::p2", "status::review"]);
@@ -1409,68 +1117,19 @@ test("create runs every read precondition before live revalidation, consumption,
   assert.equal(serialized.includes("contextId"), false);
 });
 
-test("zero, one, and many open MR outcomes preserve app-owned upsert semantics without early consumption", async () => {
-  const cases = [
-    { count: 0, upsert: false, writes: true },
-    { count: 1, upsert: false, writes: false },
-    { count: 1, upsert: true, writes: true },
-    { count: 2, upsert: false, writes: false },
-    { count: 2, upsert: true, writes: false },
-  ] as const;
-  for (const scenario of cases) {
-    const base = await fixture();
-    const operations: string[] = [];
+test("legacy adapter create rejects ordinary and upsert attempts before candidate consumption", async () => {
+  for (const upsert of [false, true]) {
+    const base = await fixture(); const operations: string[] = [];
     const remote = new RecordingRemote(operations, base.snapshot);
-    remote.open = Array.from({ length: scenario.count }, () => remote.current);
-    remote.readRequestIds = scenario.count === 0
-      ? ["req-read-create", "req-pre-fields", "req-read-fields", "req-pre-description", "req-read-description"]
-      : ["req-initial-update", "req-pre-fields", "req-read-fields", "req-pre-description", "req-read-description"];
-    const adapter = createMergeRequestCommandAdapter(dependencies(base, operations, {
-      domain: {
-        create: async (input) => {
-          const found = await input.remote.findOpen(createInput());
-          if (found.value.length === 0) {
-            await input.remote.create(createInput());
-            await input.remote.read(88);
-          } else if (found.value.length === 1 && input.upsert === true) {
-            await input.remote.read(88);
-          } else {
-            throw new ToolError("INPUT_ERROR", "Open MR selection is ambiguous", {
-              field: "mergeRequest.iid",
-              expected: "zero MRs or one MR with upsert",
-              actual: found.value.length,
-              safeNextStep: "Select the exact MR and retry.",
-            });
-          }
-          await input.remote.read(88);
-          await input.remote.writeManagedFields(88, managedFieldsInput());
-          await input.remote.read(88);
-          await input.remote.read(88);
-          await input.remote.writeDescription(88, "final");
-          await input.remote.read(88);
-          return result(
-            found.value.length === 0 ? "create" : "update",
-            remote.current,
-            base,
-            found.value.length === 0 ? base.snapshot : remote.current.snapshot,
-          );
-        },
-        update: async () => { throw new Error("unused"); },
-      },
-    }));
-    const run = adapter.create({
-      upsert: scenario.upsert,
-      prepare: async () => preparedCreate(base, remote),
-    });
-    if (scenario.writes) await run;
-    else await assert.rejects(run, (error: unknown) => error instanceof ToolError && error.code === "INPUT_ERROR");
-    assert.equal(operations.includes("candidate:true"), scenario.writes, JSON.stringify(scenario));
-    assert.equal(operations.some((operation) => operation.startsWith("mutation:")), scenario.writes);
+    const adapter = createMergeRequestCommandAdapter(dependencies(base, operations));
+    await assert.rejects(adapter.create({ upsert, prepare: async () => preparedCreate(base, remote) }),
+      { code: "INPUT_ERROR" });
+    assert.deepEqual(operations, []);
   }
 });
 
 test("preparation and live identity failures leave candidates reusable and perform zero writes", async () => {
-  const base = await fixture();
+  const base = updateFixture(await fixture());
   for (const phase of ["prepare", "live"] as const) {
     const operations: string[] = [];
     const remote = new RecordingRemote(operations, base.snapshot);
@@ -1485,20 +1144,20 @@ test("preparation and live identity failures leave candidates reusable and perfo
         });
       },
       domain: {
-        create: async (input) => {
-          await input.remote.create(createInput());
-          return result("create", remote.current, base);
+        update: async (input) => {
+          await input.remote.writeManagedFields(88, managedFieldsInput());
+          return result("update", remote.current, base);
         },
-        update: async () => { throw new Error("unused"); },
+        create: async () => { throw new Error("unused"); },
       },
     }));
     await assert.rejects(
-      adapter.create({
-        upsert: false,
+      adapter.update({
+        forceReplaceDescription: false,
         prepare: async () => {
           operations.push("prepare");
           if (phase === "prepare") throw new Error("precondition failed");
-          return preparedCreate(base, remote);
+          return preparedUpdate(base, remote);
         },
       }),
     );
@@ -1508,21 +1167,21 @@ test("preparation and live identity failures leave candidates reusable and perfo
 });
 
 test("prepared input drift from the context binding fails before candidate access", async () => {
-  const base = await fixture();
+  const base = updateFixture(await fixture());
   const operations: string[] = [];
   const remote = new RecordingRemote(operations, base.snapshot);
   const adapter = createMergeRequestCommandAdapter(dependencies(base, operations, {
     domain: {
-      create: async () => result("create", remote.current, base),
-      update: async () => { throw new Error("unused"); },
+      update: async () => result("update", remote.current, base),
+      create: async () => { throw new Error("unused"); },
     },
   }));
 
   await assert.rejects(
-    adapter.create({
-      upsert: false,
+    adapter.update({
+      forceReplaceDescription: false,
       prepare: async () => ({
-        ...preparedCreate(base, remote),
+        ...preparedUpdate(base, remote),
         sourceBranch: "feature/drifted-after-preflight",
       }),
     }),
@@ -1587,7 +1246,7 @@ test("update completes its initial remote read before the shared mutation gate",
 });
 
 test("write failures retain the original attached transaction audit for output mapping", async () => {
-  const base = await fixture();
+  const base = updateFixture(await fixture());
   const operations: string[] = [];
   const remote = new RecordingRemote(operations, base.snapshot);
   const failure = new ToolError("PARTIAL_REMOTE_STATE", "Remote state is unknown", {
@@ -1604,17 +1263,17 @@ test("write failures retain the original attached transaction audit for output m
   attachTransactionAudit(failure, journal.snapshot());
   const adapter = createMergeRequestCommandAdapter(dependencies(base, operations, {
     domain: {
-      create: async (input) => {
-        await input.remote.create(createInput());
+      update: async (input) => {
+        await input.remote.writeManagedFields(88, managedFieldsInput());
         throw failure;
       },
-      update: async () => { throw new Error("unused"); },
+      create: async () => { throw new Error("unused"); },
     },
   }));
 
   let caught: unknown;
   try {
-    await adapter.create({ upsert: false, prepare: async () => preparedCreate(base, remote) });
+    await adapter.update({ forceReplaceDescription: false, prepare: async () => preparedUpdate(base, remote) });
   } catch (error) {
     caught = error;
   }

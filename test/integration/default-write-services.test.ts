@@ -37,6 +37,7 @@ test("default write service construction is lazy for unrelated commands", async 
 
 test("default create consumes the shared prepared canonical diff, not an unavailable second repository", async () => {
   const { currentBundle, request, snapshot, options } = await fixture();
+  request.workItem = { relation: "new" };
   request.mergeRequest.labelCandidateTokens = [];
   let plans = 0;
   const readOnly = {

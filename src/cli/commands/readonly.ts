@@ -1,4 +1,4 @@
-import requestSchema from "../../../schemas/request-v1.schema.json" with { type: "json" };
+import { assertNewIssueSubmission, newSubmissionRequestSchema } from "../../contracts/new-submission.ts";
 import { labelOptionsForProductionInvocation } from "../production-invocation.ts";
 import type { CanonicalLabelChangeSet } from "../../git/change-set.ts";
 import { selectMandatoryLabels } from "../../app/mandatory-labels.ts";
@@ -1174,7 +1174,7 @@ function contextExecution(
         releaseTag: prepared.selection.releaseTag,
         bundleId: prepared.selection.bundle.manifest.bundleId,
         inputSchema: copyJsonValue(discovered.snapshot.mergeRequest.iid === null
-          ? requestSchema : prepared.selection.bundle.schema),
+          ? newSubmissionRequestSchema : prepared.selection.bundle.schema),
         profiles: profiles(prepared.selection),
         ...planData(prepared),
         binding: copyJsonValue(discovered.binding as unknown as JsonObject),
@@ -1440,6 +1440,7 @@ export function createReadOnlyCommandServices(
     preview: async (invocation) => {
       assertIssueScope(dependencies, "preview");
       let request = normalizeProductionRequest(await dependencies.requestSource.read(invocation));
+      assertNewIssueSubmission(request);
       const prepared = await prepare(dependencies, "preview", invocation, request);
       const liveValue = await externalContextReader.read(prepared.options);
       prepared.assertNoCredentialExposure(liveValue);

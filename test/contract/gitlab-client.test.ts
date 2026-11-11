@@ -599,53 +599,26 @@ test("capability probe prefers advertised APPEND and caches one immutable sessio
   assert.equal(fake.requests.length, 2);
 });
 
-test("merge request creation probes required label capabilities before any remote write", async (t) => {
-  for (const modes of [["REPLACE", "APPEND", "REMOVE"], ["REPLACE", "REMOVE"]]) {
-    await t.test(modes.join(","), async () => {
-      const fake = new FakeGitLab();
-      enqueueCapabilities(fake, modes);
-      fake.enqueue("POST", "/api/v4/projects/7/merge_requests", { body: {
-        iid: 12, project_id: 7, target_project_id: 7, source_project_id: 7,
-        source_branch: "fix/labels", target_branch: "develop", title: "[fix][app] Fix labels",
-        description: "", draft: false, state: "opened",
-      } });
-      const created = client(fake).createMergeRequest({ id: "7", fullPath: "group/project" }, {
-        title: "[fix][app] Fix labels", description: "", sourceProjectId: 7, sourceBranch: "fix/labels",
-        targetProjectId: 7, targetBranch: "develop", squash: true, removeSourceBranch: true,
-      });
-      if (modes.includes("APPEND")) {
-        assert.equal((await created).value.iid, 12);
-        assert.equal((fake.requests[2]?.body as { readonly title: string }).title, "[fix][app] Fix labels");
-        assert.deepEqual(fake.requests.map((request) => [request.method, new URL(request.url).pathname]), [
-          ["GET", "/api/v4/version"], ["POST", "/api/graphql"], ["POST", "/api/v4/projects/7/merge_requests"],
-        ]);
-      } else {
-        await assert.rejects(created, { name: "GitLabMutationPreflightError", code: "GITLAB_ERROR" });
-        assert.equal(fake.requests.some((request) => new URL(request.url).pathname === "/api/v4/projects/7/merge_requests"), false);
-      }
-    });
-  }
+test("legacy MR-only creation rejects before capability probes or writes", async () => {
+  const fake = new FakeGitLab();
+  await assert.rejects(client(fake).createMergeRequest({ id: "7", fullPath: "group/project" }, {
+    title: "[fix][app] Fix labels", description: "", sourceProjectId: 7, sourceBranch: "fix/labels",
+    targetProjectId: 7, targetBranch: "develop", squash: true, removeSourceBranch: true,
+  }), { code: "INPUT_ERROR" });
+  assert.equal(fake.requests.length, 0);
 });
 
-test("read-only capability probe failures reject before create or label mutations", async (t) => {
-  for (const operation of ["create", "labels"] as const) {
-    for (const status of [401, 503]) {
-      await t.test(`${operation}: ${String(status)}`, async () => {
-        const fake = new FakeGitLab();
-        fake.enqueue("GET", "/api/v4/version", { status, body: { message: "Unavailable" } });
-        const api = client(fake);
-        const result = operation === "labels"
-          ? api.mutateLabels({ id: "7", fullPath: "group/project" }, 12, ["gid://gitlab/ProjectLabel/3"], "ADD")
-          : api.createMergeRequest({ id: "7", fullPath: "group/project" }, {
-            title: "[fix][app] Fix labels", description: "", sourceProjectId: 7, sourceBranch: "fix/labels",
-            targetProjectId: 7, targetBranch: "develop", squash: true, removeSourceBranch: true,
-          });
-        await assert.rejects(result, {
-          name: "GitLabMutationPreflightError", code: status === 401 ? "AUTH_ERROR" : "GITLAB_ERROR",
-        });
-        assert.deepEqual(fake.requests.map((request) => request.method), ["GET"]);
+test("read-only capability probe failures reject before label mutations", async (t) => {
+  for (const status of [401, 503]) {
+    await t.test(String(status), async () => {
+      const fake = new FakeGitLab();
+      fake.enqueue("GET", "/api/v4/version", { status, body: { message: "Unavailable" } });
+      await assert.rejects(client(fake).mutateLabels({ id: "7", fullPath: "group/project" }, 12,
+        ["gid://gitlab/ProjectLabel/3"], "ADD"), {
+        name: "GitLabMutationPreflightError", code: status === 401 ? "AUTH_ERROR" : "GITLAB_ERROR",
       });
-    }
+      assert.deepEqual(fake.requests.map((request) => request.method), ["GET"]);
+    });
   }
 });
 

@@ -1,3 +1,10 @@
+import packageMetadata from "../../package.json" with { type: "json" };
+import { loadTemplateBundle } from "../../src/bundle/load.ts";
+import { CandidateContextStore } from "../../src/context/store.ts";
+import { normalizeAndValidateRequest } from "../../src/input/normalize.ts";
+import { VerificationReceiptStore } from "../../src/platform/verification-receipt-store.ts";
+import { validateExternalContextSnapshot } from "../../src/render/marker.ts";
+import { seedHistoricalMr } from "../helpers/seed-historical-mr.ts";
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
 import { mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
@@ -58,7 +65,7 @@ async function setup(t: test.TestContext, origin = "https://gitlab.example.test"
   const client = new GitLabClient({ origin: transport.origin, tokenProvider: async () => "real-git-test-token", transport });
   const raw = JSON.parse(await readFile(resolve(root, "test/golden/fixtures/code-docs-request.json"), "utf8"));
   raw.targetBranch = "main";
-  raw.workItem = { relation: "none", noIssueReason: "A self-contained comparison boundary correction." };
+  raw.workItem = { relation: "new" };
   raw.mergeRequest.labelCandidateTokens = [];
 
   async function run(args: string[]) {
@@ -84,21 +91,54 @@ async function setup(t: test.TestContext, origin = "https://gitlab.example.test"
     assert.deepEqual(transport.unexpected, [], stdout + stderr);
     return { code, stdout, stderr, json: JSON.parse(stdout) };
   }
+  let lastContext: { contextId: string; binding: import("../../src/context/types.ts").ContextBinding };
   async function issue(iid: number | null = null) {
     const result = await run(["context", ...(iid === null ? [] : ["--mr", String(iid)])]);
     assert.equal(result.code, 0, result.stdout + result.stderr);
     const context = result.json.data;
+    lastContext = context;
     raw.contextId = context.contextId;
     const users = context.userCandidates as { kind: string; username: string; token: string }[];
     raw.mergeRequest.assigneeCandidateToken = users.find((candidate) => candidate.kind === "assignee" && candidate.username === "author")!.token;
     raw.review.reviewerCandidateTokens = [users.find((candidate) => candidate.kind === "reviewer" && candidate.username === "reviewer")!.token];
   }
-  return { git, sourceSha, targetSha, stateDirectory, transport, commands, raw, run, issue };
+  async function seed() {
+    raw.workItem = { relation: "none", noIssueReason: "Historical comparison boundary correction." };
+    await issue();
+    const resolved = await new CandidateContextStore({ stateDirectory, windowsAclVerifier: allowTestAcl }).resolve({
+      contextId: lastContext.contextId, expectedBinding: lastContext.binding, selections: [
+        { kind: "assignee", token: raw.mergeRequest.assigneeCandidateToken },
+        { kind: "reviewer", token: raw.review.reviewerCandidateTokens[0] },
+      ], consume: false,
+    });
+    const bundle = await loadTemplateBundle(resolve(root, "template-bundle"));
+    const seeded = seedHistoricalMr({ request: normalizeAndValidateRequest(raw),
+      initialSnapshot: validateExternalContextSnapshot(resolved.snapshot), resolvedCandidates: resolved.candidates,
+      bundle, releaseTag: lastContext.binding.bundle.releaseTag, cliVersion: packageMetadata.version,
+      sourceBranch, gitlabOrigin: transport.origin,
+      labelDiff: { sourceHeadSha: sourceSha, targetRefSha: targetSha, mergeBaseSha: targetSha,
+        items: [{ status: "modified", newPath: "src/boundary.ts",
+          binary: false, submodule: false, before: "if (attempts > max) { return false; }\n",
+          after: "if (attempts >= max) { return false; }\n" }] } });
+    const mr = seeded.current;
+    transport.mr = { id: 888, iid: 88, project_id: 7, web_url: mr.webUrl,
+      title: mr.title, description: mr.description, draft: false, state: "opened",
+      source_project_id: 7, source_branch: mr.sourceBranch, target_project_id: 7,
+      target_branch: mr.targetBranch, sha: mr.sourceHeadSha,
+      author: { id: 42, username: "author", name: "Author", state: "active" },
+      assignees: [{ id: 42, username: "author", name: "Author", state: "active" }],
+      reviewers: [{ id: 43, username: "reviewer", name: "Reviewer", state: "active" }],
+      labels: transport.labels.filter((label) => mr.labelIds.includes("gid://gitlab/ProjectLabel/" + label.id)),
+      squash: mr.squash, should_remove_source_branch: mr.removeSourceBranch,
+      detailed_merge_status: "mergeable", head_pipeline: { sha: sourceSha, status: "success" } };
+    await new VerificationReceiptStore({ stateDirectory, windowsAclVerifier: allowTestAcl }).stageAuthenticated(seeded.receipt!);
+  }
+  return { git, sourceSha, targetSha, stateDirectory, transport, commands, raw, run, issue, seed };
 }
 
 // Regresses wiring readChangeSet to the path-only reader: a plausible request
 // title cannot supply the missing committed before/after evidence.
-test("real default Git adapter derives three bug labels and verifies HTTP readback", async (t) => {
+test("real default Git adapter derives three bug labels in Issue-first creation responses", async (t) => {
   const f = await setup(t);
   await f.issue();
   const result = await f.run(["create"]);
@@ -109,9 +149,9 @@ test("real default Git adapter derives three bug labels and verifies HTTP readba
   assert.equal(f.transport.mr!.sha, f.sourceSha);
   assert.match(String(f.transport.mr!.title), /^\[fix\]/u);
   assert.equal(f.transport.mr!.draft, false);
-  assert.equal(result.json.data.lifecycle, "ready");
-  const verified = await f.run(["verify", "88", "--level", "structure"]);
-  assert.equal(verified.code, 0, verified.stdout + verified.stderr);
+  assert.equal(result.json.data.verification, "creation-response");
+  assert.deepEqual(f.transport.writes, ["issue:create", "create"]);
+  assert.match(String(f.transport.mr!.description), /Closes #51/u);
   assert.ok(f.commands.some((args) => args[0] === "cat-file" && args[1] === "blob"));
   assert.ok(f.commands.filter((args) => args[0] === "ls-remote").length >= 2);
 });
@@ -141,7 +181,7 @@ for (const drift of ["HEAD", "tracking"] as const) {
     const f = await setup(t);
     await f.issue();
     let changed = false;
-    f.transport.beforeFind = async () => {
+    f.transport.beforeMilestones = async () => {
       if (drift === "HEAD") {
         await f.git.git(["update-ref", "HEAD", f.targetSha]);
         await f.git.git(["reset", "--hard", f.targetSha]);
@@ -153,16 +193,16 @@ for (const drift of ["HEAD", "tracking"] as const) {
       changed = true;
     };
     const result = await f.run(["create"]);
-    assert.ok(changed, "the change must occur after planning, at open-MR lookup");
+    assert.ok(changed, "the change must occur after planning, at milestone lookup before the final Git gate");
     assert.notEqual(result.code, 0, result.stdout + result.stderr);
-    assert.match(result.stdout, /CONCURRENT_UPDATE/u);
+    assert.equal(result.json.code, drift === "HEAD" ? "REPOSITORY_ERROR" : "CONCURRENT_UPDATE");
     assert.deepEqual(f.transport.writes, []);
     assert.equal(f.transport.mr, null);
   });
 }
 
 for (const origin of ["https://gitlab.example.test", "http://gitlab.example.test"]) {
-test(`${origin} real default Git create, update and stored verify preserve staged, unstaged and untracked local files`, async (t) => {
+test(`${origin} real default Git historical update and stored verify preserve staged, unstaged and untracked local files`, async (t) => {
   const f = await setup(t, origin);
   await f.git.write("src/boundary.ts", "local staged work\n");
   await f.git.git(["add", "src/boundary.ts"]);
@@ -175,10 +215,7 @@ test(`${origin} real default Git create, update and stored verify preserve stage
     report: await readFile(resolve(f.git.worktreePath, ".superpowers/progress.md"), "utf8"),
   });
   const before = await localState();
-  await f.issue();
-  const created = await f.run(["create"]);
-  assert.equal(created.code, 0, created.stdout + created.stderr);
-  assert.deepEqual(created.json.data.mandatoryLabels.names, ["type::bug", "priority::p2", "status::review"]);
+  await f.seed();
   const createdDescription = String(f.transport.mr!.description);
   await f.issue(88);
   f.raw.changes.summary = ["Update verification details for the committed boundary correction."];
@@ -190,7 +227,7 @@ test(`${origin} real default Git create, update and stored verify preserve stage
   const receipts = await Promise.all((await readdir(receiptDirectory))
     .filter((name) => /^[a-f0-9]{64}\.json$/u.test(name))
     .map(async (name) => JSON.parse(await readFile(resolve(receiptDirectory, name), "utf8"))));
-  assert.ok(receipts.length >= 1, "create and update must persist verification receipts");
+  assert.ok(receipts.length >= 1, "historical update must persist verification receipts");
   for (const { locator, receipt } of receipts) {
     assert.equal(locator.gitlabOrigin, origin);
     assert.equal(receipt.gitlabOrigin, origin);
@@ -198,13 +235,14 @@ test(`${origin} real default Git create, update and stored verify preserve stage
   }
   const writesBeforeVerify = [...f.transport.writes];
   // Every run composes new default services/stores, so verify must reload the
-  // receipt from disk rather than inherit an in-memory create/update result.
+  // receipt from disk rather than inherit an in-memory fixture/update result.
   const verified = await f.run(["verify", "88", "--level", "structure"]);
   assert.equal(verified.code, 0, verified.stdout + verified.stderr);
   assert.deepEqual(f.transport.writes, writesBeforeVerify);
   assert.equal(f.transport.requests.every((request) => new URL(request.url).origin === origin), true);
   assert.ok(f.transport.requests.some(({ method, path }) => method === "POST" && path === "/api/graphql"));
-  assert.ok(f.transport.requests.some(({ method, path }) => method === "POST" && path === "/api/v4/projects/7/merge_requests"));
+  assert.ok(f.transport.requests.every(({ method, path }) => method !== "POST" || path !== "/api/v4/projects/7/merge_requests"),
+    "an existing historical MR must be updated without a create POST");
   assert.ok(f.transport.requests.some(({ method, path }) => method === "PUT" && path === "/api/v4/projects/7/merge_requests/88"));
   assert.equal(f.transport.mr!.web_url, `${origin}/group/project/-/merge_requests/88`);
   assert.equal(f.transport.mr!.sha, f.sourceSha);

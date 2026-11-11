@@ -203,7 +203,7 @@ test("local handlers revalidate a supplied Bundle before exposing it", async () 
   assert.equal(result.output.code, "TEMPLATE_ERROR");
 });
 
-test("default schema accepts new and omitted Issue modes without changing the Bundle", async () => {
+test("default schema accepts only new and omitted Issue modes without changing the Bundle", async () => {
   const bundle = await loadTemplateBundle(bundleDirectory);
   const original = copyJsonValue(bundle.schema);
   const result = await run(["schema", "show", "--output", "json"],
@@ -215,5 +215,8 @@ test("default schema accepts new and omitted Issue modes without changing the Bu
   assert.equal(validate(raw), true, JSON.stringify(validate.errors));
   delete raw.workItem;
   assert.equal(validate(raw), true, JSON.stringify(validate.errors));
+  for (const workItem of [{ relation: "none", noIssueReason: "legacy" }, { relation: "closes", iid: 1 }, { relation: "related", iid: 1 }]) {
+    assert.equal(validate({ ...raw, workItem }), false, workItem.relation + " must not be offered for a new MR");
+  }
   assert.deepEqual(bundle.schema, original);
 });

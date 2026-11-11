@@ -1,5 +1,7 @@
 # API 默认流程与使用验收手册
 
+> 历史操作记录：自 0.1.12 起，新建 MR 必须先成功创建并关联 Issue。本文旧 `manual`/`--upsert` 示例已失效，旧 workItem 仅供已有历史 MR。当前流程以 [命令参考](../commands/reference.md) 为准；手工 MR 交接已禁用，历史恢复只能操作经验证的已有 IID。
+
 ## 目标
 
 CLI/Plugin `0.1.10` 当前为待验收发布候选，不代表已有新 Release。

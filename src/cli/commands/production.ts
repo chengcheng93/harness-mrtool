@@ -47,7 +47,7 @@ function rejectSshApiMode(invocation: CliInvocation, kind: string): void {
     field: "authMode",
     expected: "auto or api for GitLab API commands",
     actual: "ssh",
-    safeNextStep: "Use --auth api for the default automatic MR flow. Only use manual --auth ssh when the user explicitly requests manual handoff.",
+    safeNextStep: "Use --auth api with a configured GitLab API profile, then retry the command.",
   });
 }
 

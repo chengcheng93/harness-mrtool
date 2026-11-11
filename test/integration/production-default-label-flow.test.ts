@@ -1,3 +1,6 @@
+import { seedHistoricalMr } from "../helpers/seed-historical-mr.ts";
+import { normalizeAndValidateRequest } from "../../src/input/normalize.ts";
+import { VerificationReceiptStore } from "../../src/platform/verification-receipt-store.ts";
 import assert from "node:assert/strict";
 import { RemoteMutationError } from "../../src/app/remote-outcome.ts";
 import { mkdtemp, readFile, rm, realpath } from "node:fs/promises";
@@ -51,7 +54,13 @@ async function setup(t: test.TestContext) {
     labelInventory: async () => { const effective = labels.filter((label) => !state.omitP2 || label.name !== "priority::p2"); return { all: effective, effective, audit: { requestIds: ["request-test"] } }; },
     getReviewState: async () => ({ approvedUserIds: [reviewer.id], unresolvedDiscussions: 0 }),
     getMergeRequest: async () => structuredClone(state.mr!),
-    getMergeRequestReceipt: async () => receipt(structuredClone(state.mr!)),
+    getMergeRequestReceipt: async () => {
+      if (state.driftOnFind) state.drift = true;
+      if (state.sourceMissingOnFind) state.sourceMissing = true;
+      if (state.dirtyOnFind) (repo.worktree as { clean: boolean }).clean = false;
+      if (state.renameAfterFind) labels.find((label) => label.name === "priority::p2")!.name = "priority::p1";
+      return receipt(structuredClone(state.mr!));
+    },
     listOpenMergeRequestReceipts: async () => {
       if (state.driftOnFind) state.drift = true;
       if (state.sourceMissingOnFind) state.sourceMissing = true;
@@ -74,12 +83,7 @@ async function setup(t: test.TestContext) {
         reviewers: input.reviewerIds.map((id) => id === 42 ? user : reviewer) };
       return receipt({ iid: 88, webUrl: state.mr.webUrl, sourceProjectId: 7, targetProjectId: 7 });
     },
-    createMergeRequest: async (_target: unknown, input: GitLabCreateMergeRequestInput) => {
-      state.writes.push("create");
-      state.mr = makeMr(input);
-      if (state.driftAfterCreate) state.drift = true;
-      return receipt({ iid: 88 });
-    },
+    createMergeRequest: async () => { throw new Error("Legacy MR-only creation must never be reached"); },
     mutateLabels: async (_target: unknown, _iid: number, ids: readonly string[], mode: string) => {
       state.writes.push(`labels:${mode}`);
       if (!state.wrongReadback) state.mr = { ...state.mr!, labels: mode === "ADD"
@@ -93,6 +97,7 @@ async function setup(t: test.TestContext) {
         : { ...state.mr!, title: input.title, draft: input.title.startsWith("Draft:"), targetBranch: input.targetBranch,
           assignees: input.assigneeIds.map((id) => id === 42 ? user : reviewer), reviewers: input.reviewerIds.map((id) => id === 42 ? user : reviewer),
           squash: input.squash, shouldRemoveSourceBranch: input.removeSourceBranch };
+      if (state.driftAfterCreate && input.kind === "managed-fields") state.drift = true;
       return receipt(structuredClone(state.mr));
     },
   } as unknown as GitLabClient;
@@ -105,22 +110,42 @@ async function setup(t: test.TestContext) {
   const repository = { discover: async () => repo, readChangeSet: async () => ({ ...diff, sourceHeadSha: state.drift ? "c".repeat(40) : sourceSha }),
     planPush: async () => ({ kind: state.sourceMissing ? "missing" as const : "up-to-date" as const, remote: "origin", ref: repo.sourceRemoteRef, sourceHeadSha: sourceSha, remoteSha: state.sourceMissing ? null : sourceSha, command: state.sourceMissing ? `git push --no-force origin ${sourceSha}:${repo.sourceRemoteRef}` : null }) };
   const raw = JSON.parse(await readFile(resolve(root, "test/golden/fixtures/code-docs-request.json"), "utf8"));
-  raw.workItem = { relation: "none", noIssueReason: "A self-contained maintenance change." };
+  raw.workItem = { relation: "new" };
   raw.mergeRequest.labelCandidateTokens = [];
   const contextStore = new CandidateContextStore({ stateDirectory, windowsAclVerifier: allowTestAcl });
   const overrides = { stateDirectory, windowsAclVerifier: allowTestAcl, contextStore, repository, stdinIsTerminal: () => false,
     inputIo: { statFile: async () => ({ size: Buffer.byteLength(JSON.stringify(raw)) }), readFile: async () => Buffer.from(JSON.stringify(raw)), stdin: { async *[Symbol.asyncIterator]() {} } },
     targetSessionResolver: { resolve: async () => ({ origin: client.origin, gitlab: client, project, identity: { host: "gitlab.example.test", path: project.fullPath }, targetRemote: "origin", assertNoCredentialExposure: () => {} }) } };
   const defaults = createProductionReadOnlyDefaults({ ...overrides, cliVersion: packageMetadata.version, cwd: root, currentBundle, contextIssueIid: null });
+  let lastContext: Awaited<ReturnType<typeof getContext>>;
   async function issue(iid: number | null = null, migrate = false) {
     const invocation = parseCliInvocation(["context", ...(iid === null ? [] : ["--mr", String(iid)]), ...(migrate ? ["--migrate-template"] : []), "--output", "json"]);
     const planned = await defaults.planner.prepare({ cliVersion: packageMetadata.version, command: "context", currentBundle, cwd: root, invocation, request: null, contextIssueIid: null });
     const context = await getContext({ ...planned.options, store: contextStore });
+    lastContext = context;
     raw.contextId = context.contextId;
     // Tokens come from the real private context store, not synthetic placeholders.
     const issued = context as unknown as { userCandidates: { kind: string; token: string; username: string }[] };
     raw.mergeRequest.assigneeCandidateToken = issued.userCandidates.find((value) => value.kind === "assignee" && value.username === "author")!.token;
     raw.review.reviewerCandidateTokens = [issued.userCandidates.find((value) => value.kind === "reviewer" && value.username === "reviewer")!.token];
+  }
+  async function seed() {
+    raw.workItem = { relation: "none", noIssueReason: "Historical maintenance MR." };
+    await issue();
+    const seeded = seedHistoricalMr({ request: normalizeAndValidateRequest(raw),
+      initialSnapshot: lastContext.snapshot, resolvedCandidates: [
+        { kind: "assignee", userId: user.id, globalId: user.globalId, username: user.username, displayName: user.displayName },
+        { kind: "reviewer", userId: reviewer.id, globalId: reviewer.globalId, username: reviewer.username, displayName: reviewer.displayName },
+      ], bundle, releaseTag: currentBundle.releaseTag, cliVersion: packageMetadata.version,
+      sourceBranch: repo.sourceBranch, gitlabOrigin: client.origin, labelDiff: diff });
+    const mr = seeded.current;
+    state.mr = { iid: mr.iid, webUrl: mr.webUrl, title: mr.title, description: mr.description,
+      draft: false, state: "opened", sourceProjectId: mr.sourceProjectId, sourceBranch: mr.sourceBranch,
+      targetProjectId: mr.targetProjectId, targetBranch: mr.targetBranch, sha: mr.sourceHeadSha,
+      author: user, assignees: mr.assigneeUserId === null ? [] : [user],
+      reviewers: mr.reviewerUserIds.length === 0 ? [] : [reviewer], labels: applied(mr.labelIds),
+      squash: mr.squash, shouldRemoveSourceBranch: mr.removeSourceBranch, pipelineStatus: "passed" };
+    await new VerificationReceiptStore({ stateDirectory, windowsAclVerifier: allowTestAcl }).stageAuthenticated(seeded.receipt!);
   }
   async function run(args: string[]) {
     let stdout = "", stderr = "";
@@ -178,17 +203,17 @@ async function setup(t: test.TestContext) {
     });
     return { code, stdout, stderr, prompts };
   }
-  return { issue, run, runInteractive, state, raw, diff, currentBundle, removeReceipts: () => rm(resolve(stateDirectory, "verification-receipts"), { recursive: true, force: true }) };
+  return { issue, seed, run, runInteractive, state, raw, diff, currentBundle, removeReceipts: () => rm(resolve(stateDirectory, "verification-receipts"), { recursive: true, force: true }) };
 }
 
-test("production main default create writes and reads back exactly three automatic labels with no caller label tokens", async (t) => {
+test("production main default create sends exactly three automatic labels with no caller label tokens", async (t) => {
   const f = await setup(t); await f.issue();
   const result = await f.run(["create"]);
   assert.equal(result.code, 0, result.stdout + result.stderr);
   assert.deepEqual(f.state.mr!.labels.map((label) => label.name).sort(), ["priority::p2", "status::review", "type::bug"]);
   assert.equal(f.state.mr!.draft, false);
-  assert.ok(f.state.writes.includes("create"));
-  assert.equal(JSON.parse(result.stdout).data.lifecycle, "ready");
+  assert.deepEqual(f.state.writes, ["issue.create", "merge-request.create"]);
+  assert.equal(JSON.parse(result.stdout).data.verification, "creation-response");
 });
 
 test("production main default create rejects missing p2 with zero mutations", async (t) => {
@@ -198,8 +223,7 @@ test("production main default create rejects missing p2 with zero mutations", as
 });
 
 test("production main default update and verify use the durable receipt and exact bundle", async (t) => {
-  const f = await setup(t); await f.issue();
-  const created = await f.run(["create"]); assert.equal(created.code, 0, created.stdout);
+  const f = await setup(t); await f.seed();
   await f.issue(88);
   f.raw.changes.summary = ["Update the previously created merge request."];
   const updated = await f.run(["update", "88"]);
@@ -233,23 +257,19 @@ test("production main automatically classifies ambiguous source changes as chore
   assert.deepEqual(selected.names, ["type::chore", "priority::p2", "status::review"]);
 });
 
-test("production main never reports success when remote label readback differs", async (t) => {
-  const f = await setup(t); await f.issue(); f.state.wrongReadback = true;
-  const result = await f.run(["create"]);
-  assert.notEqual(result.code, 0); assert.ok(f.state.writes.includes("create"));
+test("production main never reports historical update success when label readback differs", async (t) => {
+  const f = await setup(t); await f.seed(); f.state.mr = { ...f.state.mr!, labels: [] };
+  await f.issue(88); f.state.wrongReadback = true;
+  const result = await f.run(["update", "88"]);
+  assert.notEqual(result.code, 0); assert.deepEqual(f.state.writes, ["labels:ADD"]);
   assert.equal(JSON.parse(result.stdout).ok, false);
 });
-
-test("production main upsert updates an existing MR without a second create", async (t) => {
-  const f = await setup(t); await f.issue();
-  const created = await f.run(["create"]); assert.equal(created.code, 0, created.stdout);
-  await f.issue();
+test("production main rejects upsert without writing even when a historical MR exists", async (t) => {
+  const f = await setup(t); await f.seed(); await f.issue();
   const result = await f.run(["create", "--upsert"]);
-  assert.equal(result.code, 0, result.stdout + result.stderr);
-  assert.equal(f.state.writes.filter((operation) => operation === "create").length, 1);
-  assert.equal(JSON.parse(result.stdout).data.command, "update");
+  assert.notEqual(result.code, 0); assert.match(result.stdout, /INPUT_ERROR/);
+  assert.deepEqual(f.state.writes, []);
 });
-
 test("retired manual type confirmation flags are rejected before any mutation", async (t) => {
   const f = await setup(t); await f.issue();
   const result = await f.run(["create", "--confirm-label-type", "bug", "--label-diff-digest", "0".repeat(64)]);
@@ -268,39 +288,37 @@ test("production main create dry-run validates labels without writing or consumi
   assert.equal(created.code, 0, created.stdout);
 });
 
-test("default production gate re-reads the local diff after open-MR lookup and prevents first mutation", async (t) => {
-  const f = await setup(t); await f.issue(); f.state.driftOnFind = true;
-  const result = await f.run(["create"]);
+test("default production gate rejects local diff drift after reading a historical MR", async (t) => {
+  const f = await setup(t); await f.seed(); await f.issue(88); f.state.driftOnFind = true;
+  const result = await f.run(["update", "88"]);
   assert.notEqual(result.code, 0); assert.deepEqual(f.state.writes, []);
   assert.match(result.stdout, /CONCURRENT_UPDATE/);
 });
 
 test("default production gate checks automatically chosen label identities just before mutation", async (t) => {
-  const f = await setup(t); await f.issue(); f.state.renameAfterFind = true;
-  const result = await f.run(["create"]);
+  const f = await setup(t); await f.seed(); await f.issue(88); f.state.renameAfterFind = true;
+  const result = await f.run(["update", "88"]);
   assert.notEqual(result.code, 0); assert.deepEqual(f.state.writes, []);
 });
 
 test("default production revalidates the canonical diff before later mutations too", async (t) => {
-  const f = await setup(t); await f.issue(); f.state.driftAfterCreate = true;
-  const result = await f.run(["create"]);
-  assert.notEqual(result.code, 0); assert.deepEqual(f.state.writes, ["create"]);
+  const f = await setup(t); await f.seed(); await f.issue(88); f.state.driftAfterCreate = true;
+  const result = await f.run(["update", "88"]);
+  assert.notEqual(result.code, 0); assert.deepEqual(f.state.writes, ["managed-fields"]);
   assert.equal(JSON.parse(result.stdout).ok, false);
 });
 
-test("upsert authenticates the existing MR receipt before updating", async (t) => {
-  const f = await setup(t); await f.issue();
-  const created = await f.run(["create"]); assert.equal(created.code, 0, created.stdout);
-  await f.issue(); await f.removeReceipts();
+test("update authenticates the existing MR receipt before updating", async (t) => {
+  const f = await setup(t); await f.seed();
+  await f.issue(88); await f.removeReceipts();
   const before = f.state.writes.length;
-  const result = await f.run(["create", "--upsert"]);
-  assert.notEqual(result.code, 0, "upsert must not bypass ownership authentication");
+  const result = await f.run(["update", "88"]);
+  assert.notEqual(result.code, 0, "update must not bypass ownership authentication");
   assert.equal(f.state.writes.length, before);
 });
 
 test("explicit force replacement permits body edits but still authenticates marker and receipt", async (t) => {
-  const f = await setup(t); await f.issue();
-  const created = await f.run(["create"]); assert.equal(created.code, 0, created.stdout);
+  const f = await setup(t); await f.seed();
   await f.issue(88);
   f.state.mr = { ...f.state.mr!, description: `Manual note.\n${f.state.mr!.description}` };
   const result = await f.run(["update", "88", "--force-replace-description"]);
@@ -309,13 +327,11 @@ test("explicit force replacement permits body edits but still authenticates mark
   assert.equal(f.state.mr!.description.startsWith("Manual note."), false);
 });
 
-test("actual TTY legacy upsert and update complete without routine approval and return the stored MR URL", async (t) => {
-  const f = await setup(t);
-  const created = await f.runInteractive(["create", "--upsert"]);
-  assert.equal(created.code, 0, created.stdout + created.stderr);
-  assert.equal(created.prompts.some((id) => id.startsWith("labels.") || id.startsWith("confirmation.")), false);
-  assert.deepEqual(f.state.mr!.labels.map((label) => label.name).sort(), ["priority::p2", "status::review", "type::bug"]);
-  assert.equal(JSON.parse(created.stdout).data.webUrl, f.state.mr!.webUrl);
+test("actual TTY rejects upsert and still updates a historical MR without routine approval", async (t) => {
+  const f = await setup(t); await f.seed();
+  const rejected = await f.runInteractive(["create", "--upsert"]);
+  assert.notEqual(rejected.code, 0); assert.match(rejected.stdout, /INPUT_ERROR/);
+  assert.deepEqual(f.state.writes, []);
   const updated = await f.runInteractive(["update", "88"]);
   assert.equal(updated.code, 0, updated.stdout + updated.stderr);
   assert.equal(updated.prompts.some((id) => id.startsWith("labels.") || id.startsWith("confirmation.")), false);
@@ -323,11 +339,9 @@ test("actual TTY legacy upsert and update complete without routine approval and 
   const verified = await f.run(["verify", "88", "--level", "structure"]);
   assert.equal(verified.code, 0, verified.stdout + verified.stderr);
 });
-
 for (const flags of [[], ["--force-replace-description"]]) {
   test("TTY update still refuses description drift during collection " + flags.join(" "), async (t) => {
-    const f = await setup(t); await f.issue();
-    const created = await f.run(["create"]); assert.equal(created.code, 0, created.stdout);
+    const f = await setup(t); await f.seed();
     const before = f.state.writes.length;
     const result = await f.runInteractive(["update", "88", ...flags], true);
     assert.notEqual(result.code, 0); assert.equal(f.state.writes.length, before);
@@ -347,8 +361,7 @@ test("API create refuses offline mode before any live mutation", async (t) => {
 });
 
 test("default production migration uses automatic verified Bundle bindings without a confirmation parameter", async (t) => {
-  const f = await setup(t); await f.issue();
-  const created = await f.run(["create"]); assert.equal(created.code, 0, created.stdout);
+  const f = await setup(t); await f.seed();
   await f.issue(88, true);
   const before = f.state.writes.length;
   const stale = await f.run(["update", "88", "--migrate-template", "--confirm-migration", `${"0".repeat(64)}:${"0".repeat(64)}`]);
@@ -370,23 +383,19 @@ test("default API create rejects an unpublished source branch before MR mutation
 });
 
 test("production rechecks unpublished source after preflight without any MR mutation", async (t) => {
-  const f = await setup(t); await f.issue(); f.state.sourceMissingOnFind = true;
-  const result = await f.run(["create"]);
+  const f = await setup(t); await f.seed(); await f.issue(88); f.state.sourceMissingOnFind = true;
+  const result = await f.run(["update", "88"]);
   assert.notEqual(result.code, 0); assert.deepEqual(f.state.writes, []);
 });
 
-test("production allows local worktree changes after preflight for create and update", async (t) => {
-  const f = await setup(t); await f.issue(); f.state.dirtyOnFind = true;
-  const created = await f.run(["create"]);
-  assert.equal(created.code, 0, created.stdout + created.stderr);
-  await f.issue(88);
+test("production allows local worktree changes during a historical update", async (t) => {
+  const f = await setup(t); await f.seed(); await f.issue(88); f.state.dirtyOnFind = true;
   f.raw.changes.summary = ["Update the committed change while local work continues."];
   const updated = await f.run(["update", "88"]);
   assert.equal(updated.code, 0, updated.stdout + updated.stderr);
   const verified = await f.run(["verify", "88", "--level", "structure"]);
   assert.equal(verified.code, 0, verified.stdout + verified.stderr);
 });
-
 test("actual TTY default creates a fresh Issue and linked MR directly", async (t) => {
   const f = await setup(t);
   const result = await f.runInteractive(["create"]);

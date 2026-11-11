@@ -1,3 +1,6 @@
+import { seedHistoricalMr } from "../helpers/seed-historical-mr.ts";
+import { normalizeAndValidateRequest } from "../../src/input/normalize.ts";
+import { VerificationReceiptStore } from "../../src/platform/verification-receipt-store.ts";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -14,7 +17,7 @@ import { parseCliInvocation } from "../../src/cli/program.ts";
 import { canonicalizeJson, sha256Utf8 } from "../../src/contracts/jcs.ts";
 import { CandidateContextStore } from "../../src/context/store.ts";
 import type { GitLabClient } from "../../src/gitlab/client.ts";
-import type { GitLabMergeRequest, GitLabUpdateMergeRequestInput, GitLabCreateMergeRequestInput, GitLabMilestone, GitLabCreateIssueInput, GitLabCreateMergeRequestSubmissionInput } from "../../src/gitlab/types.ts";
+import type { GitLabMergeRequest, GitLabUpdateMergeRequestInput, GitLabMilestone, GitLabCreateIssueInput, GitLabCreateMergeRequestSubmissionInput } from "../../src/gitlab/types.ts";
 import type { RepositorySnapshot } from "../../src/git/repository.ts";
 import { runProductionMain } from "../../src/production-main.ts";
 
@@ -84,14 +87,7 @@ async function setup(t: test.TestContext) {
       assert.deepEqual(input.assigneeIds, [42]); assert.deepEqual(input.reviewerIds, [43]);
       return receipt({ iid: 88, webUrl: project.webUrl + "/-/merge_requests/88", sourceProjectId: 7, targetProjectId: 7 });
     },
-    createMergeRequest: async (_target: unknown, input: GitLabCreateMergeRequestInput) => {
-      state.writes.push("create");
-      state.mr = { iid: 88, webUrl: `${project.webUrl}/-/merge_requests/88`, title: input.title, description: input.description,
-        draft: input.title.startsWith("Draft:"), state: "opened", sourceProjectId: "7", sourceBranch: "feature/labels", targetProjectId: "7", targetBranch: "develop",
-        sha: sourceSha, author: user, assignees: [], reviewers: [], labels: [], squash: true, shouldRemoveSourceBranch: true, pipelineStatus: "passed" };
-      if (state.driftAfterCreate) state.drift = true;
-      return receipt({ iid: 88 });
-    },
+    createMergeRequest: async () => { throw new Error("Legacy MR-only creation must never be reached"); },
     mutateLabels: async (_target: unknown, _iid: number, ids: readonly string[], mode: string) => {
       state.writes.push(`labels:${mode}`);
       if (!state.wrongReadback) state.mr = { ...state.mr!, labels: mode === "ADD"
@@ -143,7 +139,7 @@ async function setup(t: test.TestContext) {
       }
       return ({ kind: state.sourceMissing ? "missing" as const : "up-to-date" as const, remote: "origin", ref: repo.sourceRemoteRef, sourceHeadSha: sourceSha, remoteSha: state.sourceMissing ? null : sourceSha, command: state.sourceMissing ? `git push --no-force origin ${sourceSha}:${repo.sourceRemoteRef}` : null }); } };
   const raw = JSON.parse(await readFile(resolve(root, "test/golden/fixtures/code-docs-request.json"), "utf8"));
-  raw.workItem = { relation: "none", noIssueReason: "A self-contained maintenance change." };
+  raw.workItem = { relation: "new" };
   raw.mergeRequest.labelCandidateTokens = [];
   const contextStore = new CandidateContextStore({ stateDirectory, windowsAclVerifier: allowTestAcl });
   const resolveCandidates = contextStore.resolve.bind(contextStore);
@@ -158,15 +154,35 @@ async function setup(t: test.TestContext) {
     inputIo: { statFile: async () => ({ size: Buffer.byteLength(JSON.stringify(raw)) }), readFile: async () => Buffer.from(JSON.stringify(raw)), stdin: { async *[Symbol.asyncIterator]() {} } },
     targetSessionResolver: { resolve: async () => ({ origin: client.origin, gitlab: client, project, identity: { host: "gitlab.example.test", path: project.fullPath }, targetRemote: "origin", assertNoCredentialExposure: () => {} }) } };
   const defaults = createProductionReadOnlyDefaults({ ...overrides, cliVersion: packageMetadata.version, cwd: root, currentBundle, contextIssueIid: null });
+  let lastContext: Awaited<ReturnType<typeof getContext>>;
   async function issue(iid: number | null = null, migrate = false) {
     const invocation = parseCliInvocation(["context", ...(iid === null ? [] : ["--mr", String(iid)]), ...(migrate ? ["--migrate-template"] : []), "--output", "json"]);
     const planned = await defaults.planner.prepare({ cliVersion: packageMetadata.version, command: "context", currentBundle, cwd: root, invocation, request: null, contextIssueIid: null });
     const context = await getContext({ ...planned.options, store: contextStore });
+    lastContext = context;
     raw.contextId = context.contextId;
     // Tokens come from the real private context store, not synthetic placeholders.
     const issued = context as unknown as { userCandidates: { kind: string; token: string; username: string }[] };
     raw.mergeRequest.assigneeCandidateToken = issued.userCandidates.find((value) => value.kind === "assignee" && value.username === "author")!.token;
     raw.review.reviewerCandidateTokens = [issued.userCandidates.find((value) => value.kind === "reviewer" && value.username === "reviewer")!.token];
+  }
+  async function seed() {
+    raw.workItem = { relation: "none", noIssueReason: "Historical maintenance MR." };
+    await issue();
+    const seeded = seedHistoricalMr({ request: normalizeAndValidateRequest(raw),
+      initialSnapshot: lastContext.snapshot, resolvedCandidates: [
+        { kind: "assignee", userId: user.id, globalId: user.globalId, username: user.username, displayName: user.displayName },
+        { kind: "reviewer", userId: reviewer.id, globalId: reviewer.globalId, username: reviewer.username, displayName: reviewer.displayName },
+      ], bundle, releaseTag: currentBundle.releaseTag, cliVersion: packageMetadata.version,
+      sourceBranch: repo.sourceBranch, gitlabOrigin: client.origin, labelDiff: diff });
+    const mr = seeded.current;
+    state.mr = { iid: mr.iid, webUrl: mr.webUrl, title: mr.title, description: mr.description,
+      draft: false, state: "opened", sourceProjectId: mr.sourceProjectId, sourceBranch: mr.sourceBranch,
+      targetProjectId: mr.targetProjectId, targetBranch: mr.targetBranch, sha: mr.sourceHeadSha,
+      author: user, assignees: mr.assigneeUserId === null ? [] : [user],
+      reviewers: mr.reviewerUserIds.length === 0 ? [] : [reviewer], labels: applied(mr.labelIds),
+      squash: mr.squash, shouldRemoveSourceBranch: mr.removeSourceBranch, pipelineStatus: "passed" };
+    await new VerificationReceiptStore({ stateDirectory, windowsAclVerifier: allowTestAcl }).stageAuthenticated(seeded.receipt!);
   }
   async function run(args: string[]) {
     let stdout = "", stderr = "";
@@ -177,7 +193,7 @@ async function setup(t: test.TestContext) {
     });
     return { code, stdout, stderr };
   }
-  return { issue, run, state, raw, calls, milestoneState, guardConcurrency, resetCalls: () => { for (const key of Object.keys(calls) as (keyof typeof calls)[]) calls[key] = 0; } };
+  return { issue, seed, run, state, raw, calls, milestoneState, guardConcurrency, resetCalls: () => { for (const key of Object.keys(calls) as (keyof typeof calls)[]) calls[key] = 0; } };
 }
 
 // These exercise the default production adapter and transaction, not a fake
@@ -185,9 +201,7 @@ async function setup(t: test.TestContext) {
 // production-default-label-flow fixture; native ACL behavior has its own tests.
 test("default update rejects canonical-diff drift after candidate consumption before its first mutation", async (t) => {
   const f = await setup(t);
-  await f.issue();
-  const created = await f.run(["create"]);
-  assert.equal(created.code, 0, created.stdout);
+  await f.seed();
   await f.issue(88);
   const before = f.state.writes.length;
   f.state.driftAfterConsume = true;
@@ -198,45 +212,35 @@ test("default update rejects canonical-diff drift after candidate consumption be
   assert.match(result.stdout, /CONCURRENT_UPDATE/);
 });
 
-test("default create detects canonical-diff drift immediately after the first mutation", async (t) => {
-  const f = await setup(t);
-  await f.issue();
-  f.state.driftAfterCreate = true;
-  const result = await f.run(["create"]);
+test("default guards reject later local drift after historical label synchronization", async (t) => {
+  const f = await setup(t); await f.seed();
+  f.state.mr = { ...f.state.mr!, labels: [] };
+  await f.issue(88); f.state.driftAfterLabels = true;
+  const result = await f.run(["update", "88"]);
   assert.notEqual(result.code, 0, result.stdout);
-  assert.deepEqual(f.state.writes, ["create"]);
+  assert.deepEqual(f.state.writes, ["labels:ADD"], "fields/description writes must not follow drift");
 });
-
-test("default guards reject later local drift after label synchronization", async (t) => {
-  const f = await setup(t);
-  await f.issue();
-  f.state.driftAfterLabels = true;
-  const result = await f.run(["create"]);
-  assert.notEqual(result.code, 0, result.stdout);
-  assert.deepEqual(f.state.writes, ["create", "labels:ADD"], "fields/description writes must not follow drift");
-});
-
 test("default readback rejects a new duplicate lifecycle label even when applied IDs are unchanged", async (t) => {
   const f = await setup(t);
-  await f.issue();
+  await f.seed(); await f.issue(88);
   f.state.duplicateAfterFields = true;
-  const result = await f.run(["create"]);
+  const result = await f.run(["update", "88"]);
   assert.notEqual(result.code, 0, result.stdout);
-  assert.deepEqual(f.state.writes, ["create", "labels:ADD", "managed-fields"]);
+  assert.deepEqual(f.state.writes, ["managed-fields"]);
   assert.equal(f.state.mr!.labels.some((label) => label.restId === 999), false,
     "the newly ambiguous duplicate lifecycle label must remain unapplied in this regression");
   assert.equal(f.state.mr!.labels.filter((label) => label.name === "status::review").length, 1,
     "the originally applied lifecycle label must stay applied");
 });
 
-test("default submission reuses each MR response while keeping inventory/member/review reads live", async (t) => {
+test("default historical update keeps inventory/member/review reads and mutation guards live", async (t) => {
   const f = await setup(t);
-  await f.issue();
+  await f.seed(); await f.issue(88);
   f.resetCalls();
-  const result = await f.run(["create"]);
+  const result = await f.run(["update", "88"]);
   assert.equal(result.code, 0, result.stdout);
   assert.ok(f.calls.mergeRequestReceipt > 0, "the real remote must perform standalone MR reads");
-  assert.equal(f.calls.mergeRequest, 0, "a readback must not fetch the identical MR again during context discovery");
+  assert.ok(f.calls.mergeRequest > 0, "existing-MR ownership guards retain independent live discovery");
   t.diagnostic(JSON.stringify({ apiCalls: f.calls }));
   assert.equal(f.calls.pushPlans, f.calls.discover, "every repository discovery retains push-plan verification");
   assert.ok(f.calls.pushPlans >= f.state.writes.length, "every mutation retains a write guard");
@@ -258,9 +262,7 @@ test("default dry-run preserves candidate tokens for the later real submission",
 
 test("default stored verification still refreshes inventory, members and review state", async (t) => {
   const f = await setup(t);
-  await f.issue();
-  const created = await f.run(["create"]);
-  assert.equal(created.code, 0, created.stdout);
+  await f.seed();
   f.resetCalls();
   const verified = await f.run(["verify", "88", "--level", "structure"]);
   assert.equal(verified.code, 0, verified.stdout);
@@ -272,9 +274,7 @@ test("default stored verification still refreshes inventory, members and review 
 
 test("default write guard drains the concurrent diff read before reporting a rejected push plan", { timeout: 60_000 }, async (t) => {
   const f = await setup(t);
-  await f.issue();
-  const created = await f.run(["create"]);
-  assert.equal(created.code, 0, created.stdout);
+  await f.seed();
   await f.issue(88);
   const before = f.state.writes.length;
   const gate = f.guardConcurrency;
@@ -368,9 +368,10 @@ test("empty milestones produce structured omission in default submission",async(
  assert.equal(Object.hasOwn(f.milestoneState.issueInput!,"milestoneId"),false);assert.equal(Object.hasOwn(f.milestoneState.mrInput!,"milestoneId"),false);
  assert.equal(JSON.parse(result.stdout).data.milestoneSelection.reason,"no-future-milestone");
 });
-test("legacy and dry-run paths do not prefetch milestones",async(t)=>{
+test("rejected legacy and dry-run paths do not prefetch milestones",async(t)=>{
  const f=await setup(t);await f.issue();f.milestoneState.fail=true;
- const legacy=await f.run(["create","--dry-run"]);assert.equal(legacy.code,0,legacy.stdout);
+ f.raw.workItem={relation:"none",noIssueReason:"Historical request"};
+ const legacy=await f.run(["create","--dry-run"]);assert.notEqual(legacy.code,0);assert.match(legacy.stdout,/INPUT_ERROR/);
  f.raw.workItem={relation:"new"};const dry=await f.run(["create","--dry-run"]);assert.equal(dry.code,0,dry.stdout);
  assert.equal(f.calls.milestones,0);assert.equal(f.milestoneState.nowCalls,0);assert.deepEqual(f.state.writes,[]);
 });

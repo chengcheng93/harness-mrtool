@@ -7,357 +7,46 @@ import { loadTemplateBundle } from "../../src/bundle/load.ts";
 import { canonicalizeJson, sha256Utf8 } from "../../src/contracts/jcs.ts";
 import { createManualCommandServices } from "../../src/cli/commands/manual.ts";
 import { executeCliJson } from "../../src/cli/execute.ts";
-import { parseCliInvocation } from "../../src/cli/program.ts";
-import type { RepositorySnapshot } from "../../src/git/repository.ts";
-import type { SourceBranchPushPlan } from "../../src/git/push-plan.ts";
-import { buildSshMergeRequestPushOptions, isSshPushUrl } from "../../src/git/push-plan.ts";
 
 const repositoryRoot = resolve(import.meta.dirname, "../..");
 
-function fakeRepository(): RepositorySnapshot {
-  return {
-    gitlabHost: "gitlab.example.test",
-    root: repositoryRoot,
-    runner: {} as never,
-    sourceBranch: "feature/manual",
-    sourceHeadSha: "b".repeat(40),
-    sourceProject: { host: "gitlab.example.test", path: "team/source" },
-    sourceFetchUrl: "git@gitlab.example.test:team/source.git",
-    sourcePushUrl: "git@gitlab.example.test:team/source.git",
-    sourceRemote: "origin",
-    sourceRemoteIdentity: { key: "gitlab:gitlab.example.test/team/source", kind: "gitlab", project: { host: "gitlab.example.test", path: "team/source" } },
-    sourceRemoteRef: "refs/heads/feature/manual",
-    targetBranch: "develop",
-    targetProject: { host: "gitlab.example.test", path: "team/target" },
-    targetFetchUrl: "git@gitlab.example.test:team/target.git",
-    targetPushUrl: "git@gitlab.example.test:team/target.git",
-    targetRef: "refs/remotes/origin/develop",
-    targetRefSha: "a".repeat(40),
-    targetRemote: "origin",
-    targetRemoteIdentity: { key: "gitlab:gitlab.example.test/team/target", kind: "gitlab", project: { host: "gitlab.example.test", path: "team/target" } },
-    worktree: { clean: true, staged: false, unstaged: false, untracked: false },
-  };
-}
-
-test("manual handoff renders a token-free MR title and description and never calls GitLab", async () => {
+test("manual creation always requires API Issue-first create without reading input or touching Git", async (t) => {
   const bundle = await loadTemplateBundle(resolve(repositoryRoot, "template-bundle"));
-  const raw = JSON.parse(await readFile(
-    resolve(repositoryRoot, "test/golden/fixtures/code-docs-request.json"),
-    "utf8",
-  )) as Record<string, unknown>;
-  raw.targetBranch = "develop";
-  const review = raw.review as Record<string, unknown>;
-  review.reviewerCandidateTokens = [`hmrc1_${"A".repeat(43)}`];
-  const mergeRequest = raw.mergeRequest as Record<string, unknown>;
-  mergeRequest.assigneeCandidateToken = `hmrc1_${"B".repeat(43)}`;
-  mergeRequest.labelCandidateTokens = [`hmrc1_${"C".repeat(43)}`];
-  const repository = fakeRepository();
-  const plan: SourceBranchPushPlan = {
-    kind: "not-requested",
-    relation: "absent",
-    beforeSha: null,
-    command: ["push", "--no-force", "origin", `${repository.sourceHeadSha}:${repository.sourceRemoteRef}`],
-    localHeadSha: repository.sourceHeadSha,
-    remote: repository.sourceRemote,
-    remoteRef: repository.sourceRemoteRef,
-  };
-  let pushed = false;
-  const services = createManualCommandServices({
-    cliVersion: "0.1.4-test",
-    cwd: repositoryRoot,
-    currentBundle: {
-      bundle,
-      bundleManifestHash: sha256Utf8(`${canonicalizeJson(bundle.manifest)}\n`),
-      releaseSetId: "release-set:test",
-      releaseTag: "templates-v1.0.0",
-    },
-    requestSource: { read: async () => raw },
-    repository: {
-      discover: async () => repository,
-      mergeBase: async () => "a".repeat(40),
-      planPush: async () => plan,
-      executePush: async () => {
-        pushed = true;
-        return { kind: "pushed", beforeSha: null, afterSha: repository.sourceHeadSha };
-      },
-    },
-  });
-  const chunks: string[] = [];
-  const result = await executeCliJson(
-    ["manual", "--auth", "ssh", "--input", "-", "--input-format", "json", "--output", "json"],
-    {
-      cliVersion: "0.1.4-test",
-      handlers: services,
-      stdout: {
-        write(chunk, callback) {
-          chunks.push(chunk);
-          callback();
-          return true;
-        },
-      },
-    },
-  );
-  assert.equal(result.exitCode, 0);
-  assert.equal(pushed, false);
-  const output = JSON.parse(chunks[0]!) as Record<string, unknown>;
-  assert.equal(output.ok, true);
-  const data = output.data as Record<string, unknown>;
-  assert.equal(data.command, "manual");
-  assert.equal(data.tokenRequired, false);
-  assert.equal(typeof data.description, "string");
-  assert.equal((data.description as string).includes("hmrc1_"), false);
-  const pushPlan = data.pushPlan as Record<string, unknown>;
-  assert.equal(pushPlan.state, "ready");
-  assert.equal(pushPlan.command, `git push --no-force origin ${repository.sourceHeadSha}:${repository.sourceRemoteRef}`);
-
-  const pushChunks: string[] = [];
-  const pushResult = await executeCliJson(
-    ["manual", "--auth", "ssh", "--input", "-", "--input-format", "json", "--push", "--output", "json"],
-    {
-      cliVersion: "0.1.4-test",
-      handlers: services,
-      stdout: {
-        write(chunk, callback) {
-          pushChunks.push(chunk);
-          callback();
-          return true;
-        },
-      },
-    },
-  );
-  assert.equal(pushResult.exitCode, 0);
-  assert.equal(pushed, true);
-  const pushedOutput = JSON.parse(pushChunks[0]!) as Record<string, unknown>;
-  const pushedData = pushedOutput.data as Record<string, unknown>;
-  const pushedPlan = pushedData.pushPlan as Record<string, unknown>;
-  assert.deepEqual(pushedPlan.execution, {
-    state: "pushed",
-    beforeSha: null,
-    afterSha: repository.sourceHeadSha,
-  });
-});
-
-test("manual handoff rejects omitted, auto, or API auth before reading input or planning a push", async (t) => {
-  const bundle = await loadTemplateBundle(resolve(repositoryRoot, "template-bundle"));
-  for (const auth of [[], ["--auth", "auto"], ["--auth", "api"]]) {
-    for (const push of [[], ["--push"]]) {
-      await t.test([...auth, ...push].join(" ") || "default", async () => {
-        const touched: string[] = [];
-        const services = createManualCommandServices({
-          cliVersion: "0.1.7-test",
-          cwd: repositoryRoot,
-          currentBundle: {
-            bundle,
-            bundleManifestHash: sha256Utf8(`${canonicalizeJson(bundle.manifest)}\n`),
-            releaseSetId: "release-set:test",
-            releaseTag: "templates-v1.1.0",
-          },
-          requestSource: { read: async () => { touched.push("input"); return {}; } },
-          repository: {
-            discover: async () => { touched.push("repository"); throw new Error("must not discover repository"); },
-            mergeBase: async () => { touched.push("merge-base"); throw new Error("must not calculate merge base"); },
-            planPush: async () => { touched.push("plan"); throw new Error("must not plan push"); },
-            executePush: async () => { touched.push("push"); throw new Error("must not execute push"); },
-          },
-        });
-        const chunks: string[] = [];
-        const result = await executeCliJson(
-          ["manual", ...auth, "--input", "-", "--input-format", "json", ...push, "--output", "json"],
-          {
-            cliVersion: "0.1.7-test",
-            handlers: services,
+  const raw = JSON.parse(await readFile(resolve(repositoryRoot, "examples/submission.json"), "utf8"));
+  const workItems = [undefined, { relation: "new" }, { relation: "none", noIssueReason: "legacy" },
+    { relation: "closes", iid: 7 }, { relation: "related", iid: 7 }];
+  for (const auth of [[], ["--auth", "auto"], ["--auth", "api"], ["--auth", "ssh"]]) {
+    for (const mode of [[], ["--push"], ["--ssh-mr"], ["--push", "--ssh-mr"]]) {
+      for (const workItem of workItems) {
+        await t.test(JSON.stringify({ auth, mode, workItem }), async () => {
+          const touched: string[] = [];
+          const services = createManualCommandServices({
+            cliVersion: "0.1.12-test", cwd: repositoryRoot,
+            currentBundle: { bundle, bundleManifestHash: sha256Utf8(canonicalizeJson(bundle.manifest) + "\n"),
+              releaseSetId: "release-set:test", releaseTag: "templates-v1.2.0" },
+            requestSource: { read: async () => { touched.push("input"); return { ...raw, workItem }; } },
+            repository: {
+              discover: async () => { touched.push("repository"); throw new Error("must not discover"); },
+              mergeBase: async () => { touched.push("merge-base"); throw new Error("must not calculate"); },
+              planPush: async () => { touched.push("plan"); throw new Error("must not plan"); },
+              executePush: async () => { touched.push("push"); throw new Error("must not push"); },
+            },
+          });
+          const chunks: string[] = [];
+          const result = await executeCliJson(["manual", ...auth, ...mode, "--input", "-",
+            "--input-format", "json", "--output", "json"], {
+            cliVersion: "0.1.12-test", handlers: services,
             stdout: { write(chunk, callback) { chunks.push(chunk); callback(); return true; } },
-          },
-        );
-        const output = JSON.parse(chunks[0]!) as Record<string, unknown>;
-        assert.equal(output.code, "AUTH_ERROR");
-        assert.equal(output.ok, false);
-        assert.equal(result.exitCode, 3);
-        assert.deepEqual(touched, []);
-      });
+          });
+          const output = JSON.parse(chunks[0]!);
+          assert.equal(result.exitCode, 2);
+          assert.equal(output.code, "INPUT_ERROR");
+          assert.match(JSON.stringify(output), /API create/u);
+          assert.match(JSON.stringify(output), /Issue/u);
+          assert.deepEqual(touched, []);
+          assert.equal(output.remoteWrite.state, "not-attempted");
+        });
+      }
     }
   }
 });
-
-test("SSH Push Options are explicit, newline-safe, and exclude metadata mutation", () => {
-  assert.equal(isSshPushUrl("git@gitlab.example.test:team/project.git"), true);
-  assert.equal(isSshPushUrl("https://gitlab.example.test/team/project.git"), false);
-  const options = buildSshMergeRequestPushOptions({
-    targetBranch: "main",
-    title: "[fix][app] Handoff title",
-    description: "# Summary\nLine one",
-  });
-  assert.deepEqual(options, [
-    "merge_request.create",
-    "merge_request.target=main",
-    "merge_request.title=[fix][app] Handoff title",
-    "merge_request.description=# Summary\\nLine one",
-  ]);
-  assert.equal(options.length, 4);
-  assert.equal(options.includes("merge_request.draft"), false);
-});
-
-test("manual --ssh-mr cannot bypass mandatory labels through SSH push options", async () => {
-  const bundle = await loadTemplateBundle(resolve(repositoryRoot, "template-bundle"));
-  const raw = JSON.parse(await readFile(
-    resolve(repositoryRoot, "test/golden/fixtures/code-docs-request.json"),
-    "utf8",
-  )) as Record<string, unknown>;
-  raw.targetBranch = "develop";
-  let capturedOptions: readonly string[] | undefined;
-  const repository = fakeRepository();
-  const basePlan: SourceBranchPushPlan = {
-    kind: "not-requested",
-    relation: "absent",
-    beforeSha: null,
-    command: ["push", "--push-option=merge_request.create"],
-    localHeadSha: repository.sourceHeadSha,
-    remote: repository.sourceRemote,
-    remoteRef: repository.sourceRemoteRef,
-    pushOptions: [
-      "merge_request.create",
-      "merge_request.target=develop",
-      "merge_request.title=placeholder",
-      "merge_request.description=placeholder",
-    ],
-  };
-  const services = createManualCommandServices({
-    cliVersion: "0.1.4-test",
-    cwd: repositoryRoot,
-    currentBundle: {
-      bundle,
-      bundleManifestHash: sha256Utf8(`${canonicalizeJson(bundle.manifest)}\n`),
-      releaseSetId: "release-set:test",
-      releaseTag: "templates-v1.0.0",
-    },
-    requestSource: { read: async () => raw },
-    repository: {
-      discover: async () => repository,
-      mergeBase: async () => "a".repeat(40),
-      planPush: async (_repository, options) => {
-        capturedOptions = options.pushOptions;
-        return basePlan;
-      },
-      executePush: async () => ({ kind: "not-written", beforeSha: null, afterSha: null }),
-    },
-  });
-  const chunks: string[] = [];
-  await executeCliJson(
-    ["manual", "--auth", "ssh", "--ssh-mr", "--input", "-", "--input-format", "json", "--output", "json"],
-    {
-      cliVersion: "0.1.4-test",
-      handlers: services,
-      stdout: { write(chunk, callback) { chunks.push(chunk); callback(); return true; } },
-    },
-  );
-  assert.equal(capturedOptions, undefined);
-  const output = JSON.parse(chunks[0]!) as Record<string, unknown>;
-  assert.equal(output.ok, false);
-  assert.equal(output.code, "LABEL_ERROR");
-
-});
-
-test("manual --ssh-mr stays disabled with API auth before rendering or writing", async () => {
-  const bundle = await loadTemplateBundle(resolve(repositoryRoot, "template-bundle"));
-  const raw = JSON.parse(await readFile(
-    resolve(repositoryRoot, "test/golden/fixtures/code-docs-request.json"),
-    "utf8",
-  )) as Record<string, unknown>;
-  const services = createManualCommandServices({
-    cliVersion: "0.1.4-test",
-    cwd: repositoryRoot,
-    currentBundle: {
-      bundle,
-      bundleManifestHash: sha256Utf8(`${canonicalizeJson(bundle.manifest)}\n`),
-      releaseSetId: "release-set:test",
-      releaseTag: "templates-v1.0.0",
-    },
-    requestSource: { read: async () => raw },
-    repository: {
-      discover: async () => { throw new Error("must not discover repository"); },
-      mergeBase: async () => { throw new Error("must not calculate merge base"); },
-      planPush: async () => { throw new Error("must not plan push"); },
-      executePush: async () => { throw new Error("must not execute push"); },
-    },
-  });
-  const chunks: string[] = [];
-  const result = await executeCliJson(
-    ["manual", "--auth", "api", "--ssh-mr", "--input", "-", "--input-format", "json", "--output", "json"],
-    {
-      cliVersion: "0.1.4-test",
-      handlers: services,
-      stdout: { write(chunk, callback) { chunks.push(chunk); callback(); return true; } },
-    },
-  );
-  assert.equal(result.exitCode, 2);
-  const output = JSON.parse(chunks[0]!) as Record<string, unknown>;
-  assert.equal(output.ok, false);
-  assert.equal(output.code, "LABEL_ERROR");
-});
-
-test("manual SSH mode requires structured input before any wizard or GitLab access", async () => {
-  const bundle = await loadTemplateBundle(resolve(repositoryRoot, "template-bundle"));
-  let requestRead = false;
-  const services = createManualCommandServices({
-    cliVersion: "0.1.4-test",
-    cwd: repositoryRoot,
-    currentBundle: {
-      bundle,
-      bundleManifestHash: sha256Utf8(`${canonicalizeJson(bundle.manifest)}\n`),
-      releaseSetId: "release-set:test",
-      releaseTag: "templates-v1.0.0",
-    },
-    requestSource: { read: async () => { requestRead = true; return {}; } },
-    repository: {
-      discover: async () => { throw new Error("must not discover repository"); },
-      mergeBase: async () => { throw new Error("must not calculate merge base"); },
-      planPush: async () => { throw new Error("must not plan push"); },
-      executePush: async () => { throw new Error("must not execute push"); },
-    },
-  });
-  const chunks: string[] = [];
-  const result = await executeCliJson(
-    ["manual", "--auth", "ssh", "--output", "json"],
-    {
-      cliVersion: "0.1.4-test",
-      handlers: services,
-      stdout: { write(chunk, callback) { chunks.push(chunk); callback(); return true; } },
-    },
-  );
-  assert.equal(result.exitCode, 2);
-  assert.equal(requestRead, false);
-  const output = JSON.parse(chunks[0]!) as Record<string, unknown>;
-  assert.equal(output.ok, false);
-  assert.equal(output.code, "INPUT_ERROR");
-});
-
-for (const omitted of [false, true]) {
-  test(`manual rejects ${omitted ? "omitted" : "new"} Issue mode before repository access`, async () => {
-    const bundle = await loadTemplateBundle(resolve(repositoryRoot, "template-bundle"));
-    const raw = JSON.parse(await readFile(resolve(repositoryRoot, "examples/submission.json"), "utf8"));
-    if (omitted) delete raw.workItem;
-    let touched = false;
-    const services = createManualCommandServices({
-      cliVersion: "0.1.10-test", cwd: repositoryRoot,
-      currentBundle: { bundle, bundleManifestHash: sha256Utf8(`${canonicalizeJson(bundle.manifest)}\n`),
-        releaseSetId: "release-set:test", releaseTag: "templates-v1.2.0" },
-      requestSource: { read: async () => raw },
-      repository: {
-        discover: async () => { touched = true; throw new Error("must not discover repository"); },
-        mergeBase: async () => { throw new Error("must not calculate merge base"); },
-        planPush: async () => { throw new Error("must not plan push"); },
-        executePush: async () => { throw new Error("must not execute push"); },
-      },
-    });
-    const chunks: string[] = [];
-    const result = await executeCliJson(["manual", "--auth", "ssh", "--input", "-", "--input-format", "json", "--output", "json"], {
-      cliVersion: "0.1.10-test", handlers: services,
-      stdout: { write(chunk, callback) { chunks.push(chunk); callback(); return true; } },
-    });
-    const output = JSON.parse(chunks[0]!);
-    assert.equal(result.exitCode, 2);
-    assert.equal(output.code, "INPUT_ERROR");
-    assert.match(JSON.stringify(output), /API create/u);
-    assert.equal(touched, false);
-  });
-}

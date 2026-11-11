@@ -1014,29 +1014,12 @@ export class GitLabClient {
   }
 
   async createMergeRequest(
-    project: GitLabProjectIdentity,
-    input: GitLabCreateMergeRequestInput,
+    _project: GitLabProjectIdentity,
+    _input: GitLabCreateMergeRequestInput,
   ): Promise<GitLabValueReceipt<{ readonly iid: number }>> {
-    await this.mutationCapabilities();
-    const response = await this.mutate(
-      "POST",
-      `/api/v4/projects/${encodeId(project.id)}/merge_requests`,
-      {
-        source_branch: input.sourceBranch,
-        target_branch: input.targetBranch,
-        title: input.title,
-        description: input.description,
-        source_project_id: input.sourceProjectId,
-        target_project_id: input.targetProjectId,
-        squash: input.squash,
-        remove_source_branch: input.removeSourceBranch,
-      },
-    );
-    const record = validateResponse(response, (data) =>
-      validateMutationIdentity(data, project, null));
-    return Object.freeze({
-      value: Object.freeze({ iid: integer(record.iid, "merge request.iid") }),
-      requestId: response.requestId,
+    throw new ToolError("INPUT_ERROR", "MR-only creation is disabled", {
+      field: "workItem", expected: "Issue-first submission", actual: "legacy MR-only API",
+      safeNextStep: "Use the Issue-first submission service to create a new Issue and linked MR.",
     });
   }
 

@@ -1088,7 +1088,7 @@ function mutationGatedRemote(
     proof.pendingMutationCalls += 1;
     try {
       try {
-        if (allowedMutationIid !== undefined && (method === "create" || iid !== allowedMutationIid)) {
+        if (method === "create" || (allowedMutationIid !== undefined && iid !== allowedMutationIid)) {
           throw preparedInputFailure();
         }
         await beforeMutation();
@@ -1332,6 +1332,10 @@ export function createMergeRequestCommandAdapter(
       const upsert = input.upsert;
       if (typeof upsert !== "boolean") throw preparedInputFailure();
       const resume = snapshotCreateResume(input.resume);
+      if (upsert || resume === undefined) throw new ToolError("INPUT_ERROR", "Legacy create is available only to resume an existing MR", {
+        field: "--resume", expected: "an authenticated existing-MR resume", actual: "MR-only creation or upsert",
+        safeNextStep: "Use Issue-first create for a new MR, or update with the existing MR IID.",
+      });
       const resumeFingerprint = canonicalizeJson(copyJsonValue(resume ?? null));
       const assertCommandUnchanged = (): void => {
         if (input.upsert !== upsert || canonicalizeJson(copyJsonValue(snapshotCreateResume(input.resume) ?? null)) !== resumeFingerprint) {

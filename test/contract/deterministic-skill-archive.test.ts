@@ -1,3 +1,4 @@
+import packageMetadata from '../../package.json' with { type: 'json' };
 import assert from 'node:assert/strict';
 import {mkdtemp, mkdir, writeFile, readFile, rm, realpath, utimes, access} from 'node:fs/promises';
 import {resolve} from 'node:path';
@@ -74,15 +75,15 @@ test('distributed Skill archive ships the executable workflow and its on-demand 
   t.after(()=>rm(output,{recursive:true,force:true}));
   const source=resolve(import.meta.dirname,'../../skill/harness-mr');
   const archive=resolve(output,'skill.zip');
-  await packageSkillArchive({inputDirectory:source,outputPath:archive,version:'0.1.11',cliVersionRange:'>=0.1.11 <1.0.0'});
+  await packageSkillArchive({inputDirectory:source,outputPath:archive,version:packageMetadata.version,cliVersionRange:`>=${packageMetadata.version} <1.0.0`});
   const entries=unzipSync(await readFile(archive));
   for(const name of ['SKILL.md','scripts/run-flow.ps1','references/workflows.md']) {
     assert.ok(entries[name],name+' must ship in the standalone archive');
     assert.deepEqual(Buffer.from(entries[name]!),await readFile(resolve(source,name)));
   }
   const body=Buffer.from(entries['SKILL.md']!).toString('utf8').replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/u,'').trim();
-  const generated=renderSkillInstructions({skillVersion:'0.1.11',skillProtocol:1}).trim();
-  assert.equal(generated,body.replaceAll('<skill-semver>','0.1.11').replaceAll('<protocol>','1'));
+  const generated=renderSkillInstructions({skillVersion:packageMetadata.version,skillProtocol:1}).trim();
+  assert.equal(generated,body.replaceAll('<skill-semver>',packageMetadata.version).replaceAll('<protocol>','1'));
   for(const instructions of [body,generated]) {
     for(const link of instructions.matchAll(/\]\(([^)]+)\)/gu)) assert.ok(entries[link[1]!],link[1]+' must resolve inside the archive');
   }

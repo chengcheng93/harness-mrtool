@@ -6,7 +6,7 @@ AI/人填写完整变更说明，工具负责输入校验、自动标签和 Issu
 工具不是 GitLab 服务端合并门禁，也不能限制网页或原始 Git/API 操作。
 
 > **版本状态**：当前 main 已实现强制标签策略（Template Bundle **1.2.0**）。
-> CLI/Plugin **0.1.11** 是待验收发布候选，不代表已有可安装的新 Release。
+> CLI/Plugin **0.1.12** 是待验收发布候选，不代表已有可安装的新 Release。
 > 既有 [CLI 0.1.5](https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.5)
 > 和 [Plugin 0.1.5](https://github.com/chengcheng93/harness-mrtool/releases/tag/plugin-v0.1.5)
 > 不包含本次强制标签改造。新版尚未发布，完成发布后才更新正式下载链接。
@@ -18,9 +18,9 @@ AI/人填写完整变更说明，工具负责输入校验、自动标签和 Issu
 | --- | --- | --- | --- |
 | 默认：创建统一 Issue，再创建 MR | `schema/profiles` → `context` → Request workItem:new → `create` → 创建响应 MR 链接（默认 `--auth api`） | 是 | 写前校验，初始 POST 包含标签与人员 |
 | 看将要写入什么，不提交 | `preview` 或 API `create/update --dry-run` | API 路径需要 | 零远端写入，不消费候选上下文；仍可能读网络 |
-| 仅在人类明确要求手工交接时：生成标题/正文，自己在 GitLab 创建 MR | `manual --auth ssh` | 否 | 本地交接材料；可显式推送普通分支，**不保证网页创建的 MR 标签** |
+| 手工 MR 交接 | `manual` 已禁用 | — | 在仓库检查、推送计划与执行前拒绝，统一使用 Issue-first API 创建 |
 
-CLI 与 Skill 默认通过 API 新建 Issue 后创建 MR。用户要求提交即为本次操作授权：
+CLI 与 Skill 的任何新建 MR 都必须先通过 API 成功新建并关联 Issue。用户要求提交即为本次操作授权：
 后台校验后直接 `create`，以创建响应返回 MR 链接，描述为“已创建”。
 首次 POST 后不再 GET、PUT、GraphQL、回读验证、重试、查询恢复或回滚。
 失败立即停止，报告已知 Issue URL 和 MR 失败/结果未知，不能冒称成功。
@@ -28,9 +28,8 @@ CLI 与 Skill 默认通过 API 新建 Issue 后创建 MR。用户要求提交即
 历史受管 MR 的更新/验证见第 7 节。
 未传 `--auth` 时使用 `api`；
 `--auth auto` 仅保留为 API 选择的兼容写法，不会回退 SSH。缺少 Token 或 API
-请求失败时停止并报告问题，不自动切换到 manual/SSH 交接；只有人类明确要求
-手工交接时才使用 `manual --auth ssh`。`manual --ssh-mr` 已被禁用，
-返回 `LABEL_ERROR` 并在 push 前停止；它不是 API 标签验证的替代方案。
+请求失败时停止并报告问题，不切换到 manual/SSH 交接。所有 manual MR 交接已禁用，
+包括 `--push` 与 `--ssh-mr`；普通 Git 分支推送仍可使用 SSH。
 
 ## 2. 安装与源码运行
 
@@ -142,9 +141,8 @@ $env:HARNESS_MRTOOL_GITLAB_TOKEN = Read-Host 'GitLab API token' -MaskInput
 使用 `Remove-Item Env:HARNESS_MRTOOL_GITLAB_TOKEN, Env:HARNESS_MRTOOL_GITLAB_HOST`。
 不要打印这些变量。环境中的秘密仍需由本机账号/进程安全边界保护。
 
-只有人类明确要求的 `manual --auth ssh` 手工交接不需要 API Token。若 Git 传输
-使用 SSH，需事先把自己的 SSH 公钥配置到 GitLab，并验证
-`ssh -T git@gitlab.example.com`；不要上传私钥。API 认证失败不会授权改走此路径。
+Git 分支推送可使用 SSH：先配置自己的 SSH 公钥并验证
+`ssh -T git@gitlab.example.com`；不要上传私钥。新建 MR 仍需要 API Token。
 
 ## 4. 第一次使用：推荐交互向导
 
@@ -190,7 +188,8 @@ hmr context --auth api --output json
 CLI 渲染统一八节 Issue，无需选模板、额外 AI 调用或新增必填 Issue 字段。
 负责人为当前 API 用户，阶段日期/截止日期为同一次冻结的 Asia/Shanghai 当日。CLI 自动选择 active 项目/祖先组中 due_date 严格晚于当天的最近里程碑，同日取数值 ID 最小者；Issue/MR 初始 POST 使用同一个 milestone_id。无候选时省略并返回 no-future-milestone，读取失败在写入和票据消费前停止。TAPD 可不填。
 Issue 仅使用可用 type/priority 标签；MR 的三标签和人员都在首次 MR POST 提交。
-显式旧 `workItem`（closes/related/none）保留历史强事务，不会忽略调用者选择。
+新建时显式旧 `workItem`（none/closes/related）和 `--upsert` 在规划与票据消费前被拒绝。
+这些旧值仅供已有历史 MR 的读取、更新与经验证的恢复；[examples/request.json](examples/request.json) 是历史渲染样例。
 
 复制 [输入样例](examples/submission.json) 到**业务仓库之外**的私有目录：
 
@@ -237,11 +236,11 @@ hmr create --auth api --input /absolute/private/mr-input/request.json --input-fo
 新 Issue 模式在写入前拒绝 upsert/resume。快速创建 MR 使用独立 marker，
 不支持历史 update、verify、upsert 或 resume。历史事务的恢复见下面小节。
 
-### 5.4 仅限历史强事务：upsert 与恢复
+### 5.4 仅限已有历史 MR：更新与恢复
 
-以下仅适用于显式旧 workItem 模式和历史受管 MR，不适用于默认快速提交。
-`create --upsert` 可复用同分支已有历史 MR，但必须验证 receipt 和精确历史模板；
-若历史 Bundle 不同，按错误提示改走 `context --mr` + `update`，不能跳过认证。
+以下仅适用于已有历史受管 MR，不适用于新建或快速提交 marker。
+`create --upsert` 已拒绝；使用 `context --mr <iid>` + `update <iid>`，验证 receipt 和精确历史模板。
+显式 `create --resume` 只能恢复经过原始私有证明认证的已有 IID，不能创建另一条 MR。
 
 如果 `create` 已经创建了 MR，但在写入最终 description 前中断（返回 `PARTIAL_WRITE`），可以直接改用
 `update <iid>` 继续；也可以保留原始 Request 文件和私有证明，修复阻断后重新
@@ -325,23 +324,11 @@ hmr update 88 --migrate-template --auth api --input /absolute/private/mr-input/l
 精确 old:new 绑定，不要求用户输入哈希或再次确认。
 历史资产不可用、无签名锚点或文件被篡改时停止，不以当前模板冒充旧模板。
 
-## 8. 仅在人类明确要求时使用手工 SSH 交接
+## 8. 手工 MR 交接已禁用
 
-默认不启用此路径。只有人类明确要求手工交接后，才从[历史/手工输入样例](examples/request.json)
-准备 JSON，显式保留 closes/related/none 及实际 iid 或无 Issue 理由。
-manual 不支持 `workItem:new`，省略 workItem 也会默认 new 而被拒绝；自动新建 Issue 应走 API create。
-以下 `legacy-request.json` 使用该显式旧模式，不能复用默认提交样例。执行
-`manual --auth ssh`；`manual` 省略认证选项时不会自动选择 SSH：
-
-```sh
-hmr manual --auth ssh --input /absolute/private/mr-input/legacy-request.json --output json
-# 审查生成的 title、description、targetBranch、sourceHeadSha、pushPlan 后再推送普通分支：
-hmr manual --auth ssh --input /absolute/private/mr-input/legacy-request.json --push --output json
-```
-
-输出供用户在 GitLab 网页创建 MR；它不是已验证的 MR。SSH handoff 不需要 API context
-或真实候选 token，CLI 对手工交接请求进行专门归一化；不要因此把 API 的 context/token
-规则省略。`manual --ssh-mr` 即使配合 `--push` 也会被拒绝。
+`manual` 对所有 workItem 和认证选择均拒绝，包括 `--push` 与 `--ssh-mr`，
+在仓库检查、推送计划、Git push 和网络调用前停止。统一使用 API create，
+先成功创建并关联 Issue，再创建 MR；不提供网页手工创建旁路。
 
 ## 9. 常见问题
 

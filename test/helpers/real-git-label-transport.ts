@@ -15,7 +15,7 @@ export class RealGitLabelTransport implements GitLabHttpTransport {
   readonly unexpected: string[] = [];
   readonly labels = names.map((name, index) => ({ id: index + 1, name, description: name, color: "#123456", archived: false }));
   mr: WireObject | null = null;
-  beforeFind: (() => Promise<void>) | undefined;
+  beforeMilestones: (() => Promise<void>) | undefined;
   private sequence = 0;
 
   constructor(readonly sourceSha: string, readonly targetSha: string, readonly sourceBranch: string,
@@ -48,6 +48,9 @@ export class RealGitLabelTransport implements GitLabHttpTransport {
       if (path === "/api/v4/projects/7/milestones") {
         assert.equal(url.searchParams.get("state"), "active");
         assert.equal(url.searchParams.get("include_ancestors"), "true");
+        const hook = this.beforeMilestones;
+        this.beforeMilestones = undefined;
+        await hook?.();
         return respond([]);
       }
       if (path === "/api/v4/projects/7/labels") return respond(this.labels);
@@ -55,9 +58,6 @@ export class RealGitLabelTransport implements GitLabHttpTransport {
       if (path === "/api/v4/projects/7/repository/branches/main") return respond({ name: "main", commit: { id: this.targetSha } });
       if (path === "/api/v4/version") return respond({ version: "18.0.0", revision: "fixture" });
       if (path === "/api/v4/projects/7/merge_requests") {
-        const hook = this.beforeFind;
-        this.beforeFind = undefined;
-        await hook?.();
         return respond(this.mr === null ? [] : [this.mr]);
       }
       if (path === "/api/v4/projects/7/merge_requests/88") return respond(this.current());

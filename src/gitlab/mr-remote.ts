@@ -11,7 +11,7 @@ import type {
   MergeRequestRemote,
   RemoteMergeRequest,
 } from "../app/create-mr.ts";
-import { mutationReceipt, valueReceipt } from "../app/remote-receipt.ts";
+import { mutationReceipt, valueReceipt, type RemoteValueReceipt } from "../app/remote-receipt.ts";
 import { isToolError } from "../contracts/errors.ts";
 import {
   validateExternalContextSnapshot,
@@ -189,25 +189,8 @@ export class GitLabMergeRequestRemote implements MergeRequestRemote {
     }
   }
 
-  async create(input: CreateMergeRequestInput) {
-    try {
-      if (input.targetProjectId !== this.targetProject.id) {
-        throw new TypeError("Create input is not bound to the target project");
-      }
-      const receipt = await this.gitlab.createMergeRequest(this.targetProject, {
-        title: input.title,
-        description: input.description,
-        sourceProjectId: positiveInteger(input.sourceProjectId, "Source project ID"),
-        sourceBranch: input.sourceBranch,
-        targetProjectId: positiveInteger(input.targetProjectId, "Target project ID"),
-        targetBranch: input.targetBranch,
-        squash: input.squash,
-        removeSourceBranch: input.removeSourceBranch,
-      });
-      return valueReceipt(receipt.value, receipt.requestId);
-    } catch (error) {
-      throw asMutationError(error);
-    }
+  async create(_input: CreateMergeRequestInput): Promise<RemoteValueReceipt<{ readonly iid: number }>> {
+    throw new RemoteMutationError("rejected", "validation", null);
   }
 
   async findOpen(input: CreateMergeRequestInput) {

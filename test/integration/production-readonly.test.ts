@@ -315,10 +315,7 @@ async function fixture() {
     ...rawRequest,
     contextId,
     targetBranch: "develop",
-    workItem: {
-      relation: "none",
-      noIssueReason: "This production composition test has no linked issue.",
-    },
+    workItem: { relation: "new" },
     mergeRequest: {
       ...rawRequest.mergeRequest,
       labelCandidateTokens: [candidateToken(1), candidateToken(0)],
@@ -1071,3 +1068,18 @@ test("accepted planner and live-context values are immutable snapshots", async (
   assert.equal((data.gitDiffSummary as { readonly changedFileCount: number }).changedFileCount, 2);
   assert.deepEqual(data.audit, { requestIds: ["request-a", "request-z"] });
 });
+
+for (const workItem of [{ relation: "none", noIssueReason: "legacy" }, { relation: "closes", iid: 7 }, { relation: "related", iid: 7 }]) {
+  test("preview rejects legacy " + workItem.relation + " before planning or live reads", async () => {
+    const harness = await fixture();
+    const services = createReadOnlyCommandServices({
+      ...harness.dependencies,
+      requestSource: { read: async () => ({ ...harness.request, workItem }) },
+    });
+    await assert.rejects(async () => services.preview!(parseCliInvocation(["preview", "--input", "request.json", "--output", "json"]) as never),
+      (error: unknown) => isToolError(error, "INPUT_ERROR"));
+    assert.deepEqual(harness.plannerCalls, []);
+    assert.deepEqual(harness.api.calls, []);
+    assert.deepEqual(harness.storeCalls.resolve, []);
+  });
+}

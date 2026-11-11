@@ -6,7 +6,7 @@ profiles, rendering, labels, writes, and verification.
 
 ## Prerequisites
 
-CLI/Plugin 0.1.11 is a release candidate, not yet published. Build the CLI from
+CLI/Plugin 0.1.12 is a release candidate, not yet published. Build the CLI from
 current `main` source using the pinned-runtime instructions in the repository's
 root README; the plugin does not include a CLI binary. New release download links
 will be added only after publication.
@@ -16,8 +16,8 @@ not include the mandatory-label changes:
 
 <https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.5>
 
-The historical published CLI supports Windows x64. The default CLI and Skill
-flow uses the GitLab API to create a unified Issue and then an MR.
+The historical published CLI supports Windows x64. Every new MR in the CLI and Skill
+requires successful API creation and association of a unified Issue first.
 Configure a GitLab token in the host-scoped environment
 variables documented by the CLI. Never put a GitLab token in a command line,
 plugin file, or prompt.
@@ -98,8 +98,10 @@ immediately and report any known Issue URL and MR failure or unknown outcome;
 do not report success or blindly retry.
 
 Historical managed MRs retain their receipt/Bundle-based update and verification
-flow only when explicitly selected. Old Request workItem choices retain the
-legacy strong transaction. New-Issue mode rejects upsert/resume before writes;
+flow only for an already-existing authenticated MR. New submissions reject
+none/closes/related and --upsert before planning or ticket consumption. Explicit
+resume can only recover a proven existing IID; it cannot create an MR. New-Issue
+mode also rejects resume before writes;
 fast-submission markers do not support legacy update, verify, upsert, or resume.
 
 Missing credentials or API failures stop the flow; never automatically fall back
@@ -113,21 +115,10 @@ MR diffs and pushes use committed `HEAD` only. Staged, unstaged, and untracked
 files, including `.superpowers` reports, may remain in the worktree. The tool
 does not automatically add, stash, clean, or delete them.
 
-Manual input must use an explicit legacy workItem (closes/related/none), as in
-`examples/request.json`. Manual rejects new or omitted workItem; automatic Issue
-creation uses API create.
-
-Use `manual --auth ssh` only after an explicit human request for manual handoff:
-
-```text
-schema/profiles -> structured Request -> manual --auth ssh --push (when the user requested the branch push) -> web MR
-```
-
-The manual path does not claim a remote MR was created and does not choose live
-labels, assignee, or reviewers. `manual --auth ssh --ssh-mr --push` is rejected
-with `LABEL_ERROR` before push planning or execution. Use the API flow for
-Issue-first MR creation. An ordinary branch push followed by a
-user-created web MR remains outside the tool's label-verification guarantees.
+Manual MR creation handoff is disabled for every workItem/auth selection,
+including `--push` and `--ssh-mr`, before repository inspection, push planning,
+Git push, or network calls. Use Issue-first API create.
+`examples/request.json` is a historical rendering fixture, not a new-submission sample.
 
 The Skill sends the exact normalized Request over JSON stdin. On creation-response
 success, it returns a concise Markdown MR link with at most one short summary

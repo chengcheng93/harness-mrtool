@@ -181,33 +181,14 @@ function enqueueCapabilities(fake: FakeGitLab, modes: readonly string[] = ["APPE
   });
 }
 
-test("creates a merge request with an exact label-free REST body and returns only the acknowledged IID", async () => {
+test("legacy MR-only create is rejected before capabilities or transport", async () => {
   const fake = new FakeGitLab();
-  enqueueCapabilities(fake);
-  fake.enqueue("POST", "/api/v4/projects/7/merge_requests", {
-    headers: { "x-request-id": "req-create" },
-    body: mutationBody(),
+  await assert.rejects(remote(fake).create(createInput()), (error: unknown) => {
+    assert.equal(isRemoteMutationError(error, "rejected"), true);
+    assert.equal(isRemoteMutationError(error) ? error.reason : null, "validation");
+    return true;
   });
-
-  const receipt = await remote(fake).create(createInput());
-
-  assert.deepEqual(receipt, { requestId: "req-create", value: { iid: 12 } });
-  assert.deepEqual(fake.requests.map((request) => [request.method, requestPath(request)]), [
-    ["GET", "/api/v4/version"],
-    ["POST", "/api/graphql"],
-    ["POST", "/api/v4/projects/7/merge_requests"],
-  ]);
-  assert.deepEqual(fake.requests[2]?.body, {
-    source_branch: SOURCE_BRANCH,
-    target_branch: TARGET_BRANCH,
-    title: "[fix][app] Preserve CSS output",
-    description: "Provisional description",
-    source_project_id: Number(SOURCE_ID),
-    target_project_id: Number(TARGET.id),
-    squash: true,
-    remove_source_branch: true,
-  });
-  assert.equal(Object.hasOwn(fake.requests[2]?.body as object, "labels"), false);
+  assert.equal(fake.requests.length, 0);
 });
 
 test("create rejects an input bound to another target project before any request", async () => {
@@ -342,8 +323,8 @@ test("treats structured GraphQL mutation errors as a definitive validation rejec
   );
 });
 
-test("capability failures reject create and label writes before any mutation request", async () => {
-  for (const action of ["create", "labels-add", "labels-remove"] as const) {
+test("capability failures reject label writes before any mutation request", async () => {
+  for (const action of ["labels-add", "labels-remove"] as const) {
     for (const failure of ["schema", "network", "introspection-server", "auth"] as const) {
       const fake = new FakeGitLab();
       if (failure === "schema") {
@@ -373,8 +354,7 @@ test("capability failures reject create and label writes before any mutation req
         },
       };
       const adapter = remote(transport);
-      const mutation = action === "create" ? adapter.create(createInput())
-        : action === "labels-add" ? adapter.addLabels(12, ["gid://gitlab/ProjectLabel/3"])
+      const mutation = action === "labels-add" ? adapter.addLabels(12, ["gid://gitlab/ProjectLabel/3"])
         : adapter.removeLabels(12, ["gid://gitlab/ProjectLabel/3"]);
 
       await assert.rejects(mutation, (error: unknown) => {
@@ -446,13 +426,12 @@ test("rejects non-numeric managed user IDs before transport", async () => {
 
 test("rejects malformed mutation acknowledgements as unknown instead of using them as readback", async () => {
   const fake = new FakeGitLab();
-  enqueueCapabilities(fake);
-  fake.enqueue("POST", "/api/v4/projects/7/merge_requests", {
+  fake.enqueue("PUT", "/api/v4/projects/7/merge_requests/12", {
     headers: { "x-request-id": "req-wrong-project" },
     body: { ...mutationBody(), project_id: 8 },
   });
 
-  await assert.rejects(remote(fake).create(createInput()), (error: unknown) => {
+  await assert.rejects(remote(fake).writeManagedFields(12, managedInput()), (error: unknown) => {
     assert.equal(isRemoteMutationError(error, "unknown"), true);
     assert.equal(isRemoteMutationError(error) ? error.reason : null, "server");
     assert.equal(isRemoteMutationError(error) ? error.requestId : null, "req-wrong-project");

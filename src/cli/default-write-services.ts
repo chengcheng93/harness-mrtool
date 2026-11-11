@@ -11,6 +11,7 @@ import { assertPristineResumeAuthorization, validatePristineCreateResume } from 
 import type { Candidate } from "../context/types.ts";
 import { canonicalizeJson, sha256Utf8, copyJsonValue, type JsonObject } from "../contracts/jcs.ts";
 import { ToolError } from "../contracts/errors.ts";
+import { assertNewIssueSubmission } from "../contracts/new-submission.ts";
 import { GitLabMergeRequestRemote } from "../gitlab/mr-remote.ts";
 import { normalizeAndValidateRequest } from "../input/normalize.ts";
 import { defaultStateDirectory } from "../platform/state-path.ts";
@@ -59,6 +60,10 @@ export function createDefaultWriteServices(
       field: "--offline", expected: "online live candidate and MR readback verification", actual: "offline",
       safeNextStep: "Retry without --offline when GitLab is reachable.",
     });
+    if (command.kind === "create" && command.upsert) throw new ToolError("INPUT_ERROR", "Create no longer supports upsert", {
+      field: "--upsert", expected: "Issue-first create or explicit existing-MR update", actual: "--upsert",
+      safeNextStep: "Use create for a new Issue and MR, or update with the existing MR IID.",
+    });
     const reader = readOnly.externalContextReader ?? defaultExternalContextReader;
     const repository = options.repository ?? defaultReadOnlyRepository;
     const receiptStore = new VerificationReceiptStore({
@@ -70,12 +75,13 @@ export function createDefaultWriteServices(
     if (command.kind !== "create" && mrIid === null) throw new ToolError("INPUT_ERROR", "An MR IID is required", {
       field: "iid", expected: "a resolved MR IID", actual: null, safeNextStep: "Specify the merge request IID and retry.",
     });
-    const request = command.kind === "verify" ? null
+    let request = command.kind === "verify" ? null
       : normalizeAndValidateRequest(await readOnly.requestSource.read(invocation));
-    if (request?.workItem.relation === "new" && (command.kind !== "create" || command.upsert || command.resumeIid !== undefined)) {
+    if (command.kind === "create" && command.resumeIid === undefined) assertNewIssueSubmission(request!);
+    if (request?.workItem.relation === "new" && (command.kind !== "create" || command.resumeIid !== undefined)) {
       throw new ToolError("INPUT_ERROR", "Issue-first submission supports a new create only", {
         field: "workItem", expected: "new create without upsert or resume", actual: command.kind,
-        safeNextStep: "Use a fresh create for a new Issue; use an explicit legacy workItem only for historical MR operations.",
+        safeNextStep: "Use create for a new Issue and MR; historical update or resume requires its original workItem.",
       });
     }
     // Freeze the instant before any live preflight; clone injected Dates to avoid mutable clock state.
@@ -120,6 +126,12 @@ export function createDefaultWriteServices(
       diff: planned.labelDiff, binding: snapshot, inventory: snapshot.labelCandidates,
       options: labelOptionsForProductionInvocation(invocation),
     });
+
+    if (command.kind === "create" && request?.workItem.relation === "new") {
+      request = normalizeAndValidateRequest({ ...request,
+        title: { ...request.title, type: selection!.titleType },
+      });
+    }
 
     let mutationStarted = false;
     // Re-discover immediately before writing, rather than trusting a captured SHA tuple.
@@ -241,7 +253,7 @@ export function createDefaultWriteServices(
           remoteWrite: { state: "written" as const, operations: [...result.operations] } },
         output: { message: "Issue and merge request created from API responses",
           data: copyJsonValue({ command: "create", mode: "issue-first", verification: result.verification,
-            iid: result.mergeRequest.iid, webUrl: result.mergeRequest.webUrl,
+            iid: result.mergeRequest.iid, webUrl: result.mergeRequest.webUrl, mandatoryLabels: selection,
             issue: result.issue, mergeRequest: result.mergeRequest, milestoneSelection: result.milestoneSelection }) as JsonObject },
       };
       planned.assertNoCredentialExposure(output);
@@ -257,27 +269,7 @@ export function createDefaultWriteServices(
         return validateExternalContextSnapshot(result.snapshot);
       },
     });
-    const authenticatedRemote: MergeRequestRemote = {
-      ...guardedRemote(rawRemote, async () => {}),
-      findOpen: async (input) => {
-        const found = await rawRemote.findOpen(input);
-        if (command.kind === "create" && command.upsert && !mutationStarted && found.value.length === 1) {
-          const existing = found.value[0]!;
-          const pinned = await loadMrBundle({ current: { iid: existing.iid,
-            targetProjectId: existing.targetProjectId, description: existing.description }, source: {
-            gitlabOrigin: planned.options.gitlabOrigin, receiptLoader: receiptStore, bundleLoader: historical,
-          } });
-          if (pinned.bundleManifestHash !== planned.selection.bundleManifestHash || pinned.reference.releaseTag !== planned.selection.releaseTag) {
-            throw new ToolError("UPDATE_REQUIRED", "Upsert context is not bound to the existing MR's historical template", {
-              field: "contextId", expected: "context issued for the exact historical MR template",
-              actual: "create context uses a different template", safeNextStep: "Run context --mr for this MR, then update with its newly issued context; use explicit migration to change templates.",
-            });
-          }
-        }
-        return found;
-      },
-    };
-    const remote = guardedRemote(authenticatedRemote, async () => {
+    const remote = guardedRemote(rawRemote, async () => {
       try { await fresh(); mutationStarted = true; } catch { throw new RemoteMutationError("rejected", "conflict", null); }
     });
     const adapter = createMergeRequestCommandAdapter({

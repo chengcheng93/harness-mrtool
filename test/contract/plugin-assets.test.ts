@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { unzipSync } from "fflate";
+import packageMetadata from "../../package.json" with { type: "json" };
 
 // @ts-expect-error The packaging helper intentionally has no declaration file.
 import { packagePlugin } from "../../scripts/package-plugin.mjs";
@@ -16,7 +17,7 @@ test("Codex plugin packaging emits a bounded, self-contained archive", async (t)
     const result = await packagePlugin({
       inputDirectory: join(repositoryRoot, "plugins", "harness-mrtool"),
       outputDirectory: output,
-      version: "0.1.11",
+      version: packageMetadata.version,
     });
     const archive = await readFile(result.archivePath);
     const entries = unzipSync(archive);
@@ -54,7 +55,7 @@ test("Codex plugin packaging emits a bounded, self-contained archive", async (t)
     );
     const manifest = JSON.parse(Buffer.from(entries[".codex-plugin/plugin.json"]!).toString("utf8")) as Record<string, unknown>;
     assert.equal(manifest.name, "harness-mrtool");
-    assert.equal(manifest.version, "0.1.11");
+    assert.equal(manifest.version, packageMetadata.version);
     const pkg = JSON.parse(await readFile(join(repositoryRoot, "package.json"), "utf8"));
     const lock = JSON.parse(await readFile(join(repositoryRoot, "package-lock.json"), "utf8"));
     assert.equal(pkg.version, manifest.version);
@@ -74,7 +75,7 @@ test("Codex plugin packaging emits a bounded, self-contained archive", async (t)
       assert.doesNotMatch(readme, /--ref release-candidate-0\.1\.0/u);
     });
     await t.test("packaged README defaults to direct API MR creation with preview only on request", () => {
-      assert.match(readme, /The default CLI and Skill flow uses the GitLab API/u);
+      assert.match(readme, /The default invocation follows this order \(`--auth api` is the CLI default\)/u);
       assert.match(readme, /schema\/profiles -> context --auth api -> Request workItem:new -> create -> creation-response MR URL/u);
       assert.match(readme, /[Pp]review[^.]*only when explicitly requested/u);
       assert.doesNotMatch(readme, /structured Request -> preview -> user confirmation/u);
@@ -89,12 +90,12 @@ test("Codex plugin packaging emits a bounded, self-contained archive", async (t)
       assert.match(readme, /review and trust/u);
       assert.match(readme, /no PostInstall/u);
     });
-    await t.test("packaged README limits manual handoff to an explicit human request and refuses SSH MR creation", () => {
-      assert.match(readme, /Use `manual --auth ssh` only after an explicit human request for manual handoff/u);
-      assert.match(readme, /Git may still use SSH to push the source branch before the API flow/u);
-      assert.match(readme, /`manual --auth ssh --ssh-mr --push` is rejected with `LABEL_ERROR` before push planning or execution/u);
-      assert.match(readme, /Use the API flow for Issue-first MR creation/u);
-      assert.doesNotMatch(readme, /explicit opt-in basic Push Options request/u);
+    await t.test("packaged README disables every manual MR handoff before repository or push effects", () => {
+      assert.match(readme, /Manual MR creation handoff is disabled/u);
+      assert.match(readme, /Git may still use SSH to push the source branch/u);
+      assert.match(readme, /including `--push` and `--ssh-mr`/u);
+      assert.match(readme, /before repository inspection, push planning/u);
+      assert.doesNotMatch(readme, /Use `manual --auth ssh` only|explicit opt-in basic Push Options request/u);
     });
   } finally {
     await rm(output, { recursive: true, force: true });

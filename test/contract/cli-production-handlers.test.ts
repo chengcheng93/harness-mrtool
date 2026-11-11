@@ -105,6 +105,9 @@ test("SSH auth mode rejects API-only production commands before invoking handler
   const output = JSON.parse(chunks[0]!) as Record<string, unknown>;
   assert.equal(output.ok, false);
   assert.equal(output.code, "AUTH_ERROR");
+  const next = (output.error as { safeNextStep: string }).safeNextStep;
+  assert.match(next, /--auth api/u);
+  assert.doesNotMatch(next, /manual/iu);
 });
 
 

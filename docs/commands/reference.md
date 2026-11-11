@@ -10,8 +10,8 @@ installation-path material.
 | `doctor` | Read-only repository, GitLab, Bundle, capability, and update diagnostics. |
 | `context` | Resolve real project/group label candidates from the fixed pool; default priority is p2. Existing-MR context requires a trusted exact Bundle. |
 | `preview` | Produce a deterministic write plan without consuming candidates or mutating GitLab. |
-| `manual --auth ssh` | Render a local handoff and ordinary branch push plan only after an explicit human request. `--ssh-mr` is rejected with LABEL_ERROR; no unverified MR creation is allowed. |
-| `create` | Default: create a unified Issue then an MR with all fields in the initial POST; return the creation-response MR URL. Explicit legacy workItem modes retain the strong transaction. |
+| `manual` | Disabled for every workItem/auth selection before repository inspection or push; use Issue-first API create. |
+| `create` | Must create and link a unified Issue before MR creation; all MR fields enter its initial POST. Old workItem modes and --upsert are rejected. |
 | `create --resume <iid> --resume-from <original-request>` | Historical strong transactions only: finish a verified provisional transaction prefix using original private proof and an equivalent fresh `--input` request. Never creates another MR. |
 | `update <iid>` | Historical managed MRs only: update an existing merge request with readback and journal evidence. |
 | `verify <iid> --level structure` | Historical managed MRs only: verify stored merge-request state and historical Bundle evidence; `ready` and `merge` request additional checks. |
@@ -29,16 +29,10 @@ and run only when explicitly requested. `--auth auto` remains a compatibility
 selection of API without SSH fallback. Missing credentials or API errors stop
 the flow; they do not authorize automatic manual handoff.
 
-Manual input must use an explicit legacy workItem (closes/related/none), as in
-`examples/request.json`. Manual rejects new or omitted workItem; automatic Issue
-creation uses API create.
-
-Use `manual --auth ssh` only after an explicit human request for manual handoff;
-omitting `--auth ssh` does not enable this path. SSH mode rejects API-only
-commands. `manual --ssh-mr` is rejected with `LABEL_ERROR` before push planning or
-execution for every auth selection, including when `--push` is supplied.
-Ordinary manual handoff or branch push is not a verified MR. Git may still use
-SSH to publish the source branch before the default API flow.
+Manual MR creation handoff is disabled, including `--push` and `--ssh-mr`.
+It stops before repository inspection, push planning, Git push, or network calls.
+Git may still use SSH to publish the source branch before the API flow.
+`examples/request.json` is a historical rendering fixture, not a new-submission sample.
 
 GitLab supports HTTP and HTTPS. Explicit HTTP/HTTPS remotes preserve their
 scheme. SSH/scp/git remotes infer HTTP first, with same-host HTTPS compatibility
@@ -52,8 +46,9 @@ are never accepted as command-line options.
 
 Local schema/profiles -> API context (no Issue lookup) -> rich Request
 `workItem: { "relation": "new" }` -> create -> creation-response MR URL.
-Omitting workItem also selects new. Explicit old closes/related/none choices
-retain the legacy strong transaction; never silently ignore them.
+Omitting workItem also selects new. Every new MR requires successful Issue
+creation first. Explicit closes/related/none and `--upsert` are rejected before
+planning or ticket consumption; existing historical MRs use `update <iid>`.
 
 Use existing motivation/changes/verification/risk/profile text for complete
 problem, reproduction or feature scenarios, implementation, test, deployment,
@@ -70,7 +65,7 @@ calls. Success means created from the creation response, not verified.
 Failure stops immediately and reports any known Issue URL and MR failure or
 unknown outcome. Do not blindly retry or run legacy recovery.
 
-New-Issue mode rejects upsert/resume before writes. Fast-submission MRs use a
+Ordinary create rejects upsert; new-Issue mode also rejects resume before writes. Fast-submission MRs use a
 separate marker and do not support legacy update, verify, upsert, or resume.
 
 ## GitLab initialization
@@ -85,7 +80,7 @@ are incompatible with live API validation. The check performs no remote writes.
 
 ## Mandatory labels (working tree; Bundle 1.2.0)
 
-The default production services wire API `create`, `create --upsert`, `update`,
+The default production services wire API `create`, historical `update`,
 and `verify`; the interactive wizard uses the same automatic label selector.
 This does not claim a published release or live acceptance. The fixed 13-label
 pool and examples are documented in [label selection policy](../usage/label-selection-policy.md).
@@ -107,16 +102,14 @@ required. The diff digest remains an automatic consistency binding. The ordinary
 
 ## Preview, dry-run, and historical MRs
 
-The legacy recovery/update bullets below apply only to historical managed MRs
-and explicit old workItem modes, never fast-submission markers.
+The legacy recovery/update bullets below apply only to historical managed MRs,
+never to new creation or fast-submission markers.
 
 - `preview` and API `create`/`update --dry-run` make zero remote writes: no push
   or GitLab mutation, and no candidate-context consumption. They still validate
   the diff, live inventory, and request; dry-run is not offline or a completed MR.
-- `create --upsert` authenticates the existing MR's receipt and exact historical
-  Bundle. If it differs from the create context, the current path rejects that
-  mismatch and directs the caller to `context --mr <iid>` plus `update <iid>`, or
-  explicit template migration. It does not silently substitute the current Bundle.
+- `create --upsert` is rejected. Use `context --mr <iid>` and `update <iid>`
+  to authenticate an existing historical receipt and exact Bundle.
 - `create --resume <iid> --resume-from <original-request>` is separate from upsert.
   Obtain a fresh ordinary create context, select the same candidate identities,
   pass the equivalent request through `--input`. An explicit recovery dry-run verifies
@@ -164,10 +157,9 @@ API MR writes require the source branch to be already published at the selected
 commit. If the push plan is missing/behind, review and execute the ordinary Git
 push command, then refresh context. API MR commands never push implicitly.
 MR diffs and pushes use committed `HEAD` only. Staged, unstaged, and untracked
-files, including `.superpowers` reports, may remain for push, create, update,
-and manual handoff; a clean worktree is not required. The tool does not
+files, including `.superpowers` reports, may remain for push, create, and update;
+a clean worktree is not required. The tool does not
 automatically add, stash, clean, or delete local files.
-`--offline` is rejected for live create/update/verify; a local handoff still
-requires an explicit human request and `manual --auth ssh`.
+`--offline` is rejected for live create/update/verify. Manual MR handoff is disabled.
 
 On Windows the default Skill uses its bundled `scripts/run-flow.ps1` with system Windows PowerShell 5.1 and the native CLI; no Node, Python or PowerShell 7 is required. Context runs schema/profiles/context once, then create sends the original Request bytes via stdin. The runner returns one JSON with complete `cliResult`, Stopwatch `elapsedMs` and per-step timings. Keep waiting on the same process beyond 30 seconds; a started create without a complete CLI result is unknown and must not be retried. See [detailed workflows](../../skill/harness-mr/references/workflows.md).
