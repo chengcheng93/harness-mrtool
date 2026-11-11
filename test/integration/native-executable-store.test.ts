@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import {execFile} from 'node:child_process';
+import {promisify} from 'node:util';
 import {createHash} from 'node:crypto';
 import fsp from 'node:fs/promises';
 import {constants} from 'node:fs';
@@ -7,6 +9,7 @@ import {access,chmod,link,lstat,mkdir,mkdtemp,readFile,readdir,realpath,rename,r
 import {tmpdir} from 'node:os';
 import {dirname,resolve} from 'node:path';
 import test from 'node:test';
+import {resolveWindowsPowerShellPath,systemWindowsAclVerifier} from '../../src/platform/state-path.ts';
 import {withUpdateLock} from '../../src/platform/lock.ts';
 import {createNativeExecutableStore} from '../../src/update/native-executable-store.ts';
 import {createAuthenticatedReleaseSnapshot} from '../../src/update/release-set-verifier.ts';
@@ -146,6 +149,43 @@ test('native publication rejects a replaced parent without creating anything in 
  }finally{fsp.open=original;syncBuiltinESMExports();}
 });
 
+
+test('the real Windows ACL adapter preserves current-user file and directory access',async(t)=>{
+ if(process.platform!=='win32')return t.skip('requires native Windows');
+ if(process.env.GITHUB_ACTIONS==='true')return t.skip('requires a clean current-user parent ACL');
+ const root=await mkdtemp(resolve(await realpath(tmpdir()),'native-real-acl-'));t.after(()=>cleanup(root));
+ const directory=resolve(root,'private');await mkdir(directory);
+ await systemWindowsAclVerifier.verify(directory);
+ const path=resolve(directory,'ordinary-file');await writeFile(path,'private bytes');
+ await systemWindowsAclVerifier.verify(path);
+ assert.equal(await realpath(path),path);
+ assert.equal(await readFile(path,'utf8'),'private bytes');
+ await systemWindowsAclVerifier.verify(directory);
+ await systemWindowsAclVerifier.verify(path);
+ assert.equal(await readFile(path,'utf8'),'private bytes');
+ const nested=resolve(directory,'nested');await mkdir(nested);
+ const inherited=resolve(nested,'inherited-file');await writeFile(inherited,'inherited bytes');
+ assert.equal(await readFile(inherited,'utf8'),'inherited bytes');
+});
+
+test('the real Windows ACL adapter rejects effective token-group denials',async(t)=>{
+ if(process.platform!=='win32')return t.skip('requires native Windows');
+ if(process.env.GITHUB_ACTIONS==='true')return t.skip('requires a clean current-user parent ACL');
+ const root=await mkdtemp(resolve(await realpath(tmpdir()),'native-denied-acl-'));t.after(()=>cleanup(root));
+ const path=resolve(root,'denied');await writeFile(path,'private bytes');
+ const script=[
+  `$path = '${path.replaceAll("'","''")}'`,
+  "$ErrorActionPreference = 'Stop'",
+  "$sid = New-Object System.Security.Principal.SecurityIdentifier('S-1-1-0')",
+  "$acl = Get-Acl -LiteralPath $path",
+  "$rule = New-Object System.Security.AccessControl.FileSystemAccessRule($sid, 'WriteData', 'Deny')",
+  "$acl.AddAccessRule($rule)",
+  "Set-Acl -LiteralPath $path -AclObject $acl",
+ ].join('; ');
+ await promisify(execFile)(resolveWindowsPowerShellPath(),['-NoLogo','-NoProfile','-NonInteractive','-Command',script],{windowsHide:true});
+ await assert.rejects(systemWindowsAclVerifier.verify(path),/ACL verification failed at authorization stage/);
+ assert.equal(await readFile(path,'utf8'),'private bytes');
+});
 
 test('native Windows materialization uses the real ACL adapter and write-through helper',async(t)=>{
  if(process.platform!=='win32')return t.skip('requires native Windows');

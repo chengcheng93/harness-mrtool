@@ -291,7 +291,8 @@ test("a 304 racing a newer accepted channel cannot overwrite it or report stale 
     await f.store.save({ trustState: newer.nextTrustState, validators: { etag: '\"channel-43\"', lastModified: null } });
   });
   f.respond({ status: 304, headers: { etag: '\"stale-42\"' }, body: new Uint8Array() });
-  await assert.rejects(f.client().check(false), securityError);
+  // Keep real Windows state-lock work inside the HTTP budget to exercise the 304 race.
+  await assert.rejects(f.client().check(true), securityError);
   const stored = await f.store.load();
   assert.equal(stored?.trustState.highestSequence, 43);
   assert.equal(stored?.validators.etag, '\"channel-43\"');

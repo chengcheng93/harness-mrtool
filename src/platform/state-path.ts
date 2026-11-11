@@ -93,16 +93,14 @@ export const systemWindowsAclVerifier: WindowsAclVerifier = {
       `$path = ${powershellSingleQuoted(path)}`,
       "$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()",
       "$current = $identity.User",
-      "$currentName = $identity.Name",
       "$tokenOwner = $identity.Owner",
       "$system = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')",
       "$admins = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')",
-      "$inheritance = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'",
-      "$propagation = [System.Security.AccessControl.PropagationFlags]::None",
-      "$allow = [System.Security.AccessControl.AccessControlType]::Allow",
       "$rights = [System.Security.AccessControl.FileSystemRights]::FullControl",
       "$currentValue = $current.Value",
-      "$aclArguments = @($path, '/inheritance:r', '/grant:r', \"*$currentValue`:(OI)(CI)(F)\", '*S-1-5-18:(OI)(CI)(F)', '*S-1-5-32-544:(OI)(CI)(F)')",
+      "$currentPrincipals = @($current.Value) + @($identity.Groups | ForEach-Object { $_.Value })",
+      "$grant = if ((Get-Item -LiteralPath $path -Force).PSIsContainer) { '(OI)(CI)(F)' } else { '(F)' }",
+      "$aclArguments = @($path, '/inheritance:r', '/grant:r', ('*' + $currentValue + ':' + $grant), ('*S-1-5-18:' + $grant), ('*S-1-5-32-544:' + $grant))",
       `& ${powershellSingleQuoted(resolveWindowsIcaclsPath())} @aclArguments | Out-Null`,
       "if ($LASTEXITCODE -ne 0) { exit 24 }",
       "$acl = Get-Acl -LiteralPath $path",
@@ -120,6 +118,10 @@ export const systemWindowsAclVerifier: WindowsAclVerifier = {
       "$unsafe = $rules | Where-Object { $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Value -notin $allowed }",
       "if ($unsafe) { exit 22 }",
       "if (-not $acl.AreAccessRulesProtected) { exit 23 }",
+      "$effective = $rules | Where-Object { -not ($_.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly) }",
+      "$denied = $effective | Where-Object { $_.AccessControlType -eq 'Deny' -and $_.IdentityReference.Value -in $currentPrincipals }",
+      "$authorized = $effective | Where-Object { $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Value -eq $currentValue -and ($_.FileSystemRights -band $rights) -eq $rights }",
+      "if ($denied -or -not $authorized) { exit 29 }",
     ].join("; ");
     // Native Windows PowerShell must resolve its own modules instead of inheriting PowerShell 7 modules.
     const environment = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toUpperCase() !== "PSMODULEPATH"));
@@ -149,6 +151,8 @@ export const systemWindowsAclVerifier: WindowsAclVerifier = {
             ? "inheritance"
             : code === 24 || code === "24"
               ? "setup"
+              : code === 29 || code === "29"
+                ? "authorization"
               : code === 25 || code === "25"
                 ? "owner-setup"
                 : "execution";

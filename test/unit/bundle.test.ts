@@ -34,9 +34,11 @@ import {
 import { validateTemplateBundle } from "../../src/bundle/validate.ts";
 import { isToolError } from "../../src/contracts/errors.ts";
 import { canonicalizeJson } from "../../src/contracts/jcs.ts";
+import { normalizeAndValidateRequest } from "../../src/input/normalize.ts";
 import { runProcess } from "../helpers/process.ts";
 
 import outputSchema from "../../schemas/output-v1.schema.json" with { type: "json" };
+import requestSchema from "../../schemas/request-v1.schema.json" with { type: "json" };
 import packageMetadata from "../../package.json" with { type: "json" };
 
 const repositoryRoot = resolve(import.meta.dirname, "../..");
@@ -187,12 +189,6 @@ test("template bundle has exactly eight ordered English H2 headings", async () =
 
 test("template bundle loads an exact immutable nine-payload manifest", async () => {
   const bundle = await loadTemplateBundle(templateBundlePath);
-  const requestSchema = await readFile(
-    resolve(repositoryRoot, "schemas/request-v1.schema.json"),
-  );
-  const bundledSchema = await readFile(
-    resolve(templateBundlePath, "schema.json"),
-  );
 
   assert.equal(bundle.manifest.files.length, 9);
   assert.deepEqual(
@@ -209,10 +205,54 @@ test("template bundle loads an exact immutable nine-payload manifest", async () 
       "schema.json",
     ],
   );
-  assert.deepEqual(bundledSchema, requestSchema);
   assert.equal(Object.isFrozen(bundle), true);
   assert.equal(Object.isFrozen(bundle.manifest.files), true);
   assert.equal(Object.isFrozen(bundle.schema), true);
+});
+
+test("current normalization preserves the immutable Bundle 1.2.0 legacy work-item contract", async () => {
+  const bundle = await loadTemplateBundle(templateBundlePath);
+  const validateHistorical = new Ajv({ allErrors: true, strict: true }).compile(bundle.schema);
+  const fixture = JSON.parse(await readFile(
+    resolve(repositoryRoot, "test/fixtures/requests/code-docs.json"),
+    "utf8",
+  ));
+
+  for (const workItem of [
+    { relation: "closes", iid: 1 },
+    { relation: "related", iid: 51 },
+    { relation: "none", noIssueReason: "No tracked issue is required" },
+  ]) {
+    const normalized = normalizeAndValidateRequest({ ...fixture, workItem });
+    assert.deepEqual(normalized.workItem, workItem);
+    assert.equal(validateHistorical(normalized), true, JSON.stringify(validateHistorical.errors));
+  }
+});
+
+test("current raw requests extend the frozen Bundle contract with omitted and new work items", async () => {
+  const bundle = await loadTemplateBundle(templateBundlePath);
+  const validateHistorical = new Ajv({ allErrors: true, strict: true }).compile(bundle.schema);
+  const validateCurrent = new Ajv({ allErrors: true, strict: true }).compile(requestSchema);
+  const fixture = normalizeAndValidateRequest(JSON.parse(await readFile(
+    resolve(repositoryRoot, "test/fixtures/requests/code-docs.json"),
+    "utf8",
+  )));
+  const { workItem: _legacyWorkItem, ...omitted } = fixture;
+
+  for (const request of [omitted, { ...omitted, workItem: { relation: "new" } }]) {
+    assert.equal(validateCurrent(request), true, JSON.stringify(validateCurrent.errors));
+    assert.equal(validateHistorical(request), false);
+    assert.deepEqual(normalizeAndValidateRequest(request).workItem, { relation: "new" });
+  }
+
+  for (const workItem of [
+    { relation: "new", iid: 51 },
+    { relation: "new", noIssueReason: "Conflicting legacy relation" },
+    { relation: "unknown" },
+  ]) {
+    assert.equal(validateCurrent({ ...fixture, workItem }), false);
+    assert.equal(validateHistorical({ ...fixture, workItem }), false);
+  }
 });
 
 test("manifest builder emits deterministic JCS with sorted real payload metadata", async () => {

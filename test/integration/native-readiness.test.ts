@@ -16,6 +16,7 @@ import {verifyNativeReadiness} from '../../src/update/native-readiness.ts';
 import {nativeReleaseFixture} from '../helpers/native-release-fixture.ts';
 
 const platform = process.platform === 'win32' ? 'windows-x64' : 'darwin-arm64';
+const {version: packageVersion} = JSON.parse(await readFile(resolve(import.meta.dirname, '../../package.json'), 'utf8')) as {version: string};
 const allowTestAcl = Object.freeze({ verify: async (_path: string): Promise<void> => undefined });
 const hash = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
 type SpawnProbe = (path: string, args: readonly string[], options: SpawnOptions) => ChildProcess;
@@ -34,7 +35,7 @@ async function cleanup(root: string) {
 async function setup(t: TestContext, realSea = false, target: SupportedReleasePlatform = platform) {
   const root = await mkdtemp(resolve(await realpath(tmpdir()), 'native-readiness-test-'));
   t.after(() => cleanup(root));
-  const f = await nativeReleaseFixture(target, realSea ? {cliVersion: '0.1.7', releaseSetId: 'stable-0.1.7'} : {});
+  const f = await nativeReleaseFixture(target, realSea ? {cliVersion: packageVersion, releaseSetId: `stable-${packageVersion}`} : {});
   if (realSea) {
     const executableName = target === 'windows-x64' ? 'harness-mrtool.exe' : 'harness-mrtool';
     const files: Record<string, Uint8Array> = {
@@ -185,11 +186,13 @@ for (const failure of ['nonzero', 'signal', 'stderr', 'garbage', 'bom', 'sea-fal
 
 test('readiness shares one deadline across all probes rather than resetting each timeout', async t => {
   const f = await setup(t); simulatedHost(t); let calls = 0;
-  const spawnProbe: SpawnProbe = (_path, _args, options) => nodeChild(`setTimeout(()=>process.stdout.write(${JSON.stringify(f.outputs[calls++]!)}),350);`, options);
-  const start = performance.now();
-  const timeoutMs = process.platform === 'win32' ? 1500 : 900;
-  await assert.rejects(verifyNativeReadiness(f.snapshot, {...f.options, nativeReadiness: {spawn: spawnProbe, timeoutMs}}), {code: 'UPDATE_SECURITY_ERROR'});
-  assert.ok(calls >= 2); assert.ok(calls < 4); assert.ok(performance.now() - start < (process.platform === 'win32' ? 3000 : 1800));
+  const spawnProbe: SpawnProbe = (_path, _args, options) => nodeChild(`setTimeout(()=>process.stdout.write(${JSON.stringify(f.outputs[calls++]!)}),1200);`, options);
+  // Acquire the real lock before timing so its startup cannot consume the probe budget.
+  await withUpdateLock(f.root, async lease => {
+    const start = performance.now();
+    await assert.rejects(verifyNativeReadiness(f.snapshot, {...f.options, nativeReadiness: {spawn: spawnProbe, timeoutMs: 3000}}, lease), {code: 'UPDATE_SECURITY_ERROR'});
+    assert.ok(calls >= 2); assert.ok(calls < 4); assert.ok(performance.now() - start < 6000);
+  });
 });
 
 
@@ -229,6 +232,6 @@ test('actual packaged SEA authenticates an ephemeral-root signed archive and rep
   }
   const f = await setup(t, true);
   const ready = await verifyNativeReadiness(f.snapshot, f.options);
-  assert.equal(ready.cliVersion, '0.1.7');
+  assert.equal(ready.cliVersion, packageVersion);
   assert.equal(ready.bundleManifestHash, f.bundleManifestHash);
 });
