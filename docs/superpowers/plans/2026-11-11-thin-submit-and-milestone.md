@@ -39,13 +39,13 @@ selectSubmissionMilestone(candidates: readonly GitLabMilestone[], submissionDate
 // selection = {submissionDate, reason:'nearest-future'|'no-future-milestone', milestone:{id,title,dueDate}|null}
 ~~~
 
-- [ ] RED: table-driven selector test expects literal IDs for past/today/future, closed, null/invalid dates, leap day and same-day tie. A two-page FakeGitLab contract expects include_ancestors=true/state=active and a closest value only on page2; invalid IDs or conflicting duplicates fail before writes.
-- [ ] Run pinned Node scripts/test.mjs --test-concurrency=1 test/unit/select-submission-milestone.test.ts test/contract/gitlab-milestones.test.ts; record missing-function or wrong-selection failures.
-- [ ] GREEN: implement bounded client pagination and the pure selector using strict Gregorian YYYY-MM-DD validation. Do not read clock/network in selector. Stable same-ID duplicates dedupe; conflicting duplicates reject. Ignore invalid date strings in selection, reject malformed date field types at client boundary.
-- [ ] RED integration: assert same milestone_id in initial Issue and MR POST, exact3 MR labels, no candidate omission versus read-error confusion, zero reads after firstPOST; prefetch failure must not consume candidates. Add UTC23:xx/Shanghai next-day case using injected now. Preserve explicit legacy workItem and dry-run behavior.
-- [ ] GREEN: freeze now in fast-submit branch; read all milestones before consume; pass candidates and now into createSubmission; reuse chinaDate once and return data.milestoneSelection. Add optional milestoneId only to fast Issue/MR inputs, serialize only if selected and valid.
-- [ ] Verify selector, milestone client, gitlab-submit, create-submission, default-write-performance and directly affected fixtures. Record exact pass/fail/skip counts, then self-review.
-- [ ] Commit only Task1-owned paths after controller grants the serial commit slot.
+- [x] RED: table-driven selector test expects literal IDs for past/today/future, closed, null/invalid dates, leap day and same-day tie. A two-page FakeGitLab contract expects include_ancestors=true/state=active and a closest value only on page2; invalid IDs or conflicting duplicates fail before writes.
+- [x] Run pinned Node scripts/test.mjs --test-concurrency=1 test/unit/select-submission-milestone.test.ts test/contract/gitlab-milestones.test.ts; record missing-function or wrong-selection failures.
+- [x] GREEN: implement bounded client pagination and the pure selector using strict Gregorian YYYY-MM-DD validation. Do not read clock/network in selector. Stable same-ID duplicates dedupe; conflicting duplicates reject. Ignore invalid date strings in selection, reject malformed date field types at client boundary.
+- [x] RED integration: assert same milestone_id in initial Issue and MR POST, exact3 MR labels, no candidate omission versus read-error confusion, zero reads after firstPOST; prefetch failure must not consume candidates. Add UTC23:xx/Shanghai next-day case using injected now. Preserve explicit legacy workItem and dry-run behavior.
+- [x] GREEN: freeze now in fast-submit branch; read all milestones before consume; pass candidates and now into createSubmission; reuse chinaDate once and return data.milestoneSelection. Add optional milestoneId only to fast Issue/MR inputs, serialize only if selected and valid.
+- [x] Verify selector, milestone client, gitlab-submit, create-submission, default-write-performance and directly affected fixtures. Record exact pass/fail/skip counts, then self-review.
+- [x] Commit only Task1-owned paths after controller grants the serial commit slot.
 
 ## Task 2: Windows thin runner and behavioral tests
 
@@ -53,35 +53,35 @@ selectSubmissionMilestone(candidates: readonly GitLabMilestone[], submissionDate
 
 **Consumes:** Existing native schema show/profiles list/context/create JSON contracts. **Produces:** run-flow.ps1 -Phase context|create -Repository <abs> -ClientVersion <loaded> -SkillProtocol <positive> [-Executable <abs>] [-RequestPath <abs|->].
 
-- [ ] RED: execute absent runner with a temporary native fake CLI; test failures must name missing runner, then behavior tests catch wrong argv/stdin/order, not source text.
-- [ ] GREEN context: invoke schema show and profiles list with JSON output, then API context with codex-skill/fixed client/version/protocol/JSON. Preserve context's complete schema/profiles/candidates/binding in cliResult. Stop on nonzero, invalid envelope or ok=false.
-- [ ] GREEN create: read Request bytes from file or stdin, send verbatim through redirected stdin to one existing create --input - --input-format json --output json. Preserve caller's file, do not normalize/rewrite JSON or change personnel/labels. Keep child stdout/stderr drained concurrently.
-- [ ] Emit runnerSchemaVersion=1, phase, elapsedMs, steps[{command,exitCode,elapsedMs}], cliResult; runner errors use a separate bounded error/outcome field without inventing a CLI envelope. Safe progress only on stderr. Never disclose raw stderr on parse/startup failure.
-- [ ] Handle lifecycle through real process completion and cleanup; no fixed30s kill. Controlled cancellation cleans up child; when create started without complete envelope report unknown and stop. Document hard-kill limitation. No preview/verify/context refresh/retry/recovery in create phase.
-- [ ] Tests: native fake CLI confirms argv and stdin hashes for Unicode/duplicate-key/invalid-UTF8 bytes; original file stays byte-identical; large simultaneous stdout/stderr cannot deadlock; nonzero/ok=false/invalidJSON/start failure stop without second call. Real >30s child retains one PID and completes. Exercise controlled cancellation where harness supports it, with precise evidence and no false portability claim.
-- [ ] Verify Windows PS5.1 AST parse and focused native runner tests; report skips on non-Windows, not silent success. Self-review for simplicity and secret exposure.
-- [ ] Commit Task2-owned paths only after controller grants slot; keep both runner copies identical.
+- [x] RED: execute absent runner with a temporary native fake CLI; test failures must name missing runner, then behavior tests catch wrong argv/stdin/order, not source text.
+- [x] GREEN context: invoke schema show and profiles list with JSON output, then API context with codex-skill/fixed client/version/protocol/JSON. Preserve context's complete schema/profiles/candidates/binding in cliResult. Stop on nonzero, invalid envelope or ok=false.
+- [x] GREEN create: read Request bytes from file or stdin, send verbatim through redirected stdin to one existing create --input - --input-format json --output json. Preserve caller's file, do not normalize/rewrite JSON or change personnel/labels. Keep child stdout/stderr drained concurrently.
+- [x] Emit runnerSchemaVersion=1, phase, elapsedMs, steps[{command,exitCode,elapsedMs}], cliResult; runner errors use a separate bounded error/outcome field without inventing a CLI envelope. Safe progress only on stderr. Never disclose raw stderr on parse/startup failure.
+- [x] Handle lifecycle through real process completion and cleanup; no fixed30s kill. Controlled cancellation cleans up child; when create started without complete envelope report unknown and stop. Document hard-kill limitation. No preview/verify/context refresh/retry/recovery in create phase.
+- [x] Tests: native fake CLI confirms argv and stdin hashes for Unicode/duplicate-key/invalid-UTF8 bytes; original file stays byte-identical; large simultaneous stdout/stderr cannot deadlock; nonzero/ok=false/invalidJSON/start failure stop without second call. Real >30s child retains one PID and completes. Exercise controlled cancellation where harness supports it, with precise evidence and no false portability claim.
+- [x] Verify Windows PS5.1 AST parse and focused native runner tests; report skips on non-Windows, not silent success. Self-review for simplicity and secret exposure.
+- [x] Commit Task2-owned paths only after controller grants slot; keep both runner copies identical.
 
 ## Task 3: Short Skill, references, package/version/CI alignment
 
 **Files:** Modify skill/harness-mr/SKILL.md, plugins/harness-mrtool/skills/harness-mr/SKILL.md, src/skill/projection.ts, package.json, package-lock.json, plugins/harness-mrtool/.codex-plugin/plugin.json, README.md, plugins/harness-mrtool/README.md, docs/commands/reference.md, .github/workflows/ci.yml, test/contract/skill.test.ts, test/contract/plugin-assets.test.ts and actual standalone skill packaging tests. Create skill/harness-mr/references/workflows.md and identical plugin mirror. Do not change runner/source owned by Tasks1/2.
 
-- [ ] RED: existing plugin/skill packaging behavior test must show missing runner/references, not only grep source. Add checks against actual ZIP entries and static/compiled generated Skill relationship, plus short default正文 and version alignment contract.
-- [ ] GREEN: default SKILL正文<=80行 with exact reviewed-file selection/commit/push, context, one Request, create, response link/timings; milestone automatic defaults and unknown/failure boundaries remain clear. Keep full install/manual/historical contract in references and preserve non-Windows direct CLI path.
-- [ ] Synchronize projection-generated instructions and both static Skill copies; relative runner/reference links resolve in standalone and plugin assets. No extra human confirmation or opaque hash entry.
-- [ ] Verify real package-skill and package-plugin contents include new files, bounded existing packaging rules remain, no runtime/dependency/.git/credential files. CI PS AST list includes runner.
-- [ ] Set package/lock/plugin version to0.1.11 and update relevant runtime-generated version smoke/tests; no dependency version changes or release/signing action.
-- [ ] Verify focused skill/plugin/packaging tests; self-review default readability and legacy reference completeness.
-- [ ] Commit only Task3-owned paths after controller grants slot.
+- [x] RED: existing plugin/skill packaging behavior test must show missing runner/references, not only grep source. Add checks against actual ZIP entries and static/compiled generated Skill relationship, plus short default正文 and version alignment contract.
+- [x] GREEN: default SKILL正文<=80行 with exact reviewed-file selection/commit/push, context, one Request, create, response link/timings; milestone automatic defaults and unknown/failure boundaries remain clear. Keep full install/manual/historical contract in references and preserve non-Windows direct CLI path.
+- [x] Synchronize projection-generated instructions and both static Skill copies; relative runner/reference links resolve in standalone and plugin assets. No extra human confirmation or opaque hash entry.
+- [x] Verify real package-skill and package-plugin contents include new files, bounded existing packaging rules remain, no runtime/dependency/.git/credential files. CI PS AST list includes runner.
+- [x] Set package/lock/plugin version to0.1.11 and update relevant runtime-generated version smoke/tests; no dependency version changes or release/signing action.
+- [x] Verify focused skill/plugin/packaging tests; self-review default readability and legacy reference completeness.
+- [x] Commit only Task3-owned paths after controller grants slot.
 
 ## Task 4: Integration, independent review and delivery
 
-- [ ] Controller reviews each task with a fresh reviewer using its brief, evidence report and owned diff. Fix actual Important/Critical findings with RED→GREEN and a scoped re-review.
-- [ ] Run complete project suite once on final integrated code: Node24.16.0 scripts/test.mjs --test-concurrency=1. Preserve logs, report every failure and platform skip; never call a partial batch the full suite.
-- [ ] Run pinned Node node_modules/typescript/bin/tsc --noEmit; scripts/build.mjs; Windows SEA build scripts/build-sea.mjs; built CLI schema/self-test smoke; Git diff --check; actual artifact packaging.
-- [ ] Whole-branch independent review against all spec requirements, with final fixes tested. Verify docs/versions/actual zip/runtime source branch all agree.
-- [ ] Update design state, plan checkboxes and verification record with real commands/results. Save readable user-facing copy under outputs. Do not create production Issue/MR, publish or push a shared branch.
-- [ ] Completion audit: map every explicit spec requirement to source/test/artifact evidence; leave goal active if any required item is unproven. Only then mark goal complete.
+- [x] Controller reviews each task with a fresh reviewer using its brief, evidence report and owned diff. Fix actual Important/Critical findings with RED→GREEN and a scoped re-review.
+- [x] Run the complete project inventory once on integrated code using all four existing Windows CI groups: Node24.16.0 scripts/windows-suite-group.mjs --group 0|1|2|3 --groups 4; each group keeps --test-concurrency=1. Preserve logs, report every failure and platform skip; never call a partial batch the full suite.
+- [x] Run pinned Node node_modules/typescript/bin/tsc --noEmit; scripts/build.mjs; Windows SEA build scripts/build-sea.mjs; built CLI schema/self-test smoke; Git diff --check; actual artifact packaging.
+- [x] Whole-branch independent review against all spec requirements, with final fixes tested. Verify docs/versions/actual zip/runtime source branch all agree.
+- [x] Update design state, plan checkboxes and verification record with real commands/results. Save readable user-facing copy under outputs. Do not create production Issue/MR, publish or push a shared branch.
+- [x] Completion audit: map every explicit spec requirement to source/test/artifact evidence; leave goal active if any required item is unproven. Only then mark goal complete.
 
 ## Execution rulings
 
@@ -89,3 +89,7 @@ selectSubmissionMilestone(candidates: readonly GitLabMilestone[], submissionDate
 - Native create_worktree request produced no usable result; it was canceled and a clean isolated feature branch codex/thin-submit-future-milestone was created in the existing checkout. Existing unrelated worktrees untouched.
 - Higher-priority task instructions require useful parallel delegation. Tasks1/2/3 have separate owned paths and may edit in parallel; commits are serialized by controller, with task-owned diff packages and a full integrated review. No implementer spawns extra agents.
 - Baseline before product edits: focused create-submission/gitlab-submit/default-write-performance batch passed104/104, 0failed/0skipped, about137seconds. Full-suite evidence is still required at final gate.
+
+## Final acceptance record
+
+Implemented at96cd26e onlocalfeaturebranch. Allnewscope requirements are mapped in ../verification/2026-11-11-thin-submit-and-milestone.md. Final scoped re-review closed5Important/1Minor with no newfindings. Complete163file suite was executed once (2493tests) and remains non-green due documentedbaseline limitations:5initialfailures in4unchangedareas after targetedfixes/retests. No claim of complete-suite success, release readiness, productionGitLab latency or publication. Localimplementation/build/artifacts are delivered; broaderbaseline repair is outside this plan.
