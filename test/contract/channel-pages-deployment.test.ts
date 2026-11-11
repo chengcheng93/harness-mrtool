@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import test from "node:test";
 import { parse } from "yaml";
 
@@ -184,7 +184,7 @@ fi
       step("Verify immutable channel release state").run! + '\nprintf "upload-allowed\\n" > "$RUNNER_TEMP/upload-allowed"\n',
     ], {
       cwd: directory, encoding: "utf8", timeout: 10_000,
-      env: { PATH: `${bin}:${process.env.PATH}`, RUNNER_TEMP: runnerTemp, GITHUB_SHA: "fixture-sha", SCENARIO: scenario },
+      env: { PATH: `${bin}${delimiter}${process.env.PATH}`, RUNNER_TEMP: runnerTemp, GITHUB_SHA: "fixture-sha", SCENARIO: scenario },
     });
     assert.equal(result.error, undefined);
     const files = await readdir(runnerTemp);
