@@ -89,18 +89,25 @@ function mrFromReceipt(value: unknown, sourceProjectId: number, targetProjectId:
   return { iid: copied.iid, webUrl: copied.webUrl, sourceProjectId: copied.sourceProjectId, targetProjectId: copied.targetProjectId };
 }
 
-/** Exactly two dependent POSTs, with no readback, retries or compensation. */
+/** Existing direct callers prepare and execute in one step. */
 export async function createSubmission(input: CreateSubmissionInputs): Promise<CreateSubmissionResult> {
+  return prepareSubmission(input)();
+}
+
+/** Validate and render known payloads before claiming candidate tickets. */
+export function prepareSubmission(input: CreateSubmissionInputs): () => Promise<CreateSubmissionResult> {
+  const request = copyJsonValue(input.request) as unknown as Request;
+  const { bundle, releaseTag, cliVersion, remote } = input;
   const snapshot = validateExternalContextSnapshot(input.snapshot);
-  if (input.request.workItem.relation !== "new" || snapshot.mergeRequest.iid !== null || snapshot.mergeRequest.lifecycle !== "new" ||
-      input.request.targetBranch !== input.targetBranch || input.sourceBranch.trim() === "" || input.targetBranch.trim() === "") throw invalidInput();
+  if (request.workItem.relation !== "new" || snapshot.mergeRequest.iid !== null || snapshot.mergeRequest.lifecycle !== "new" ||
+      request.targetBranch !== input.targetBranch || input.sourceBranch.trim() === "" || input.targetBranch.trim() === "") throw invalidInput();
   // These marker fields are independent of the not-yet-created Issue IID.
-  if (!/^[A-Za-z0-9][A-Za-z0-9.+_-]{0,127}$/u.test(input.cliVersion) ||
+  if (!/^[A-Za-z0-9][A-Za-z0-9.+_-]{0,127}$/u.test(cliVersion) ||
       snapshot.targetProject.path.length > 512 || !/^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+$/u.test(snapshot.targetProject.path)) throw invalidInput();
   const targetProjectId = numericId(snapshot.targetProject.id);
   const sourceProjectId = numericId(snapshot.sourceProject.id);
   const authorId = numericId(snapshot.mergeRequest.authorUserId);
-  const desired = input.plan.desired;
+  const desired = copyJsonValue(input.plan.desired) as unknown as MergeRequestWritePlan["desired"];
   const labelNames = desired.labelIds.map((id) => {
     const labels = snapshot.labelCandidates.filter((label) => label.id === id);
     if (labels.length !== 1) throw invalidInput();
@@ -112,12 +119,12 @@ export async function createSubmission(input: CreateSubmissionInputs): Promise<C
   const milestoneSelection = selectSubmissionMilestone(input.milestones ?? [], date);
   const milestoneFields = milestoneSelection.milestone === null ? {} : { milestoneId: milestoneSelection.milestone.id };
   if (milestoneSelection.milestone !== null && !positive(milestoneSelection.milestone.id)) throw invalidInput();
-  const issueBody = renderIssue({ request: input.request, projectPath: snapshot.targetProject.path, authorUserId: snapshot.mergeRequest.authorUserId, date });
+  const issueBody = renderIssue({ request, projectPath: snapshot.targetProject.path, authorUserId: snapshot.mergeRequest.authorUserId, date });
   const assertSafe = input.assertNoCredentialExposure ?? (() => {});
   assertSafe(milestoneSelection);
   const renderMr = (request: Request, renderSnapshot: ExternalContextSnapshot): string => renderDescription({
-    request, snapshot: renderSnapshot, writePlan: desired, bundle: input.bundle,
-    releaseTag: input.releaseTag, cliVersion: input.cliVersion, renderPhase: "preview",
+    request, snapshot: renderSnapshot, writePlan: desired, bundle,
+    releaseTag, cliVersion, renderPhase: "preview",
   });
   const mrFields = {
     title: desired.title, sourceProjectId, sourceBranch: input.sourceBranch,
@@ -125,10 +132,10 @@ export async function createSubmission(input: CreateSubmissionInputs): Promise<C
     ...milestoneFields, squash: desired.squash, removeSourceBranch: desired.removeSourceBranch, labelNames, assigneeIds, reviewerIds,
   };
   const markerContext = {
-    cliVersion: input.cliVersion, targetProjectPath: snapshot.targetProject.path, sourceHeadSha: snapshot.sourceHeadSha,
+    cliVersion, targetProjectPath: snapshot.targetProject.path, sourceHeadSha: snapshot.sourceHeadSha,
   };
   // Check the whole renderer before writing, without pretending an Issue IID exists.
-  const previewBody = renderMr({ ...input.request, workItem: { relation: "none", noIssueReason: "A new Issue will be created by this submission." } }, { ...snapshot, issue: { kind: "none" } });
+  const previewBody = renderMr({ ...request, workItem: { relation: "none", noIssueReason: "A new Issue will be created by this submission." } }, { ...snapshot, issue: { kind: "none" } });
   assertSafe({
     ...mrFields,
     description: previewBody.replace(/<!-- harness-mrtool:v1 [A-Za-z0-9_-]+ -->\n?$/u, ""),
@@ -139,52 +146,70 @@ export async function createSubmission(input: CreateSubmissionInputs): Promise<C
     ...milestoneFields, assigneeIds: [authorId], labelNames: labelNames.filter((name) => /^(?:type|priority)::/u.test(name)),
   };
   assertSafe(issueInput);
-  const operations: string[] = [];
-  let issue: GitLabCreatedIssue | null = null;
-  let failedOperation = "issue.create";
-  let mutationInFlight = false;
-  try {
-    operations.push("issue.create");
-    mutationInFlight = true;
-    const issueReceipt = await input.remote.createIssue(issueInput);
-    const safeIssue = issueFromReceipt(issueReceipt.value, targetProjectId, snapshot.targetProject.path);
-    assertSafe(safeIssue);
-    issue = safeIssue;
-    mutationInFlight = false;
-    failedOperation = "merge-request.prepare";
-    const body = renderMr({ ...input.request, workItem: { relation: "closes", iid: issue.iid } }, {
-      ...snapshot, issue: { kind: "linked", iid: issue.iid, readStatus: "unavailable" },
-    }).replace(/<!-- harness-mrtool:v1 [A-Za-z0-9_-]+ -->\n?$/u, "");
-    const description = appendSubmissionMarker(body, {
-      ...markerContext, issueIid: issue.iid,
-    });
-    const mrInput = { ...mrFields, description };
-    assertSafe(mrInput);
-    failedOperation = "merge-request.create";
-    operations.push("merge-request.create");
-    mutationInFlight = true;
-    const mrReceipt = await input.remote.createMergeRequestSubmission(mrInput);
-    const mergeRequest = mrFromReceipt(mrReceipt.value, sourceProjectId, targetProjectId, snapshot.targetProject.path);
-    assertSafe(mergeRequest);
-    mutationInFlight = false;
-    failedOperation = "submission.result";
-    const result: CreateSubmissionResult = { issue, mergeRequest, milestoneSelection, verification: "creation-response", operations: [...operations] };
-    assertSafe(result);
-    return result;
-  } catch (error) {
-    const rejected = mutationInFlight && isRemoteMutationError(error, "rejected");
-    const unknown = mutationInFlight && !rejected;
-    const state = unknown ? "unknown" : issue === null ? "not-written" : "written";
-    const code = unknown ? "PARTIAL_REMOTE_STATE" : issue !== null ? "PARTIAL_WRITE" :
-      isRemoteMutationError(error) && error.reason === "auth" ? "AUTH_ERROR" : "GITLAB_ERROR";
-    const outcome = unknown ? "unknown" : rejected ? "rejected" : "not-attempted";
-    const failure = new ToolError(code, unknown ? "Issue-first submission stopped with unknown remote state" : "Issue-first submission stopped", {
-      field: failedOperation, expected: "successful creation responses for the Issue and merge request",
-      actual: outcome, safeNextStep: (issue === null ? "" : `Issue created: ${issue.webUrl}. `) +
-        "Submission stopped; no automatic retry was performed. Inspect GitLab manually before deciding whether to create another submission.",
-    });
-    const data: JsonObject = { command: "create", mode: "issue-first", failedOperation, issue: issue === null ? null : { ...issue }, outcome };
-    failures.set(failure, { remoteWrite: { state, operations: [...operations] }, data });
-    throw failure;
-  }
+  // Exactly two dependent POSTs, with no readback, retries or compensation.
+  return async () => {
+    const operations: string[] = [];
+    let issue: GitLabCreatedIssue | null = null;
+    let failedOperation = "issue.create";
+    let mutationInFlight = false;
+    try {
+      operations.push("issue.create");
+      mutationInFlight = true;
+      const issueReceipt = await remote.createIssue(issueInput);
+      const safeIssue = issueFromReceipt(issueReceipt.value, targetProjectId, snapshot.targetProject.path);
+      assertSafe(safeIssue);
+      issue = safeIssue;
+      mutationInFlight = false;
+      failedOperation = "merge-request.prepare";
+      const body = renderMr({ ...request, workItem: { relation: "closes", iid: issue.iid } }, {
+        ...snapshot, issue: { kind: "linked", iid: issue.iid, readStatus: "unavailable" },
+      }).replace(/<!-- harness-mrtool:v1 [A-Za-z0-9_-]+ -->\n?$/u, "");
+      const description = appendSubmissionMarker(body, {
+        ...markerContext, issueIid: issue.iid,
+      });
+      const mrInput = { ...mrFields, description };
+      assertSafe(mrInput);
+      failedOperation = "merge-request.create";
+      operations.push("merge-request.create");
+      mutationInFlight = true;
+      const mrReceipt = await remote.createMergeRequestSubmission(mrInput);
+      const mergeRequest = mrFromReceipt(mrReceipt.value, sourceProjectId, targetProjectId, snapshot.targetProject.path);
+      assertSafe(mergeRequest);
+      mutationInFlight = false;
+      failedOperation = "submission.result";
+      const result: CreateSubmissionResult = { issue, mergeRequest, milestoneSelection, verification: "creation-response", operations: [...operations] };
+      assertSafe(result);
+      return result;
+    } catch (error) {
+      const rejected = mutationInFlight && isRemoteMutationError(error, "rejected");
+      const unknown = mutationInFlight && !rejected;
+      const state = unknown ? "unknown" : issue === null ? "not-written" : "written";
+      const code = unknown ? "PARTIAL_REMOTE_STATE" : issue !== null ? "PARTIAL_WRITE" :
+        isRemoteMutationError(error) && error.reason === "auth" ? "AUTH_ERROR" : "GITLAB_ERROR";
+      const outcome = unknown ? "unknown" : rejected ? "rejected" : "not-attempted";
+      let diagnostic: JsonObject | null = null;
+      if (isRemoteMutationError(error)) {
+        let requestId = error.requestId, message = error.remoteMessage;
+        try { assertSafe(requestId); } catch { requestId = null; }
+        try { assertSafe(message); } catch { message = null; }
+        diagnostic = { status: error.status, reason: error.reason, requestId, message };
+      }
+      const detail = diagnostic === null ? "" : [
+        diagnostic.status === null ? null : "HTTP " + diagnostic.status, diagnostic.reason,
+        diagnostic.requestId === null ? null : "request-id " + diagnostic.requestId, diagnostic.message,
+      ].filter(Boolean).join("; ");
+      const failureMessage = unknown ? "Issue-first submission stopped with unknown remote state" : "Issue-first submission stopped";
+      let message = detail === "" ? failureMessage : failureMessage + ": " + detail;
+      try { assertSafe(message); } catch { message = failureMessage; }
+      const failure = new ToolError(code, message, {
+        field: failedOperation, expected: "successful creation responses for the Issue and merge request",
+        actual: outcome, safeNextStep: (issue === null ? "" : `Issue created: ${issue.webUrl}. `) +
+          "Submission stopped; no automatic retry was performed. Inspect GitLab manually before deciding whether to create another submission.",
+      });
+      const data: JsonObject = { command: "create", mode: "issue-first", failedOperation, issue: issue === null ? null : { ...issue }, outcome,
+        ...(diagnostic === null ? {} : { diagnostic }) };
+      failures.set(failure, { remoteWrite: { state, operations: [...operations] }, data });
+      throw failure;
+    }
+  };
 }

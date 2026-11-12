@@ -41,10 +41,10 @@ async function setup(t: test.TestContext) {
   const project = { id: "7", fullPath: "group/project", defaultBranch: "develop", webUrl: "https://gitlab.example.test/group/project" };
   const labels = DEFAULT_LABEL_POOL.map((name, index) => ({ restId: index + 1, globalId: `gid://gitlab/ProjectLabel/${index + 1}`, name,
     description: name, color: "#123456", archived: false, scopeKind: "project" as const, scopeId: "7", scopePath: project.fullPath }));
-  const state: { mr: GitLabMergeRequest | null; writes: string[]; drift: boolean; omitP2: boolean; wrongReadback: boolean; driftOnFind: boolean; driftAfterCreate: boolean; renameAfterFind: boolean; sourceMissing: boolean; sourceMissingOnFind: boolean; dirtyOnFind: boolean; fastIssueReject: boolean; fastMrReject: boolean; fastStarted: boolean; driftAfterConsume: boolean; driftAfterLabels: boolean; duplicateAfterFields: boolean } = {
-    mr: null, writes: [], drift: false, omitP2: false, wrongReadback: false, driftOnFind: false, driftAfterCreate: false, renameAfterFind: false, sourceMissing: false, sourceMissingOnFind: false, dirtyOnFind: false, fastIssueReject: false, fastMrReject: false, fastStarted: false, driftAfterConsume: false, driftAfterLabels: false, duplicateAfterFields: false,
+  const state: { mr: GitLabMergeRequest | null; writes: string[]; drift: boolean; omitP2: boolean; wrongReadback: boolean; driftOnFind: boolean; driftAfterCreate: boolean; renameAfterFind: boolean; sourceMissing: boolean; sourceMissingOnFind: boolean; dirtyOnFind: boolean; fastIssueReject: boolean; fastMrReject: boolean; fastStarted: boolean; driftAfterConsume: boolean; driftAfterLabels: boolean; duplicateAfterFields: boolean; changedCandidatesBeforeClaim: boolean } = {
+    mr: null, writes: [], drift: false, omitP2: false, wrongReadback: false, driftOnFind: false, driftAfterCreate: false, renameAfterFind: false, sourceMissing: false, sourceMissingOnFind: false, dirtyOnFind: false, fastIssueReject: false, fastMrReject: false, fastStarted: false, driftAfterConsume: false, driftAfterLabels: false, duplicateAfterFields: false, changedCandidatesBeforeClaim: false,
   };
-  const milestoneState = { candidates: [{id:91,title:"next",state:"active",dueDate:"2026-11-13"}] as GitLabMilestone[], fail:false, consumed:0, nowCalls:0, issueInput:null as GitLabCreateIssueInput | null, mrInput:null as GitLabCreateMergeRequestSubmissionInput | null };
+  const milestoneState = { candidates: [{id:91,title:"next",state:"active",dueDate:"2026-11-13"}] as GitLabMilestone[], fail:false, consumed:0, peeks:0, nowCalls:0, issueInput:null as GitLabCreateIssueInput | null, mrInput:null as GitLabCreateMergeRequestSubmissionInput | null };
   const calls = { milestones:0, mergeRequest: 0, mergeRequestReceipt: 0, inventory: 0, users: 0, review: 0, projects: 0, discover: 0, pushPlans: 0, diff: 0 };
   const guardConcurrency = { armed: false, rejectPush: false, diffSettled: false,
     pushRejected: deferred(), diffEntered: deferred(), releaseDiff: deferred() };
@@ -146,6 +146,10 @@ async function setup(t: test.TestContext) {
   contextStore.resolve = async (input) => {
     if(input.consume) milestoneState.consumed++;
     const result = await resolveCandidates(input);
+    if (!input.consume && ++milestoneState.peeks === 2 && state.changedCandidatesBeforeClaim) {
+      return { ...result, candidates: result.candidates.map((candidate, index) => index === 0 && candidate.kind !== "label"
+        ? { ...candidate, username: candidate.username + "-changed" } : candidate) };
+    }
     if (input.consume && state.driftAfterConsume) state.drift = true;
     if (input.consume && guardConcurrency.armed) guardConcurrency.rejectPush = true;
     return result;
@@ -374,4 +378,33 @@ test("rejected legacy and dry-run paths do not prefetch milestones",async(t)=>{
  const legacy=await f.run(["create","--dry-run"]);assert.notEqual(legacy.code,0);assert.match(legacy.stdout,/INPUT_ERROR/);
  f.raw.workItem={relation:"new"};const dry=await f.run(["create","--dry-run"]);assert.equal(dry.code,0,dry.stdout);
  assert.equal(f.calls.milestones,0);assert.equal(f.milestoneState.nowCalls,0);assert.deepEqual(f.state.writes,[]);
+});
+
+for (const failure of ["profile policy", "documentation render"] as const) {
+  test("new submit preserves candidate tickets after " + failure + " failure", async (t) => {
+    const f = await setup(t); await f.issue();
+    const validProfiles = structuredClone(f.raw.profileIds);
+    const validDocumentation = structuredClone(f.raw.documentation);
+    if (failure === "profile policy") f.raw.profileIds = ["general", ...validProfiles];
+    else f.raw.documentation.itemIds = [];
+    const failed = await f.run(["create"]);
+    assert.notEqual(failed.code, 0, failed.stdout);
+    assert.equal(JSON.parse(failed.stdout).code, failure === "profile policy" ? "POLICY_ERROR" : "RENDER_ERROR");
+    assert.deepEqual(f.state.writes, []);
+    assert.equal(f.milestoneState.consumed, 0, "local validation must not consume candidate tickets");
+    f.raw.profileIds = validProfiles; f.raw.documentation = validDocumentation;
+    const success = await f.run(["create"]);
+    assert.equal(success.code, 0, success.stdout);
+    assert.equal(f.milestoneState.consumed, 1);
+    assert.deepEqual(f.state.writes, ["issue.create", "merge-request.create"]);
+  });
+}
+
+test("new submit rejects a changed candidate identity between preparation and claim", async (t) => {
+  const f = await setup(t); await f.issue(); f.state.changedCandidatesBeforeClaim = true;
+  const result = await f.run(["create"]);
+  assert.notEqual(result.code, 0, result.stdout);
+  assert.equal(JSON.parse(result.stdout).code, "CONCURRENT_UPDATE", result.stdout);
+  assert.equal(f.milestoneState.consumed, 1, "the identity change is detected at the claim boundary");
+  assert.deepEqual(f.state.writes, []);
 });

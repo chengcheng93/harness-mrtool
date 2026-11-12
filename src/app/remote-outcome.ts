@@ -43,11 +43,14 @@ export class RemoteMutationError extends Error {
   readonly outcome: RemoteMutationOutcome;
   readonly reason: RemoteMutationFailureReason;
   readonly requestId: string | null;
+  readonly status: number | null;
+  readonly remoteMessage: string | null;
 
   constructor(
     outcome: RemoteMutationOutcome,
     reason: RemoteMutationFailureReason,
     requestId: unknown = null,
+    diagnostic: { readonly status?: number | null; readonly message?: string | null } = {},
   ) {
     if (!OUTCOMES.has(outcome)) throw new TypeError("Remote mutation outcome is invalid");
     if (!REASONS.has(reason)) throw new TypeError("Remote mutation failure reason is invalid");
@@ -59,6 +62,8 @@ export class RemoteMutationError extends Error {
     this.outcome = outcome;
     this.reason = reason;
     this.requestId = safeRequestId(requestId);
+    this.status = Number.isSafeInteger(diagnostic.status) && diagnostic.status! >= 100 && diagnostic.status! <= 599 ? diagnostic.status! : null;
+    this.remoteMessage = typeof diagnostic.message === "string" && diagnostic.message.length <= 512 ? diagnostic.message : null;
     remoteMutationErrors.add(this);
   }
 }

@@ -875,42 +875,47 @@ test("a request whose rendered title exceeds GitLab's limit writes nothing", asy
   assert.deepEqual(fixture.remote.writes, []);
 });
 
-test("structure and ready verification allow pending live gates while merge verification does not", async () => {
-  const fixture = await transactionFixture();
-  const created = await updateHistoricalMergeRequest({
-    request: fixture.request,
-    initialSnapshot: fixture.snapshot,
-    resolvedCandidates: fixture.candidates,
-    bundle: fixture.bundle,
-    releaseTag: "templates-v1.0.0",
-    cliVersion: "0.1.0-dev",
-    sourceBranch: "fix/webengine-css",
-    ...transactionRuntime(fixture.remote),
-  });
+for (const ciStatus of ["pending", "unavailable"] as const) {
+  test("structure and ready verification allow " + ciStatus + " CI while merge verification does not", async () => {
+    const fixture = await transactionFixture();
+    const created = await updateHistoricalMergeRequest({
+      request: fixture.request,
+      initialSnapshot: fixture.snapshot,
+      resolvedCandidates: fixture.candidates,
+      bundle: fixture.bundle,
+      releaseTag: "templates-v1.0.0",
+      cliVersion: "0.1.0-dev",
+      sourceBranch: "fix/webengine-css",
+      ...transactionRuntime(fixture.remote),
+    });
 
-  assert.equal(verifyMergeRequest({
-    level: "structure",
-    current: created.final,
-    bundle: fixture.bundle,
-    expected: created.verification,
-  }).valid, true);
-  assert.equal(verifyMergeRequest({
-    level: "ready",
-    current: created.final,
-    bundle: fixture.bundle,
-    expected: created.verification,
-  }).live.lifecycle, "ready");
-  assert.throws(
-    () => verifyMergeRequest({
-      level: "merge",
-      current: created.final,
+    const current = { ...created.final, snapshot: validateExternalContextSnapshot({
+      ...created.final.snapshot, ci: { status: ciStatus },
+    }) };
+    assert.equal(verifyMergeRequest({
+      level: "structure",
+      current,
       bundle: fixture.bundle,
       expected: created.verification,
-    }),
-    (error: unknown) => typeof error === "object" && error !== null && "code" in error &&
-      error.code === "POSTCONDITION_ERROR",
-  );
-});
+    }).valid, true);
+    assert.equal(verifyMergeRequest({
+      level: "ready",
+      current,
+      bundle: fixture.bundle,
+      expected: created.verification,
+    }).live.lifecycle, "ready");
+    assert.throws(
+      () => verifyMergeRequest({
+        level: "merge",
+        current,
+        bundle: fixture.bundle,
+        expected: created.verification,
+      }),
+      (error: unknown) => typeof error === "object" && error !== null && "code" in error &&
+        error.code === "POSTCONDITION_ERROR",
+    );
+  });
+}
 
 test("stored verification rejects an invalid level before loading durable state", async () => {
   const fixture = await transactionFixture();

@@ -14,6 +14,8 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_RESPONSE_LIMIT = 8 * 1024 * 1024;
 const MAX_TOKEN_LENGTH = 16 * 1024;
 const MAX_JSON_NESTING_DEPTH = 256;
+const MAX_ERROR_MESSAGE_BYTES = 16 * 1024;
+const SECRET_DIAGNOSTIC = /(?:glpat-[A-Za-z0-9_-]+|github_pat_[A-Za-z0-9_]+|gh[pousr]_[A-Za-z0-9]+|hmr[ctx]1_[A-Za-z0-9_-]{43}|(?:private|job)[_-]token\s*[:=]\s*\S+|authorization\s*[:=]\s*(?:bearer\s+)?\S+|bearer\s+\S+|-----BEGIN [A-Z ]+ PRIVATE KEY-----)/iu;
 
 export interface GitLabHttpRequest {
   readonly method: "GET" | "POST" | "PUT";
@@ -66,11 +68,13 @@ export class GitLabRequestError extends ToolError<"AUTH_ERROR" | "GITLAB_ERROR">
   readonly kind: GitLabRequestFailureKind;
   readonly status: number | null;
   readonly requestId: string | null;
+  readonly remoteMessage: string | null;
 
   constructor(
     kind: GitLabRequestFailureKind,
     status: number | null,
     requestId: string | null,
+    remoteMessage: string | null = null,
   ) {
     const code = kind === "auth" ? "AUTH_ERROR" : "GITLAB_ERROR";
     super(code, code === "AUTH_ERROR"
@@ -99,6 +103,7 @@ export class GitLabRequestError extends ToolError<"AUTH_ERROR" | "GITLAB_ERROR">
     this.kind = kind;
     this.status = status;
     this.requestId = requestId;
+    this.remoteMessage = remoteMessage;
     gitLabRequestErrors.add(this);
   }
 }
@@ -249,6 +254,26 @@ function parseStrictResponseJson(text: string): JsonValue {
   return copyJsonValue(JSON.parse(text));
 }
 
+// Keep only GitLab's short error fields; raw bodies and headers are never diagnostics.
+function responseErrorMessage(body: Uint8Array, reflectsCredential: (value: string) => boolean): string | null {
+  if (body.byteLength > MAX_ERROR_MESSAGE_BYTES) return null;
+  try {
+    const data = parseStrictResponseJson(new TextDecoder("utf-8", { fatal: true }).decode(body));
+    if (data === null || typeof data !== "object" || Array.isArray(data)) return null;
+    const value = data.message ?? data.error_description ?? data.error;
+    const text = typeof value === "string" ? value
+      : Array.isArray(value) && value.every(item => typeof item === "string") ? value.join("; ")
+      : value !== null && typeof value === "object" && !Array.isArray(value)
+        ? Object.entries(value).map(([key, detail]) => typeof detail === "string" ? key + ": " + detail
+          : Array.isArray(detail) && detail.every(item => typeof item === "string") ? key + ": " + detail.join("; ") : "").filter(Boolean).join("; ")
+        : "";
+    if (text === "" || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(text) ||
+        SECRET_DIAGNOSTIC.test(text) || reflectsCredential(text)) return null;
+    const normalized = text.replace(/\s+/gu, " ").trim();
+    return SECRET_DIAGNOSTIC.test(normalized) || reflectsCredential(normalized) ? null : normalized.slice(0, 512) || null;
+  } catch { return null; }
+}
+
 export class GitLabHttpClient {
   readonly origin: string;
   private readonly tokenProvider: GitLabTokenProvider;
@@ -293,7 +318,7 @@ export class GitLabHttpClient {
 
   sanitizeRequestId(value: string): string | null {
     const normalized = value.trim();
-    return normalized === "" || this.reflectsCredential(normalized) ? null : normalized;
+    return normalized === "" || SECRET_DIAGNOSTIC.test(normalized) || this.reflectsCredential(normalized) ? null : normalized;
   }
 
   async requestJson(
@@ -354,10 +379,10 @@ export class GitLabHttpClient {
       ? null
       : this.sanitizeRequestId(headers["x-request-id"]);
     if (response.status === 401 || response.status === 403) {
-      throw new GitLabRequestError("auth", response.status, requestId);
+      throw new GitLabRequestError("auth", response.status, requestId, responseErrorMessage(response.body, value => this.reflectsCredential(value)));
     }
     if (response.status < 200 || response.status >= 300) {
-      throw new GitLabRequestError("http", response.status, requestId);
+      throw new GitLabRequestError("http", response.status, requestId, responseErrorMessage(response.body, value => this.reflectsCredential(value)));
     }
     let text: string;
     try {

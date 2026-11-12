@@ -204,3 +204,22 @@ for (const name of ["Error", "AbortError"]) {
     });
   });
 }
+
+test("error-message whitespace normalization cannot reconstruct the active credential", async () => {
+  const token = "opaque active credential";
+  let calls = 0;
+  const api = new GitLabHttpClient({origin: "https://gitlab.example.test", tokenProvider: async () => token, transport: {async request() {
+    calls += 1;
+    return {status: 400, headers: {"x-request-id": "req-normalized"}, body: new TextEncoder().encode(JSON.stringify({message: "opaque \n active credential"}))};
+  }}});
+  await assert.rejects(api.requestJson("GET", "/api/v4/user"), (error: unknown) => {
+    assert.ok(isGitLabRequestError(error));
+    assert.equal(error.status, 400);
+    assert.equal(error.requestId, "req-normalized");
+    assert.equal(error.remoteMessage, null);
+    assert.equal(inspect(error, {depth: 10}).includes(token), false);
+    assert.equal(JSON.stringify(error).includes(token), false);
+    return true;
+  });
+  assert.equal(calls, 1);
+});

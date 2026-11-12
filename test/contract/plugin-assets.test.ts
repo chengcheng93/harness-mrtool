@@ -64,10 +64,12 @@ test("Codex plugin packaging emits a bounded, self-contained archive", async (t)
     const sums = await readFile(result.sumsPath, "utf8");
     assert.match(sums, /^[a-f0-9]{64}  harness-mrtool-codex-plugin\.zip\n$/u);
     const readme = Buffer.from(entries["README.md"]!).toString("utf8").replace(/\s+/gu, " ");
-    await t.test("packaged README distinguishes the unpublished candidate from the old CLI", () => {
-      assert.ok(readme.includes(`CLI/Plugin ${manifest.version} is a release candidate, not yet published.`));
-      assert.match(readme, /CLI 0\.1\.5 is historical and is not the matching CLI for this candidate/u);
-      assert.doesNotMatch(readme, /Install the matching CLI Release first/u);
+    await t.test("packaged README distinguishes CLI installation from plugin/source versions", () => {
+      assert.match(readme, /Install a verified, versioned CLI package/u);
+      assert.match(readme, /The plugin does not include or upgrade the CLI binary/u);
+      assert.match(readme, /check its installed version separately/u);
+      assert.match(readme, /Source\/plugin version numbers alone do not confirm that the matching CLI Release is published/u);
+      assert.doesNotMatch(readme, /is a release candidate, not yet published/u);
     });
     await t.test("packaged README uses main with the existing marketplace commands", () => {
       assert.match(readme, /codex plugin marketplace add chengcheng93\/harness-mrtool --ref main/u);

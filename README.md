@@ -5,12 +5,9 @@ AI/人填写完整变更说明，工具负责输入校验、自动标签和 Issu
 默认以创建响应返回 MR 链接，不回读验证；历史受管 MR 保留显式强事务流程。
 工具不是 GitLab 服务端合并门禁，也不能限制网页或原始 Git/API 操作。
 
-> **版本状态**：当前 main 已实现强制标签策略（Template Bundle **1.2.0**）。
-> CLI/Plugin **0.1.12** 是待验收发布候选，不代表已有可安装的新 Release。
-> 既有 [CLI 0.1.5](https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.5)
-> 和 [Plugin 0.1.5](https://github.com/chengcheng93/harness-mrtool/releases/tag/plugin-v0.1.5)
-> 不包含本次强制标签改造。新版尚未发布，完成发布后才更新正式下载链接。
-> 当前体验方式为源码构建；请同时核对源码提交和 `schema show` 返回的模板版本。
+> **版本与安装**：CLI 和插件分别安装，分别核对版本。
+> 请从 [Release](https://github.com/chengcheng93/harness-mrtool/releases) 选择已发布的 Windows x64 或 macOS ARM64 CLI 包；插件本身不携带 CLI。
+> 下载以对应 Release 页面和 SHA-256 为准，源码或插件版本不代表本机正在运行的 CLI 版本。
 
 ## 1. 先选使用方式
 

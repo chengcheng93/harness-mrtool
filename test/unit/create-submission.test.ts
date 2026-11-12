@@ -233,3 +233,18 @@ test("successful empty milestone inventory omits both optional fields and report
 test("guards selected milestone metadata before either POST",async()=>{
  const f=await fixture();await assert.rejects(service.createSubmission({...f,milestones:[{id:9,title:"glpat-NEVER_EXPOSE_SECRET",state:"active",dueDate:"2026-11-13"}],assertNoCredentialExposure:value=>{if(JSON.stringify(value).includes("NEVER_EXPOSE_SECRET"))throw new Error("unsafe metadata");}}));assert.deepEqual(f.calls,[]);
 });
+
+test("prepared submission keeps the reviewed request and payloads detached until execution", async () => {
+  const f = await fixture();
+  const input = { ...f };
+  const submit = service.prepareSubmission(input);
+  assert.deepEqual(f.calls, [], "preparation must not write");
+  const mutable = input.request as unknown as { changes: { summary: string[] } };
+  mutable.changes.summary = ["## changed after preflight"];
+  input.cliVersion = "invalid version"; input.sourceBranch = "changed-after-preflight";
+  const result = await submit();
+  assert.deepEqual(f.calls, ["issue.create", "merge-request.create"]);
+  assert.equal(result.issue.iid, 71);
+  assert.equal(f.mrInput!.sourceBranch, "feature/fast");
+  assert.equal(f.mrInput!.description.includes("changed after preflight"), false);
+});

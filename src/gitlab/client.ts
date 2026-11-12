@@ -288,8 +288,9 @@ export function isGitLabMutationRejectedError(
 
 export class GitLabResponseValidationError extends ToolError<"GITLAB_ERROR"> {
   readonly requestId: string | null;
+  readonly status: number | null;
 
-  constructor(requestId: string | null, cause?: unknown) {
+  constructor(requestId: string | null, cause?: unknown, status: number | null = null) {
     super("GITLAB_ERROR", "GitLab response validation failed", {
       field: "gitlab",
       expected: "a complete response bound to the requested GitLab resource",
@@ -298,6 +299,7 @@ export class GitLabResponseValidationError extends ToolError<"GITLAB_ERROR"> {
     }, cause);
     this.name = "GitLabResponseValidationError";
     this.requestId = requestId;
+    this.status = status;
     gitLabResponseValidationErrors.add(this);
   }
 }
@@ -319,7 +321,7 @@ function validateResponse<T>(
     if (isGitLabMutationRejectedError(error) || isGitLabResponseValidationError(error)) {
       throw error;
     }
-    throw new GitLabResponseValidationError(response.requestId, error);
+    throw new GitLabResponseValidationError(response.requestId, error, response.status);
   }
 }
 
@@ -333,7 +335,7 @@ async function validateAsyncResponse<T>(
     if (isGitLabRequestError(error) || isGitLabMutationRejectedError(error) || isGitLabResponseValidationError(error)) {
       throw error;
     }
-    throw new GitLabResponseValidationError(response.requestId, error);
+    throw new GitLabResponseValidationError(response.requestId, error, response.status);
   }
 }
 
@@ -359,14 +361,11 @@ function expectedGlobalId(label: RestLabel): string {
 }
 
 function pipelineStatus(value: JsonValue | undefined, expectedSha: string): GitLabMergeRequest["pipelineStatus"] {
-  if (value === null || value === undefined) {
+  // CI is auxiliary; only a pipeline bound to this HEAD may supply its status.
+  if (value === null || typeof value !== "object" || Array.isArray(value) || value.sha !== expectedSha) {
     return "unavailable";
   }
-  const record = object(value, "merge request pipeline");
-  if (string(record.sha, "merge request pipeline sha") !== expectedSha) {
-    throw apiError("merge request pipeline", "pipeline SHA mismatch");
-  }
-  const raw = string(record.status, "merge request pipeline status");
+  const raw = value.status;
   if (raw === "success") return "passed";
   if (raw === "pending" || raw === "created" || raw === "waiting_for_resource" || raw === "preparing") return "pending";
   if (raw === "running") return "running";
@@ -520,7 +519,7 @@ function submissionWebUrl(
 
 function submissionError(error: unknown): RemoteMutationError {
   if (isRemoteMutationError(error)) return error;
-  if (isGitLabResponseValidationError(error)) return new RemoteMutationError("unknown", "server", error.requestId);
+  if (isGitLabResponseValidationError(error)) return new RemoteMutationError("unknown", "server", error.requestId, { status: error.status });
   if (isGitLabRequestError(error)) {
     const reason = error.kind === "auth" ? "auth"
       : error.kind === "timeout" ? "timeout"
@@ -532,6 +531,7 @@ function submissionError(error: unknown): RemoteMutationError {
       reason === "auth" || reason === "validation" || reason === "conflict" ? "rejected" : "unknown",
       reason,
       error.requestId,
+      { status: error.status, message: error.remoteMessage },
     );
   }
   if (isToolError(error, "AUTH_ERROR")) return new RemoteMutationError("rejected", "auth");

@@ -1,4 +1,4 @@
-import { createSubmission } from "../app/create-submission.ts";
+import { prepareSubmission } from "../app/create-submission.ts";
 import { loadMrBundle } from "../app/load-mr-bundle.ts";
 import { resolveRequestCandidates } from "../app/resolve-candidates.ts";
 import { validateUpdateMigration, type UpdateMergeRequestMigration } from "../app/update-mr.ts";
@@ -231,21 +231,25 @@ export function createDefaultWriteServices(
       // All pages must succeed before consuming the capability tickets or starting either POST.
       const milestones = await planned.options.gitlab.listProjectMilestones(snapshot.targetProject.id);
       const resolved = await resolveRequestCandidates({ request, expectedBinding: live.binding,
-        store: readOnly.contextStore, consume: true });
+        store: readOnly.contextStore, consume: false });
       if (canonicalizeJson(resolved.snapshot) !== canonicalizeJson(snapshot)) throw changed();
       const plan = buildWritePlan({ request, snapshot, resolvedCandidates: resolved.candidates,
         bundle: planned.selection.bundle, labelDiff: planned.labelDiff,
         labelOptions: labelOptionsForProductionInvocation(invocation) });
-      // One final Git preflight before either POST; metadata was read once above.
-      const current = await fresh(false);
-      if (canonicalizeJson(current.binding) !== canonicalizeJson(live.binding) ||
-          !candidatesMatch(validateExternalContextSnapshot(current.snapshot), resolved.candidates)) throw changed();
-      const result = await createSubmission({ request, snapshot, plan,
+      const submit = prepareSubmission({ request, snapshot, plan,
         bundle: planned.selection.bundle, releaseTag: planned.selection.releaseTag,
         cliVersion: options.cliVersion, sourceBranch: planned.options.git.sourceBranch,
         targetBranch: planned.options.git.targetBranch, remote: planned.options.gitlab,
         milestones, now: submissionNow!,
         assertNoCredentialExposure: planned.assertNoCredentialExposure });
+      const consumed = await resolveRequestCandidates({ request, expectedBinding: live.binding,
+        store: readOnly.contextStore, consume: true });
+      if (canonicalizeJson(consumed) !== canonicalizeJson(resolved)) throw changed();
+      // Keep the final concurrency guard after claiming tickets; do not rerun local rendering.
+      const current = await fresh(false);
+      if (canonicalizeJson(current.binding) !== canonicalizeJson(live.binding) ||
+          !candidatesMatch(validateExternalContextSnapshot(current.snapshot), resolved.candidates)) throw changed();
+      const result = await submit();
       const output = {
         context: { versions: { templateVersion: planned.selection.bundle.manifest.version,
           bundleHash: planned.selection.bundleManifestHash, releaseSetId: currentBundle.releaseSetId,

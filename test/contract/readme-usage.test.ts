@@ -39,9 +39,9 @@ test("README CLI examples use supported commands and flags", async () => {
   }
 });
 
-test("README distinguishes unpublished source, real API writes, disabled manual handoff and fixed-three replacement", async () => {
+test("README distinguishes installed CLI versions, real API writes, disabled manual handoff and fixed-three replacement", async () => {
   const readme = await readFile(resolve(root, "README.md"), "utf8");
-  for (const phrase of ["尚未发布", "API MR 命令不自动 push", "恰好三个标签", "池外人工标签", "不自动复用", "HARNESS_MRTOOL_GITLAB_HOST", "HARNESS_MRTOOL_GITLAB_TOKEN"]) {
+  for (const phrase of ["CLI 和插件分别安装", "API MR 命令不自动 push", "恰好三个标签", "池外人工标签", "不自动复用", "HARNESS_MRTOOL_GITLAB_HOST", "HARNESS_MRTOOL_GITLAB_TOKEN"]) {
     assert.ok(readme.includes(phrase), phrase);
   }
   assert.ok(readme.includes("[输入样例](examples/submission.json)"));

@@ -6,18 +6,12 @@ profiles, rendering, labels, writes, and verification.
 
 ## Prerequisites
 
-CLI/Plugin 0.1.12 is a release candidate, not yet published. Build the CLI from
-current `main` source using the pinned-runtime instructions in the repository's
-root README; the plugin does not include a CLI binary. New release download links
-will be added only after publication.
+Install a verified, versioned CLI package from the [releases page](https://github.com/chengcheng93/harness-mrtool/releases).
+CLI releases provide Windows x64 and macOS ARM64 packages.
+The plugin does not include or upgrade the CLI binary; check its installed version separately.
+Source/plugin version numbers alone do not confirm that the matching CLI Release is published.
+Every new MR requires successful API creation and association of a unified Issue first.
 
-CLI 0.1.5 is historical and is not the matching CLI for this candidate; it does
-not include the mandatory-label changes:
-
-<https://github.com/chengcheng93/harness-mrtool/releases/tag/cli-v0.1.5>
-
-The historical published CLI supports Windows x64. Every new MR in the CLI and Skill
-requires successful API creation and association of a unified Issue first.
 Configure a GitLab token in the host-scoped environment
 variables documented by the CLI. Never put a GitLab token in a command line,
 plugin file, or prompt.

@@ -1172,7 +1172,6 @@ test("string applied label reads reject malformed labels and resource identities
     ["empty name", { labels: [""] }],
     ["wrong project", { labels: ["status::review"], target_project_id: 8 }],
     ["wrong IID", { labels: ["status::review"], iid: 13 }],
-    ["wrong pipeline SHA", { labels: ["status::review"], head_pipeline: { status: "success", sha: "c".repeat(40) } }],
   ] as const) {
     await t.test(name, async () => {
       const fake = new FakeGitLab();
@@ -1323,34 +1322,57 @@ test("Issue and MR labels default omitted archived to false and validate explici
   }
 });
 
-test("rejects a head pipeline whose SHA does not equal the MR source SHA", async () => {
-  const fake = new FakeGitLab();
-  fake.enqueue("GET", "/api/v4/projects/7", { body: projectBody() });
-  fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12?with_labels_details=true", { body: {
-    iid: 12,
-    web_url: "https://gitlab.example.test/group/project/-/merge_requests/12",
-    title: "[fix][app] Fix labels",
-    description: "",
-    draft: false,
-    state: "opened",
-    source_project_id: 7,
-    source_branch: "fix/51-labels",
-    target_project_id: 7,
-    target_branch: "develop",
-    sha: "b".repeat(40),
-    author: { id: 40, username: "author", name: "Author", state: "active" },
-    assignees: [],
-    reviewers: [],
-    labels: [],
-    squash: true,
-    should_remove_source_branch: true,
-    head_pipeline: { status: "success", sha: "c".repeat(40) },
-  } });
-
-  await assert.rejects(client(fake).getMergeRequest("7", 12), (error: unknown) =>
-    typeof error === "object" && error !== null && "code" in error && error.code === "GITLAB_ERROR");
+test("MR reads treat missing, stale, or malformed pipeline data as unavailable without extra queries", async (t) => {
+  const headSha = "489e636b6718d75bcf50834aa8790983a5490c03";
+  const oldSha = "820cf43a4b2e54dd9a7306352819dac6bbee7105";
+  for (const [name, pipeline] of [
+    ["missing", undefined], ["null", null], ["array", []], ["scalar", 1],
+    ["missing SHA", { status: "success" }],
+    ["missing status", { sha: headSha }],
+    ["invalid status", { sha: headSha, status: 1 }],
+    ["unknown status", { sha: headSha, status: "unknown" }],
+    ["old successful pipeline", { sha: oldSha, status: "success" }],
+    ["old failed pipeline", { sha: oldSha, status: "failed" }],
+  ] as const) {
+    await t.test(name, async () => {
+      const fake = new FakeGitLab();
+      fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12?with_labels_details=true", {
+        body: mergeRequestBody({ sha: headSha, head_pipeline: pipeline }),
+      });
+      const result = await client(fake).getMergeRequestReceipt({ id: "7", fullPath: "group/project" }, 12);
+      assert.equal(result.value.sha, headSha);
+      assert.equal(result.value.pipelineStatus, "unavailable");
+      assert.deepEqual(fake.requests.map(request => request.method), ["GET"]);
+    });
+  }
 });
 
+test("only a current HEAD pipeline supplies its reported CI status", async (t) => {
+  for (const [status, expected] of [
+    ["success", "passed"], ["failed", "failed"],
+  ] as const) {
+    await t.test(status, async () => {
+      const fake = new FakeGitLab();
+      fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12?with_labels_details=true", {
+        body: mergeRequestBody({ head_pipeline: { sha: "b".repeat(40), status } }),
+      });
+      assert.equal((await client(fake).getMergeRequestReceipt({ id: "7", fullPath: "group/project" }, 12)).value.pipelineStatus, expected);
+      assert.equal(fake.requests.length, 1);
+    });
+  }
+});
+
+test("stale pipeline data does not prevent live applied-label hydration", async () => {
+  const fake = new FakeGitLab();
+  fake.enqueue("GET", "/api/v4/projects/7/merge_requests/12?with_labels_details=true", {
+    body: mergeRequestBody({ labels: ["status::review"], head_pipeline: { sha: "c".repeat(40), status: "success" } }),
+  });
+  enqueueAppliedLabelInventory(fake, [restLabel(3, "status::review")]);
+  const current = (await client(fake).getMergeRequestReceipt({ id: "7", fullPath: "group/project" }, 12)).value;
+  assert.equal(current.pipelineStatus, "unavailable");
+  assert.deepEqual(current.labels, [{ restId: 3, name: "status::review", archived: false }]);
+  assert.equal(fake.requests.some(request => new URL(request.url).pathname.includes("/pipelines")), false);
+});
 test("rejects an applied label ID repeated with conflicting names", async () => {
   const fake = new FakeGitLab();
   fake.enqueue("GET", "/api/v4/projects/group%2Fproject", { body: {
