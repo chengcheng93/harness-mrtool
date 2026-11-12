@@ -131,7 +131,7 @@ export function createAuthCheckCommandHandlers(options: AuthCheckOptions): CliCo
         throw authorizationError("gitlab.scope", "token-inactive", "The GitLab API token is inactive or revoked");
       }
       if (token.user_id !== undefined && positiveId(token.user_id) !== userId) throw responseError();
-      if (!Array.isArray(token.scopes) || token.scopes.some(scope => typeof scope !== "string" || !/^[a-z_]{1,64}$/u.test(scope))) throw responseError();
+      if (!Array.isArray(token.scopes) || token.scopes.some(scope => typeof scope !== "string" || !/^[a-z0-9_]{1,64}$/u.test(scope))) throw responseError();
       const scopes = token.scopes as string[];
       if (!scopes.includes("api")) {
         throw authorizationError("gitlab.scope", "api-scope-missing", "The GitLab token does not have the api scope required for MR operations");

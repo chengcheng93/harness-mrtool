@@ -88,6 +88,55 @@ test("repository auth check verifies Developer permission without inspecting bra
   assert.deepEqual(f.requests.map(r => r.method), ["GET", "GET", "GET"]);
 });
 
+for (const projectSelected of [false, true]) {
+  test(`auth check accepts api plus k8s_proxy for ${projectSelected ? "a project" : "an instance"} without writes`, async () => {
+    const scopes = ["api", "read_api", "k8s_proxy"];
+    const f = fixture({ "/api/v4/personal_access_tokens/self": { data: { ...token, scopes } } });
+    const result = await run(["auth", "check", ...(projectSelected ? [] : ["--host", origin])], {
+      authCheck: { environment, transport: f.transport, inspectRemote: remote },
+    });
+    assert.equal(result.code, 0);
+    assert.equal(result.output.ok, true);
+    assert.deepEqual(result.output.data.apiScope, { status: "verified", scopes, expiresAt: token.expires_at });
+    assert.equal((result.output.data.project as JsonObject).status, projectSelected ? "verified" : "not-checked");
+    assert.deepEqual(f.requests.map(r => r.method), projectSelected ? ["GET", "GET", "GET"] : ["GET", "GET"]);
+    assert.deepEqual(result.output.remoteWrite, { state: "not-attempted", operations: [] });
+  });
+}
+
+test("k8s_proxy does not replace the required api scope", async () => {
+  const f = fixture({ "/api/v4/personal_access_tokens/self": { data: { ...token, scopes: ["k8s_proxy", "read_api"] } } });
+  const result = await run(["auth", "check"], { authCheck: { environment, transport: f.transport, inspectRemote: remote } });
+  assert.equal(result.output.code, "AUTH_ERROR");
+  assert.equal(result.output.error.actual, "api-scope-missing");
+  assert.deepEqual(f.requests.map(r => r.method), ["GET", "GET"]);
+  assert.deepEqual(result.output.remoteWrite, { state: "not-attempted", operations: [] });
+});
+
+test("auth check still rejects malformed scope metadata without reflecting it or checking the project", async () => {
+  for (const scopes of [null, "api", ["api", 8], ["api", ""], ["api", "a".repeat(65)],
+    ["api", "K8S_PROXY"], ["api", "k8s-proxy"], ["api", "k8s_proxy\n"], ["api", secret]]) {
+    const f = fixture({ "/api/v4/personal_access_tokens/self": { data: { ...token, scopes } } });
+    const result = await run(["auth", "check"], { authCheck: { environment, transport: f.transport, inspectRemote: remote } });
+    assert.equal(result.output.code, "GITLAB_ERROR");
+    assert.equal(result.output.error.actual, "invalid authorization response");
+    assert.deepEqual(f.requests.map(r => r.method), ["GET", "GET"]);
+    assert.deepEqual(result.output.remoteWrite, { state: "not-attempted", operations: [] });
+  }
+});
+
+test("numeric scope compatibility does not reflect a credential with valid scope characters", async () => {
+  const reflectedCredential = "credential_with_digit8";
+  const f = fixture({ "/api/v4/personal_access_tokens/self": { data: { ...token, scopes: ["api", reflectedCredential] } } });
+  const result = await run(["auth", "check", "--host", origin], { authCheck: {
+    environment: { ...environment, HARNESS_MRTOOL_GITLAB_TOKEN: reflectedCredential }, transport: f.transport,
+  } });
+  assert.equal(result.output.code, "GITLAB_ERROR");
+  assert.equal(JSON.stringify(result.output).includes(reflectedCredential), false);
+  assert.deepEqual(f.requests.map(r => r.method), ["GET", "GET"]);
+  assert.deepEqual(result.output.remoteWrite, { state: "not-attempted", operations: [] });
+});
+
 test("outside a repository auth check can use the existing scoped host while ambiguous remotes are not hidden", async () => {
   const absent = new ToolError("REPOSITORY_ERROR", "No repository", { field: "repository root", expected: "repository", actual: "git exit 128", safeNextStep: "Select a repository." });
   const f = fixture();
