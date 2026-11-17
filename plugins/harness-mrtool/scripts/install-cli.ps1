@@ -86,14 +86,13 @@ function Open-VerifiedArchive { param([string]$Path, [string]$ExpectedHash)
   } finally { $hash.Dispose() }
 }
 function New-ZipArchiveReader { param([IO.Stream]$Stream)
-  foreach ($assemblyName in @('System.IO.Compression', 'System.IO.Compression.FileSystem')) {
-    try { Add-Type -AssemblyName $assemblyName -ErrorAction Stop } catch { }
-  }
-  $zipType = [Type]::GetType('System.IO.Compression.ZipArchive, System.IO.Compression', $false)
-  if ($null -eq $zipType) { $zipType = [Type]::GetType('System.IO.Compression.ZipArchive, System.IO.Compression.FileSystem', $false) }
-  $modeType = [Type]::GetType('System.IO.Compression.ZipArchiveMode, System.IO.Compression', $false)
-  if ($null -eq $modeType) { $modeType = [Type]::GetType('System.IO.Compression.ZipArchiveMode, System.IO.Compression.FileSystem', $false) }
-  if ($null -eq $zipType -or $null -eq $modeType) { Fail-Safe 'The .NET ZIP archive runtime is unavailable.' }
+  try {
+    Add-Type -AssemblyName System.IO.Compression -ErrorAction Stop
+    # PowerShell resolves loaded framework types; Type.GetType with a partial
+    # assembly name does not resolve this assembly on Windows PowerShell 5.1.
+    $zipType = [System.IO.Compression.ZipArchive]
+    $modeType = [System.IO.Compression.ZipArchiveMode]
+  } catch { Fail-Safe 'The .NET ZIP archive runtime is unavailable.' }
   try {
     $readMode = [Enum]::Parse($modeType, 'Read')
     return [Activator]::CreateInstance($zipType, [object[]]@($Stream, $readMode, $true))

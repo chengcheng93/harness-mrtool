@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import {createHash} from "node:crypto";
 import {execFile} from "node:child_process";
-import {chmod, lstat, mkdir, mkdtemp, readFile, rm, writeFile} from "node:fs/promises";
+import {chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {basename, dirname, resolve} from "node:path";
 import test from "node:test";
@@ -40,7 +40,18 @@ async function fixture(t: test.TestContext, mutation: string | null = null) {
   t.after(async () => {
     assert.equal(dirname(root), parent);
     assert.ok(basename(root).startsWith("mrtool-initial-enrollment-"));
-    await chmod(root, 0o700).catch(() => undefined);
+    const pending = [root];
+    while (pending.length > 0) {
+      const current = pending.pop()!;
+      const info = await lstat(current);
+      if (info.isSymbolicLink()) continue;
+      if (info.isDirectory()) {
+        await chmod(current, 0o700);
+        for (const entry of await readdir(current)) pending.push(resolve(current, entry));
+      } else {
+        await chmod(current, 0o600).catch(() => undefined);
+      }
+    }
     await rm(root, {recursive: true, force: true, maxRetries: 3});
   });
   const stateDirectory = resolve(root, "state");

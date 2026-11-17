@@ -7,7 +7,7 @@ description: Use when installing or initializing harness-mrtool GitLab authoriza
 
 The CLI is the authority for schemas, profiles, candidate identity, labels,
 rendering and GitLab writes. Do not invent IDs, labels or template fields.
-Skill version: 0.1.15; protocol: 1. Keep this invocation's loaded version/protocol fixed.
+Skill version: 0.1.16; protocol: 1. Keep this invocation's loaded version/protocol fixed.
 For installation/auth initialization, non-Windows direct CLI, explicit preview,
 or historical MRs, read [workflows](references/workflows.md) on demand.
 Initialize missing GitLab API authorization immediately; never collect tokens in chat/argv/repo.

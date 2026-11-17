@@ -28,8 +28,12 @@ test("GitLab initialization assets stay synchronized and run after binary public
   const install = await readFile(join(root, "scripts/install.ps1"), "utf8");
   assert.equal(setup, await readFile(join(root, "plugins/harness-mrtool/scripts/setup-gitlab.ps1"), "utf8"));
   assert.equal(install, await readFile(join(root, "plugins/harness-mrtool/scripts/install-cli.ps1"), "utf8"));
-  const embedded = install.split("# BEGIN EMBEDDED GITLAB SETUP\n& {\n")[1]?.split("\n} -Executable")[0];
-  assert.equal(embedded, setup, "standalone installer embeds the same safe configuration flow");
+  for (const newline of ["\n", "\r\n"]) {
+    const installerText = install.replace(/\r?\n/gu, newline);
+    const setupText = setup.replace(/\r?\n/gu, newline);
+    const embedded = installerText.split(/# BEGIN EMBEDDED GITLAB SETUP\r?\n& \{\r?\n/u)[1]?.split(/\r?\n\} -Executable/u)[0];
+    assert.equal(embedded, setupText, "standalone installer embeds the same safe configuration flow");
+  }
   assert.ok(install.indexOf("# BEGIN EMBEDDED GITLAB SETUP") > install.indexOf("} finally { if ($null -ne $lock)"));
   assert.match(install, /\$SetupOnly/u);
   assert.match(setup, /Read-Host 'GitLab API token \(hidden\)' -AsSecureString/u);
