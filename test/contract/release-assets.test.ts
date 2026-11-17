@@ -123,8 +123,8 @@ test("component and channel workflows refuse unsigned or unverified publication"
   assert.match(channelVerifier, /manifest\.components\.cli\.tag/u);
   assert.match(channelVerifier, /manifest\.components\.templates\.tag/u);
   assert.match(channelVerifier, /manifest\.components\.skill\.tag/u);
-  assert.match(channelVerifier, /manifest\.releaseSet\.cli/u);
-  assert.match(channelVerifier, /manifest\.releaseSet\.templates/u);
+  // Signed-manifest validation binds version-valued releaseSet fields; this gate binds selected tags.
+  assert.match(channelVerifier, /assertChannelReleaseTags\(manifest, \{ cliTag, templateTag, skillTag \}\)/u);
   assert.match(channel, /--draft/u);
   assert.match(template, /attestations:\s*write/u);
   assert.match(skill, /attestations:\s*write/u);

@@ -1,6 +1,6 @@
 {
   "name": "harness-mrtool",
-  "version": "0.1.14",
+  "version": "0.1.15",
   "description": "Deterministic GitLab merge request workflows for Codex.",
   "author": {
     "name": "chengcheng93",
