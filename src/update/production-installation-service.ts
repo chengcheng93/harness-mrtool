@@ -349,13 +349,13 @@ export function createProductionInstallationService(options: ProductionInstallat
     await currentInstalled(lease);
   }
 
-  async function currentInstalled(lease: ProcessLockLease): Promise<{
+  async function currentInstalled(lease: ProcessLockLease, providedActive?: StoredReleaseSet): Promise<{
     readonly active: StoredReleaseSet;
     readonly observed: InstalledReleaseObservation;
     readonly executable: AnchoredMoveFileIdentity;
     readonly marker: AnchoredMoveFileIdentity;
   }> {
-    const active = await cache.loadLastKnownGoodOrNull({}, lease);
+    const active = providedActive ?? await cache.loadLastKnownGoodOrNull({}, lease);
     if (active === null) throw failure("no-authenticated-active-release", "UPDATE_REQUIRED");
     if (active.writesBlocked) throw failure(`active-release-blocked:${active.writeBlockReasons.join(",")}`);
     const observed = await verifyInstalledRelease(active, {stateDirectory, installationDirectory, platform, ...(trustConfig === undefined ? {} : {trustConfig})}, lease);
@@ -372,9 +372,22 @@ export function createProductionInstallationService(options: ProductionInstallat
     return withUpdateLock(stateDirectory, async lease => {
       const store = createInstallationJournalStore(stateDirectory, {lease, ...(options.windowsAclVerifier === undefined ? {} : {windowsAclVerifier: options.windowsAclVerifier})});
       await recoverTerminal(lease, store);
-      const current = await currentInstalled(lease);
-      const previous = current.active;
       const candidateAuth = await authenticateReleaseSnapshot(candidate.snapshot, {platform, ...(trustConfig === undefined ? {} : {trustConfig})});
+      const active = await cache.loadLastKnownGoodOrNull({}, lease);
+      if (active === null) {
+        if (operation !== "apply") throw failure("no-authenticated-active-release", "UPDATE_REQUIRED");
+        // First enrollment trusts signed candidate bytes, never an installer marker alone.
+        await verifyInstalledRelease(candidate.snapshot, {stateDirectory, installationDirectory, platform, ...(trustConfig === undefined ? {} : {trustConfig})}, lease);
+        const latest = await channel.check(false, lease);
+        if (!latest.latestVersionConfirmed || latest.verified.payloadSha256 !== candidateAuth.verified.payloadSha256) throw failure("candidate-channel-payload-changed", "CONCURRENT_UPDATE");
+        const staged = await cache.stageVerifiedReleaseSet(candidate.snapshot, lease);
+        const enrolled = await cache.commitStagedReleaseSet(staged.record, lease);
+        if (enrolled === null) throw failure("initial-cache-commit-missing");
+        const observed = await verifyInstalledRelease(enrolled, {stateDirectory, installationDirectory, platform, ...(trustConfig === undefined ? {} : {trustConfig})}, lease);
+        return Object.freeze({status: "unchanged" as const, active: enrolled.record, observed});
+      }
+      const current = await currentInstalled(lease, active);
+      const previous = current.active;
       if (candidate.snapshot.record.transactionId === previous.record.transactionId) {
         const observed = await verifyInstalledRelease(previous, {stateDirectory, installationDirectory, platform, ...(trustConfig === undefined ? {} : {trustConfig})}, lease);
         return Object.freeze({status: "unchanged" as const, active: previous.record, observed});

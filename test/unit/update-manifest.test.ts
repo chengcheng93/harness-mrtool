@@ -1103,10 +1103,23 @@ test("ordinary transient failure returns unavailable without retry or leaking tr
   assert.equal(transport.requests.length, 1);
 });
 
-test("channel HTTP rejects redirects, invalid validators, unexpected status and oversized bodies", async () => {
+for (const status of [400, 401, 403, 404, 410, 418]) {
+  test(`channel source HTTP ${status} is unavailable without retrying or exposing its body`, async () => {
+    const transport = new FakeChannelTransport([channelResponse(status,
+      new TextEncoder().encode("<html>private-source-canary</html>"), { etag: '"untrusted"' })]);
+    const result = await checkStableChannel({
+      url: "https://example-owner.github.io/harness-mrtool/stable.envelope.json",
+      transport, validators: { etag: null, lastModified: null }, force: true,
+    });
+    assert.deepEqual(result, { kind: "unavailable", reason: "http", status, attempts: 1 });
+    assert.equal(transport.requests.length, 1);
+    assert.doesNotMatch(JSON.stringify(result), /private-source-canary|untrusted/u);
+  });
+}
+
+test("channel HTTP rejects redirects, invalid validators and oversized bodies", async () => {
   for (const response of [
     channelResponse(302),
-    channelResponse(404),
     channelResponse(200, new Uint8Array(MAX_SIGNED_ENVELOPE_BYTES + 1)),
     channelResponse(200, new Uint8Array([1]), { etag: "bad\r\nheader" }),
     channelResponse(304, new Uint8Array([1])),

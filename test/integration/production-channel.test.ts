@@ -148,7 +148,36 @@ test("unavailability without an accepted envelope is a typed failure, not latest
   await assert.rejects(access(f.store.statePath), { code: "ENOENT" });
 });
 
-for (const attack of ["invalid", "unsigned", "zero-signature", "wrong-key", "wrong-repository", "rollback", "equivocation", "http-404"] as const) {
+test("HTTP source 404 without trusted cache reports the missing source instead of an invalid envelope", async (t) => {
+  const f = await fixture(t);
+  f.respond({ status: 404, headers: { etag: '"not-found"' }, body: Buffer.from("<html>private-source-canary</html>") });
+  await assert.rejects(f.client().check(false), (error: unknown) => {
+    assert.equal(isToolError(error, "UPDATE_REQUIRED"), true);
+    assert.match(String(error), /HTTP 404/u);
+    if (!isToolError(error, "UPDATE_REQUIRED")) return false;
+    assert.match(String(error.details.actual), /HTTP 404/u);
+    assert.doesNotMatch(JSON.stringify(error), /envelope is invalid|private-source-canary|not-found/u);
+    return true;
+  });
+  assert.equal(f.requests.length, 1);
+  await assert.rejects(access(f.store.statePath), { code: "ENOENT" });
+});
+
+test("HTTP source 404 returns only authenticated cache without claiming latest or saving error validators", async (t) => {
+  const f = await fixture(t);
+  await f.client().check(false);
+  const before = await f.stateBytes();
+  f.respond({ status: 404, headers: { etag: '"not-found"' }, body: Buffer.from("<html>not found</html>") });
+  const result = await f.client().check(false);
+  assert.equal(isVerifiedChannelManifest(result.verified), true);
+  assert.equal(result.verified.manifest.sequence, 42);
+  assert.equal(result.latestVersionConfirmed, false);
+  assert.equal(result.reachable, false);
+  assert.equal(await f.stateBytes(), before);
+  assert.equal(f.requests.length, 2);
+});
+
+for (const attack of ["invalid", "unsigned", "zero-signature", "wrong-key", "wrong-repository", "rollback", "equivocation"] as const) {
   test(`${attack} fails closed without overwriting accepted signed state`, async (t) => {
     const f = await fixture(t);
     f.respond({ status: 200, headers: { etag: '"channel-43"' }, body: Buffer.from(f.envelope({ sequence: 43 })) });
@@ -171,7 +200,6 @@ for (const attack of ["invalid", "unsigned", "zero-signature", "wrong-key", "wro
       case "wrong-repository": hostile = f.envelope({ sequence: 44, repository: { owner: "other-owner", name: "harness-mrtool" } }); break;
       case "rollback": hostile = f.envelope(); break;
       case "equivocation": hostile = f.envelope({ sequence: 43, issuedAt: "2026-09-17T00:00:00Z" }); break;
-      case "http-404": status = 404; hostile = "not found"; break;
     }
     f.respond({ status, headers: { etag: '"hostile"' }, body: Buffer.from(hostile) });
     await assert.rejects(f.client().check(false), securityError);

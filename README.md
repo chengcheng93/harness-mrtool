@@ -346,22 +346,23 @@ API 错误按输出的安全下一步处理；不得以网络、权限或凭据�
 `doctor` 的命令成功不代表所有诊断项通过，必须看 `data.checks`。
 `--offline` 不支持 live create/update/verify；`--no-update` 不代表跳过业务/签名/标签校验。
 
-## 自更新与发布候选的当前边界
+## 自更新与发布验收
 
-当前候选的 `self-update check` 已接入固定更新源、签名验证和持久化信任状态：
+`self-update check --output json` 从固定 stable 地址获取并验证签名元数据，只检查，不代表已安装。
 
 ```sh
 hmr self-update check --output json
 hmr self-update check --force --output json
 ```
 
-该命令只报告经过认证的候选元数据，**不会安装**。缓存回退会明确标记未确认最新版本；
-`--offline` / `--no-update` 与显式网络检查冲突时拒绝请求。固定源不可用或验签失败，
-不能改用任意 URL 或跳过签名。`apply`、`rollback`、正式平台安装和宿主激活仍在收尾，
-在完整验收完成前不要将候选文档视为“自动更新已可用”的承诺。
+`self-update apply --output json` 使用经过认证的候选；缓存回退会明确标记未确认最新版。
 
-发布工作流已增加版本一致性、Template/Skill 实际签名与归档内容校验；Mac ARM64
-原生打包和 CI 已纳入候选代码，但尚无对应正式安装包的发布/安装成功声明。
+从 0.1.10 的旧安装首次迁移时，先检查签名通道，再使用官方版本化安装器和对应归档 SHA-256 显式安装新版本。
+0.1.14 仅在已安装标记、归档与程序字节完全匹配当前签名候选时纳管该安装，供后续自更新使用。
+源不可用应报告 HTTP 状态；封装或签名错误仍严格拒绝，不改用任意更新 URL 或跳过验证。
+
+发布验收必须同时包含 Release 产物、签名 stable 通道、marketplace 引用和旧版迁移结果，
+见[升级发布完成检查](docs/verification/update-publication-check.md)。
 
 ## 10. 开发验证与更多文档
 

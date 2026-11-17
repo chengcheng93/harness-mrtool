@@ -185,6 +185,8 @@ and links an Issue. Do not substitute a web handoff or raw Git push options.
 
 ## Updates
 
+An older CLI with no authenticated active release needs one explicit migration using the versioned CLI installer and the approved Release tag/SHA-256. Verify the actual executable path and version afterwards; a successful update check alone is not an installation. The new CLI enrolls only installed bytes that exactly match its authenticated candidate.
+
 If the CLI is absent, use the verified CLI installer: `scripts/install.ps1` in
 the source distribution or `scripts/install-cli.ps1` in the plugin. The bundled
 Skill bootstrap manages Skill files only; it does not install the CLI or configure

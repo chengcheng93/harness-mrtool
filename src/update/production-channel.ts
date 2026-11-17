@@ -33,12 +33,18 @@ export interface ProductionChannelClient {
   readonly check: (force: boolean, lease?: ProcessLockLease) => Promise<ProductionChannelCheckResult>;
 }
 
-function noAcceptedChannel(): ToolError<"UPDATE_REQUIRED"> {
-  return new ToolError("UPDATE_REQUIRED", "No authenticated channel is available", {
+function noAcceptedChannel(status?: number): ToolError<"UPDATE_REQUIRED"> {
+  return new ToolError("UPDATE_REQUIRED", status === undefined
+    ? "No authenticated channel is available"
+    : `Official update channel is unavailable (HTTP ${status})`, {
     field: "update.channel",
     expected: "a signed channel response or a previously accepted signed envelope",
-    actual: "the channel is unavailable and no authenticated envelope is cached",
-    safeNextStep: "Retry the fixed official update channel when it is available.",
+    actual: status === undefined
+      ? "the channel is unavailable and no authenticated envelope is cached"
+      : `HTTP ${status}; no authenticated envelope is cached`,
+    safeNextStep: status === undefined
+      ? "Retry the fixed official update channel when it is available."
+      : "The publisher must restore the official signed update channel; retry when it is available.",
   });
 }
 
@@ -94,7 +100,7 @@ export function createProductionChannelClient(
         // return a stale snapshot, or treat persisted validators as a signature.
         const current = await persistent.load(lease);
         if (current === null || current.trustState.acceptedChannelEnvelope === null) {
-          throw noAcceptedChannel();
+          throw noAcceptedChannel(checked.reason === "http" ? checked.status : undefined);
         }
         return Object.freeze({
           verified: verifyCached(current),

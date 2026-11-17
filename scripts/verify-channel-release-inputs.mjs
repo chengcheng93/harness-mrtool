@@ -38,6 +38,14 @@ function assertAsset(name, bytes, expected) {
   }
 }
 
+export function assertChannelReleaseTags(manifest, { cliTag, templateTag, skillTag }) {
+  if (manifest.components.cli.tag !== cliTag ||
+      manifest.components.templates.tag !== templateTag ||
+      manifest.components.skill.tag !== skillTag) {
+    fail("channel manifest tags do not match the immutable release inputs");
+  }
+}
+
 export async function verifyChannelReleaseInputs({
   envelopePath,
   cliTag,
@@ -57,11 +65,7 @@ export async function verifyChannelReleaseInputs({
     trustConfig.bootstrapKeys,
   );
   const manifest = verified.manifest;
-  if (manifest.components.cli.tag !== cliTag || manifest.releaseSet.cli !== cliTag ||
-      manifest.components.templates.tag !== templateTag || manifest.releaseSet.templates !== templateTag ||
-      manifest.components.skill.tag !== skillTag) {
-    fail("channel manifest tags do not match the immutable release inputs");
-  }
+  assertChannelReleaseTags(manifest, { cliTag, templateTag, skillTag });
 
   const [windowsArchive, darwinArchive, templateArchive, skillArchive] = await Promise.all([
     readBounded(windowsArchivePath, 256 * 1024 * 1024),

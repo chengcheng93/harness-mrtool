@@ -66,6 +66,12 @@ export type StableChannelCheckResult =
       readonly attempts: number;
     }
   | {
+      readonly kind: "unavailable";
+      readonly reason: "http";
+      readonly status: number;
+      readonly attempts: number;
+    }
+  | {
       readonly kind: "security-anomaly";
       readonly reason: "invalid-response";
       readonly attempts: number;
@@ -312,6 +318,9 @@ export async function checkStableChannel(
         reason: response.status === 429 ? "rate-limited" : "server",
         attempts: attempt,
       };
+    }
+    if (response.status >= 400) {
+      return { kind: "unavailable", reason: "http", status: response.status, attempts: attempt };
     }
     const updatedValidators = nextValidators(currentValidators, response.headers);
     if (updatedValidators === null) {
